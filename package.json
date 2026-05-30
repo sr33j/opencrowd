@@ -14,7 +14,8 @@
     "build": "tsc -b packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli && chmod +x apps/cli/dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli",
-    "lint": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli"
+    "lint": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli",
+    "pack:check": "npm run build && npm pack --workspaces --dry-run"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

@@ -65,7 +65,7 @@ async function main(argv: string[]): Promise<void> {
       await modelsCommand(rest);
       return;
     case "mcp":
-      await startMcpServer({ workspaceRoot: process.cwd() });
+      await mcpCommand(rest);
       return;
     case "api":
       await apiCommand(rest);
@@ -426,6 +426,14 @@ async function apiCommand(args: string[]): Promise<void> {
   console.log(`OpenCrowd local API listening on ${server.url}`);
 }
 
+async function mcpCommand(args: string[]): Promise<void> {
+  const budgetArg = readOption(args, "--budget");
+  await startMcpServer({
+    workspaceRoot: process.cwd(),
+    budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg)
+  });
+}
+
 function printHelp(): void {
   console.log(`Usage:
   opencrowd
@@ -435,7 +443,7 @@ function printHelp(): void {
   opencrowd ledger show [--session <id>]
   opencrowd wallet init|status|address|balance|use <auto|local-evm|agentic-wallet>
   opencrowd models list|set <model>
-  opencrowd mcp
+  opencrowd mcp [--budget <usd>]
   opencrowd api --port <port>`);
 }
 

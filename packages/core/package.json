@@ -1,6 +1,7 @@
 {
   "name": "@opencrowd/core",
   "version": "0.1.0",
+  "description": "Core OpenCrowd runtime primitives for sessions, budgets, wallets, tools, and x402 calls.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,8 +11,31 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "keywords": [
+    "opencrowd",
+    "x402"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc -b",
+    "prepack": "npm run build",
     "test": "vitest run"
   },
   "dependencies": {

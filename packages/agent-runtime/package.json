@@ -1,6 +1,7 @@
 {
   "name": "@opencrowd/agent-runtime",
   "version": "0.1.0",
+  "description": "Agent loop runtime for OpenCrowd CLI and integrations.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,11 +11,35 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/agent-runtime"
+  },
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "keywords": [
+    "opencrowd",
+    "agent",
+    "x402"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@opencrowd/core": "0.1.0",
     "openai": "^4.103.0"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "prepack": "npm run build"
   }
 }

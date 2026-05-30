@@ -1,6 +1,7 @@
 {
   "name": "@opencrowd/local-api",
   "version": "0.1.0",
+  "description": "Localhost HTTP API integration for OpenCrowd tools.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -10,10 +11,34 @@
       "default": "./dist/index.js"
     }
   },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/local-api"
+  },
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "keywords": [
+    "opencrowd",
+    "local-api",
+    "x402"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
     "@opencrowd/core": "0.1.0"
   },
   "scripts": {
-    "build": "tsc -b"
+    "build": "tsc -b",
+    "prepack": "npm run build"
   }
 }

@@ -1,10 +1,32 @@
 {
   "name": "opencrowd",
   "version": "0.1.0",
+  "description": "Local-first OpenCrowd CLI, MCP server, and localhost API.",
   "type": "module",
   "bin": {
     "opencrowd": "dist/index.js"
   },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "apps/cli"
+  },
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "keywords": [
+    "opencrowd",
+    "cli",
+    "mcp",
+    "x402"
+  ],
   "dependencies": {
     "@opencrowd/agent-runtime": "0.1.0",
     "@opencrowd/core": "0.1.0",
@@ -12,6 +34,7 @@
     "@opencrowd/mcp": "0.1.0"
   },
   "scripts": {
-    "build": "tsc -b && chmod +x dist/index.js"
+    "build": "tsc -b && chmod +x dist/index.js",
+    "prepack": "npm run build"
   }
 }

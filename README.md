@@ -12,6 +12,37 @@ npm run build
 npm test
 ```
 
+## Install
+
+OpenCrowd is distributed as the `opencrowd` npm package. The package installs one binary, `opencrowd`, which includes the interactive CLI, one-shot commands, the MCP stdio server, and the localhost API.
+
+For a global install:
+
+```sh
+npm install -g opencrowd
+opencrowd --help
+```
+
+For one-off usage without a global install:
+
+```sh
+npx opencrowd --help
+npx opencrowd run --budget 1.00 "Find a service and summarize options"
+```
+
+The package is published from `apps/cli`; the workspace root stays private. The `opencrowd` package depends on the published workspace libraries `@opencrowd/core`, `@opencrowd/agent-runtime`, `@opencrowd/mcp`, and `@opencrowd/local-api`, so publish those scoped packages at the same version before publishing `opencrowd`.
+
+Release order:
+
+```sh
+npm run pack:check
+npm publish --workspace @opencrowd/core --access public
+npm publish --workspace @opencrowd/agent-runtime --access public
+npm publish --workspace @opencrowd/mcp --access public
+npm publish --workspace @opencrowd/local-api --access public
+npm publish --workspace opencrowd
+```
+
 Run the interactive CLI:
 
 ```sh
@@ -44,9 +75,33 @@ npm exec opencrowd -- run --session <session-id> "Follow up on the previous resu
 Start integrations:
 
 ```sh
-npm exec opencrowd -- mcp
+npm exec opencrowd -- mcp --budget 0
 npm exec opencrowd -- api --port 8787
 ```
+
+For an installed package, drop `npm exec`:
+
+```sh
+opencrowd mcp --budget 0
+opencrowd api --port 8787
+```
+
+MCP clients should launch OpenCrowd over stdio. For example:
+
+```json
+{
+  "mcpServers": {
+    "opencrowd": {
+      "command": "npx",
+      "args": ["opencrowd", "mcp", "--budget", "0"]
+    }
+  }
+}
+```
+
+If `opencrowd` is installed globally, use `"command": "opencrowd"` and `"args": ["mcp", "--budget", "0"]` instead. Increase the budget when the MCP session should be allowed to spend from the configured wallet.
+
+A curl installer is not required for the current Node-based distribution path because `npm install -g opencrowd` and `npx opencrowd` are the native package manager flows and keep dependency resolution, upgrades, and binary linking under npm. A future curl script should be a thin convenience wrapper around npm or a signed standalone binary only after release signing and update behavior are defined.
 
 ## Local State
 
