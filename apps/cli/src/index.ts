@@ -35,7 +35,7 @@ import {
   type ServiceCandidate,
   type SessionState
 } from "@opencrowd/core";
-import { buildSessionSummary, renderProgress, runAgentTask, type LlmMessage } from "@opencrowd/agent-runtime";
+import { buildSessionSummary, renderLedgerSummary, renderProgress, runAgentTask, type LlmMessage } from "@opencrowd/agent-runtime";
 import { startMcpServer } from "@opencrowd/mcp";
 import { startLocalApi } from "@opencrowd/local-api";
 
@@ -84,7 +84,8 @@ async function repl(): Promise<void> {
   const session = await createOpenCrowdSession({ workspaceRoot: process.cwd(), surface: "cli" });
   const rl = createInterface({ input, output });
   const state: { model?: string } = {};
-  console.log(`OpenCrowd session ${session.sessionId}`);
+  console.log(`OpenCrowd ${session.sessionId}`);
+  console.log(formatBudgetStatus(budgetStatus(session)));
   printReplHelp();
   try {
     if (!input.isTTY) {
@@ -133,7 +134,7 @@ async function handleReplLine(session: SessionState, state: { model?: string }, 
     }
     if (line.startsWith(":budget")) {
       await setSessionBudget(session, parseUsd(line.split(/\s+/)[1] ?? "0"));
-      console.log(JSON.stringify(budgetStatus(session), null, 2));
+      console.log(formatBudgetStatus(budgetStatus(session)));
       return false;
     }
     if (line === ":summary") {
@@ -165,18 +166,18 @@ async function replCommand(session: SessionState, state: { model?: string }, inp
       return true;
     case "budget":
       await setSessionBudget(session, parseUsd(rest[0] ?? "0"));
-      console.log(JSON.stringify(budgetStatus(session), null, 2));
+      console.log(formatBudgetStatus(budgetStatus(session)));
       return false;
     case "summary":
       console.log(await buildSessionSummary(session, "Interactive summary."));
       return false;
     case "model":
       if (!rest[0]) {
-        console.log(JSON.stringify({ model: state.model ?? (await loadConfig()).x402LlmModel }, null, 2));
+        console.log(`Model ${state.model ?? (await loadConfig()).x402LlmModel}`);
         return false;
       }
       state.model = rest[0];
-      console.log(JSON.stringify({ model: state.model }, null, 2));
+      console.log(`Model ${state.model}`);
       return false;
     case "run":
       await replRunCommand(session, state, rest);
@@ -367,36 +368,47 @@ async function ledgerCommand(args: string[], currentSession?: SessionState): Pro
     throw new Error("no local sessions found");
   }
   const rows = await readLedger(resolvedLedgerPath);
-  console.log(JSON.stringify(rows, null, 2));
+  if (currentSession && resolvedLedgerPath === currentSession.ledgerPath) {
+    console.log(await renderLedgerSummary(currentSession));
+    return;
+  }
+  const sessionId = explicitSessionId ?? fallbackSessionId;
+  if (sessionId) {
+    console.log(await renderLedgerSummary(await loadSession(process.cwd(), sessionId)));
+    return;
+  }
+  console.log(formatLedgerRows(rows));
 }
 
 async function walletCommand(args: string[]): Promise<void> {
   const [action, subaction, value] = args;
   if (action === "init") {
-    console.log(JSON.stringify(await walletInit(), null, 2));
+    console.log(formatWalletInit(await walletInit()));
     return;
   }
   if (action === "status") {
-    console.log(JSON.stringify(await walletStatus(), null, 2));
+    console.log(formatWalletStatus(await walletStatus()));
     return;
   }
   if (action === "address") {
-    console.log(JSON.stringify(await walletAddress(), null, 2));
+    console.log(formatWalletAddress(await walletAddress()));
     return;
   }
   if (action === "balance") {
-    console.log(JSON.stringify(await walletBalance(), null, 2));
+    console.log(formatWalletBalance(await walletBalance()));
     return;
   }
   if (action === "use" && subaction) {
     if (!["auto", "local-evm", "agentic-wallet"].includes(subaction)) {
       throw new Error("wallet use supports auto, local-evm, agentic-wallet");
     }
-    console.log(JSON.stringify(await setActivePaymentWallet(subaction as "auto" | "local-evm" | "agentic-wallet"), null, 2));
+    const updated = await setActivePaymentWallet(subaction as "auto" | "local-evm" | "agentic-wallet");
+    console.log(`Wallet ${updated.wallet}`);
     return;
   }
   if (action === "account" && subaction === "set" && value) {
-    console.log(JSON.stringify(await setWalletAccount(value), null, 2));
+    const updated = await setWalletAccount(value);
+    console.log(`Wallet account ${updated.account}`);
     return;
   }
   throw new Error("wallet supports init, status, address, balance, use <auto|local-evm|agentic-wallet>");
@@ -406,15 +418,16 @@ async function modelsCommand(args: string[]): Promise<void> {
   const [action, value] = args;
   if (action === "list") {
     const models = await listLlmModels();
-    console.log(JSON.stringify(models.map((model) => ({
+    console.log(formatModels(models.map((model) => ({
       id: model.id,
       name: model.name,
       max_cost_cents: model.max_cost_cents
-    })), null, 2));
+    }))));
     return;
   }
   if (action === "set" && value) {
-    console.log(JSON.stringify(await setPreferredLlmModel(value), null, 2));
+    const updated = await setPreferredLlmModel(value);
+    console.log(`Model ${updated.model}`);
     return;
   }
   throw new Error("models supports list, set <model>");
@@ -437,6 +450,130 @@ function printHelp(): void {
   opencrowd models list|set <model>
   opencrowd mcp
   opencrowd api --port <port>`);
+}
+
+function formatBudgetStatus(value: unknown): string {
+  const status = objectValue(value) ?? {};
+  return [
+    `Budget ${formatCents(Number(status.budget_cents ?? 0))} | remaining ${formatCents(Number(status.remaining_cents ?? 0))} | spent ${formatCents(Number(status.spent_cents ?? 0))}`,
+    `Mode ${String(status.permission_mode ?? "unknown")}`
+  ].join("\n");
+}
+
+function formatWalletInit(result: Record<string, unknown>): string {
+  const wallet = objectValue(result.active_wallet);
+  const address = objectValue(wallet?.address);
+  const funding = Array.isArray(result.funding_instructions) ? result.funding_instructions.map(String) : [];
+  const next = Array.isArray(result.next_steps) ? result.next_steps.map(String) : [];
+  const lines = [
+    "Wallet ready",
+    `Selected ${String(result.selected_wallet ?? "agentic-wallet")}`,
+    address?.address ? `Address ${String(address.address)}` : "Address pending",
+    `Network ${String(address?.network ?? result.network ?? "base")} | asset ${String(address?.asset ?? result.asset ?? "USDC")}`
+  ];
+  if (funding.length > 0) {
+    lines.push("", "Fund this wallet:", ...funding.map((item) => `- ${item}`));
+  }
+  if (next.length > 0) {
+    lines.push("", "Next:", ...next.map((item) => `- ${item}`));
+  }
+  return lines.join("\n");
+}
+
+function formatWalletStatus(status: Record<string, unknown>): string {
+  const active = objectValue(status.active_wallet);
+  const address = objectValue(active?.address);
+  const balance = objectValue(active?.balance);
+  const lines = [
+    status.configured ? "Wallet configured" : "Wallet needs setup",
+    `Selected ${String(status.selected_wallet ?? "auto")}`
+  ];
+  if (address?.address) {
+    lines.push(`Address ${String(address.address)}`);
+    lines.push(`Network ${String(address.network ?? "base")} | asset ${String(address.asset ?? "USDC")}`);
+  }
+  if (balance?.spendable_balance !== undefined) {
+    lines.push(`Spendable ${String(balance.spendable_balance)} ${String(balance.asset ?? "USDC")}`);
+  }
+  const warning = String(status.local_private_key_warning ?? "");
+  if (warning) {
+    lines.push("", warning);
+  }
+  return lines.join("\n");
+}
+
+function formatWalletAddress(value: unknown): string {
+  const address = objectValue(value) ?? {};
+  return [
+    `Address ${String(address.address ?? "unknown")}`,
+    `Network ${String(address.network ?? "base")} | asset ${String(address.asset ?? "USDC")} | wallet ${String(address.account ?? "unknown")}`
+  ].join("\n");
+}
+
+function formatWalletBalance(value: unknown): string {
+  const balance = objectValue(value) ?? {};
+  const lines = [
+    `Spendable ${String(balance.spendable_balance ?? "0")} ${String(balance.asset ?? "USDC")}`,
+    `Wallet ${String(balance.account ?? "unknown")} | network ${String(balance.network ?? "base")}`
+  ];
+  if (balance.address) {
+    lines.push(`Address ${String(balance.address)}`);
+  }
+  if (balance.onchain_balance !== undefined) {
+    lines.push(`On-chain ${String(balance.onchain_balance)} ${String(balance.asset ?? "USDC")}`);
+  }
+  if (balance.x402_credit_balance !== undefined) {
+    lines.push(`x402 credit ${String(balance.x402_credit_balance)} USD`);
+  }
+  return lines.join("\n");
+}
+
+function formatLedgerRows(rows: Record<string, string>[]): string {
+  if (rows.length === 0) {
+    return "Ledger is empty.";
+  }
+  const table = rows.slice(-12).map((row) => [
+    shortTime(row.timestamp),
+    truncate(`${row.type}${row.status ? `/${row.status}` : ""}`, 18),
+    truncate(row.model || row.resource_url || row.endpoint || row.artifact_path || row.notes || "-", 48),
+    formatCents(Number(row.charged_cost_cents || 0))
+  ]);
+  return `Recent ledger:\n${formatTable(["time", "kind", "subject", "cost"], table)}`;
+}
+
+function formatModels(models: Array<{ id: string; name?: string; max_cost_cents?: number }>): string {
+  if (models.length === 0) {
+    return "No models returned.";
+  }
+  return formatTable(["model", "name", "max"], models.map((model) => [
+    truncate(model.id, 36),
+    truncate(model.name ?? "-", 32),
+    model.max_cost_cents === undefined ? "-" : formatCents(model.max_cost_cents)
+  ]));
+}
+
+function formatTable(headers: string[], rows: string[][]): string {
+  const widths = headers.map((header, index) => Math.max(header.length, ...rows.map((row) => row[index].length)));
+  const rowText = (row: string[]): string => row.map((cell, index) => cell.padEnd(widths[index])).join("  ");
+  return [rowText(headers), rowText(widths.map((width) => "-".repeat(width))), ...rows.map(rowText)].join("\n");
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function shortTime(value: string | undefined): string {
+  const date = value ? new Date(value) : undefined;
+  return date && !Number.isNaN(date.getTime()) ? date.toISOString().slice(11, 19) : "--:--:--";
+}
+
+function truncate(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length <= maxLength ? normalized : `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatCents(cents: number): string {
+  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function formatServiceCandidate(candidate: ServiceCandidate): Record<string, unknown> {

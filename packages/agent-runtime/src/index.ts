@@ -339,7 +339,14 @@ export async function runAgentTask(session: SessionState, task: string, options:
       const budgetBeforeToolCall = budgetStatus(session);
       const result = await executeTool(call.name, call.arguments, { session, onProgress: options.onProgress });
       const budgetAfterToolCall = budgetStatus(session);
-      options.onProgress?.({ type: "tool_result", message: `Tool result: ${summarizeToolResult(call.name, result)}` });
+      options.onProgress?.({
+        type: "tool_result",
+        message: `Tool result: ${summarizeToolResult(call.name, result)}`,
+        data: {
+          budget_before: budgetBeforeToolCall,
+          budget_after: budgetAfterToolCall
+        }
+      });
       const toolMessage = {
         role: "tool",
         toolCallId: call.id,
@@ -453,12 +460,17 @@ export async function buildSessionSummary(session: SessionState, finalMessage: s
 }
 
 export function renderProgress(event: ProgressEvent): string {
-  return event.message;
+  const prefix = progressPrefix(event.type);
+  const text = limitLine(stripPrefix(event.message), 112);
+  const budget = event.data?.budget_after && typeof event.data.budget_after === "object"
+    ? renderBudgetDelta(event.data.budget_before, event.data.budget_after)
+    : undefined;
+  return budget ? `${prefix} ${text}\n  ${budget}` : `${prefix} ${text}`;
 }
 
 export async function renderLedgerSummary(session: SessionState): Promise<string> {
   const rows = await readLedger(session.ledgerPath);
-  return renderPurchaseSummary({
+  const summary = {
     final_message: "Ledger summary",
     budget: {
       budget_cents: session.budgetCents,
@@ -474,7 +486,8 @@ export async function renderLedgerSummary(session: SessionState): Promise<string
     service_calls: rows.filter((row) => row.type === "service_call"),
     purchases: rows.filter((row) => row.type === "service_call"),
     artifacts: rows.filter((row) => row.artifact_path).map((row) => row.artifact_path)
-  });
+  };
+  return `${renderPurchaseSummary(summary)}\n\n${renderLedgerRows(rows)}`;
 }
 
 function renderPurchaseSummary(summary: Record<string, unknown>): string {
@@ -490,12 +503,14 @@ function renderPurchaseSummary(summary: Record<string, unknown>): string {
   const lines = [
     String(summary.final_message ?? "Session complete."),
     "",
-    `Budget: ${formatCents(Number(budget?.budget_cents ?? 0))}`,
-    `LLM spend: ${formatCents(Number(budget?.llm_spend_cents ?? 0))}`,
-    `Venice top-ups: ${formatCents(Number(budget?.wallet_top_up_spend_cents ?? 0))}`,
-    `External service spend: ${formatCents(Number(budget?.external_service_spend_cents ?? 0))}`,
-    `Total spent: ${formatCents(Number(budget?.total_spent_cents ?? budget?.spent_cents ?? 0))}`,
-    `Remaining: ${formatCents(Number(budget?.remaining_cents ?? 0))}`,
+    renderBudgetCard({
+      budgetCents: Number(budget?.budget_cents ?? 0),
+      remainingCents: Number(budget?.remaining_cents ?? 0),
+      llmSpendCents: Number(budget?.llm_spend_cents ?? 0),
+      topUpSpendCents: Number(budget?.wallet_top_up_spend_cents ?? 0),
+      serviceSpendCents: Number(budget?.external_service_spend_cents ?? 0),
+      totalSpentCents: Number(budget?.total_spent_cents ?? budget?.spent_cents ?? 0)
+    }),
     "",
     "LLM calls:"
   ];
@@ -536,6 +551,123 @@ function renderPurchaseSummary(summary: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
+function renderBudgetCard(input: {
+  budgetCents: number;
+  remainingCents: number;
+  llmSpendCents: number;
+  topUpSpendCents: number;
+  serviceSpendCents: number;
+  totalSpentCents: number;
+}): string {
+  const spentPercent = input.budgetCents > 0
+    ? Math.min(100, Math.round((input.totalSpentCents / input.budgetCents) * 100))
+    : 0;
+  return [
+    `Budget ${formatCents(input.budgetCents)} | remaining ${formatCents(input.remainingCents)} | spent ${formatCents(input.totalSpentCents)} (${spentPercent}%)`,
+    `LLM ${formatCents(input.llmSpendCents)} | top-ups ${formatCents(input.topUpSpendCents)} | services ${formatCents(input.serviceSpendCents)}`
+  ].join("\n");
+}
+
+function renderLedgerRows(rows: Record<string, string>[]): string {
+  const interesting = rows.filter((row) => row.type !== "session").slice(-12);
+  const lines = ["Recent ledger:"];
+  if (interesting.length === 0) {
+    lines.push("- no spend or artifact rows yet");
+    return lines.join("\n");
+  }
+  const table = interesting.map((row) => ({
+    time: shortTime(row.timestamp),
+    kind: limitLine(`${row.type}${row.status ? `/${row.status}` : ""}`, 18),
+    subject: limitLine(row.model || row.resource_url || row.endpoint || row.artifact_path || row.notes || "-", 48),
+    cost: formatCents(Number(row.charged_cost_cents || 0))
+  }));
+  lines.push(formatTable(["time", "kind", "subject", "cost"], table.map((row) => [row.time, row.kind, row.subject, row.cost])));
+  return lines.join("\n");
+}
+
+function formatTable(headers: string[], rows: string[][]): string {
+  const widths = headers.map((header, index) => Math.max(header.length, ...rows.map((row) => row[index].length)));
+  const formatRow = (row: string[]): string => row.map((cell, index) => cell.padEnd(widths[index])).join("  ");
+  return [formatRow(headers), formatRow(widths.map((width) => "-".repeat(width))), ...rows.map(formatRow)].join("\n");
+}
+
+function shortTime(value: string | undefined): string {
+  if (!value) {
+    return "--:--:--";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "--:--:--";
+  }
+  return date.toISOString().slice(11, 19);
+}
+
+function progressPrefix(type: ProgressEvent["type"]): string {
+  switch (type) {
+    case "calling_llm":
+      return "LLM";
+    case "calling_tool":
+      return "Tool";
+    case "tool_result":
+      return "Done";
+    case "checking_budget":
+      return "Budget";
+    case "checking_permission":
+    case "requesting_permission":
+      return "Policy";
+    case "reserving_spend":
+      return "Reserve";
+    case "signing_with_ows":
+      return "Wallet";
+    case "calling_service":
+      return "Service";
+    case "saving_artifact":
+      return "Artifact";
+    case "running_shell":
+      return "Shell";
+    case "searching":
+    case "ranking":
+      return "Search";
+    case "complete":
+      return "Done";
+  }
+}
+
+function renderBudgetDelta(before: unknown, after: unknown): string | undefined {
+  if (!after || typeof after !== "object") {
+    return undefined;
+  }
+  const beforeRecord = before && typeof before === "object" ? before as Record<string, unknown> : {};
+  const afterRecord = after as Record<string, unknown>;
+  const beforeRemaining = centsField(beforeRecord.remaining_cents);
+  const afterRemaining = centsField(afterRecord.remaining_cents);
+  const afterSpent = centsField(afterRecord.spent_cents);
+  const budget = centsField(afterRecord.budget_cents);
+  const delta = beforeRemaining === undefined || afterRemaining === undefined ? undefined : beforeRemaining - afterRemaining;
+  return [
+    `budget ${formatCents(budget ?? 0)}`,
+    `remaining ${formatCents(afterRemaining ?? 0)}`,
+    `spent ${formatCents(afterSpent ?? 0)}`,
+    delta !== undefined && delta !== 0 ? `delta ${formatCents(delta)}` : undefined
+  ].filter(Boolean).join(" | ");
+}
+
+function centsField(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? Math.round(value) : undefined;
+}
+
+function stripPrefix(value: string): string {
+  return value.replace(/^(Tool call|Tool result):\s*/i, "");
+}
+
+function limitLine(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
 function toolDefinitions(): OpenAI.Chat.Completions.ChatCompletionTool[] {
   return OPEN_CROWD_TOOLS.map((tool) => ({
     type: "function",
@@ -550,29 +682,29 @@ function toolDefinitions(): OpenAI.Chat.Completions.ChatCompletionTool[] {
 function summarizeToolCall(call: LlmToolCall): string {
   switch (call.name) {
     case "search_services":
-      return `search_services query="${String(call.arguments.query ?? "")}"`;
+      return `searching services for "${limitLine(String(call.arguments.query ?? ""), 72)}"`;
     case "call_service":
-      return `call_service ${String(call.arguments.method ?? "POST")} ${String(call.arguments.resource_url ?? "")}`;
+      return `calling service ${String(call.arguments.method ?? "POST")} ${limitLine(String(call.arguments.resource_url ?? ""), 74)}`;
     case "request_service_permission":
-      return `request_service_permission ${String(call.arguments.resource_url ?? "")}`;
+      return `requesting permission for ${limitLine(String(call.arguments.resource_url ?? ""), 72)}`;
     case "complete_session":
-      return "complete_session";
+      return "finalizing session";
     default:
-      return `${call.name} ${compactJson(call.arguments, 180)}`;
+      return `${call.name} ${compactJson(call.arguments, 120)}`;
   }
 }
 
 function summarizeToolResult(name: ToolName, result: ToolResult): string {
   if (!result.ok) {
-    return `${name} failed: ${result.error}`;
+    return `${name} failed: ${limitLine(result.error ?? "unknown error", 88)}`;
   }
   if (name === "search_services" && Array.isArray(result.data)) {
     const first = result.data[0] as { title?: unknown; resource_url?: unknown; price_display?: unknown } | undefined;
-    return `search_services found ${result.data.length} candidate${result.data.length === 1 ? "" : "s"}${first ? `; top: ${String(first.title ?? first.resource_url)} (${String(first.price_display ?? "price unknown")})` : ""}`;
+    return `found ${result.data.length} service${result.data.length === 1 ? "" : "s"}${first ? `; top ${limitLine(String(first.title ?? first.resource_url), 48)} (${String(first.price_display ?? "price unknown")})` : ""}`;
   }
   if (name === "call_service" && result.data && typeof result.data === "object") {
     const data = result.data as { status?: unknown; charged_cost_cents?: unknown; artifact_path?: unknown };
-    return `call_service HTTP ${String(data.status ?? "unknown")}, charged ${formatCents(Number(data.charged_cost_cents ?? 0))}${data.artifact_path ? `, saved ${String(data.artifact_path)}` : ""}`;
+    return `HTTP ${String(data.status ?? "unknown")}; charged ${formatCents(Number(data.charged_cost_cents ?? 0))}${data.artifact_path ? `; saved ${limitLine(String(data.artifact_path), 48)}` : ""}`;
   }
   if (name === "get_budget_status" && result.data && typeof result.data === "object") {
     const data = result.data as { remaining_cents?: unknown };
@@ -580,9 +712,9 @@ function summarizeToolResult(name: ToolName, result: ToolResult): string {
   }
   if (name === "request_service_permission" && result.data && typeof result.data === "object") {
     const data = result.data as { resource_url?: unknown; mode?: unknown };
-    return `permission ${String(data.mode ?? "recorded")} for ${String(data.resource_url ?? "")}`;
+    return `permission ${String(data.mode ?? "recorded")} for ${limitLine(String(data.resource_url ?? ""), 64)}`;
   }
-  return `${name} ok: ${compactJson(result.data, 220)}`;
+  return `${name} ok: ${compactJson(result.data, 140)}`;
 }
 
 function compactJson(value: unknown, maxLength: number): string {
@@ -590,7 +722,7 @@ function compactJson(value: unknown, maxLength: number): string {
   if (!text) {
     return "";
   }
-  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+  return limitLine(text, maxLength);
 }
 
 function toOpenAiMessage(message: LlmMessage): OpenAI.Chat.Completions.ChatCompletionMessageParam {

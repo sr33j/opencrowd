@@ -30,6 +30,7 @@ import {
   updateConfig,
   walletAddress,
   walletBalance,
+  walletInit,
   runShell,
   type OpenCrowdConfig,
   type PaymentAdapter
@@ -362,6 +363,31 @@ describe("OWS wallet helpers", () => {
       spendable_balance: "12.34",
       spendable_balance_cents: 1234
     });
+  });
+
+  it("initializes Agentic Wallet funding without recommending private-key env setup", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    const script = join(root, "awal-init.sh");
+    await writeFile(script, [
+      "#!/bin/sh",
+      "case \"$*\" in",
+      "  *\"status\"*) echo '{\"auth\":{\"authenticated\":true}}' ;;",
+      "  *\"address\"*) echo '{\"address\":\"0xabc\",\"network\":\"base\",\"asset\":\"USDC\"}' ;;",
+      "  *\"balance\"*) echo '{\"address\":\"0xabc\",\"spendable_balance\":\"0\",\"spendable_balance_cents\":0,\"network\":\"base\",\"asset\":\"USDC\"}' ;;",
+      "  *) echo '{}' ;;",
+      "esac"
+    ].join("\n"), "utf8");
+    await chmod(script, 0o755);
+    await updateConfig({ paymentWallet: "auto", agenticWalletCommand: script, agenticWalletArgs: [] });
+
+    const initialized = await walletInit();
+
+    expect(initialized.selected_wallet).toBe("agentic-wallet");
+    expect(initialized.funding_instructions).toEqual(expect.arrayContaining([
+      "Send USDC on base to 0xabc."
+    ]));
+    expect(JSON.stringify(initialized)).not.toMatch(/WALLET_PRIVATE_KEY|private key in \.env/i);
   });
 
   it("auto tops up Venice credit below the configured threshold and records budget", async () => {

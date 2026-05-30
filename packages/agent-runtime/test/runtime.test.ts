@@ -2,8 +2,8 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSession, readLedger, updateConfig, type PaymentAdapter, type PaymentRequest } from "../../core/src/index.js";
-import { runAgentTask, X402LlmProvider, type LlmMessage, type LlmProvider, type LlmResponse } from "../src/index.js";
+import { appendLedgerEntry, createSession, readLedger, updateConfig, type PaymentAdapter, type PaymentRequest } from "../../core/src/index.js";
+import { renderLedgerSummary, renderProgress, runAgentTask, X402LlmProvider, type LlmMessage, type LlmProvider, type LlmResponse } from "../src/index.js";
 
 const tmpRoots: string[] = [];
 
@@ -217,6 +217,44 @@ describe("agent loop transcript", () => {
     expect(JSON.parse(toolMessage?.content ?? "{}")).toMatchObject({
       result: { ok: true, data: { remaining_cents: 50 } }
     });
+  });
+});
+
+describe("CLI rendering helpers", () => {
+  it("renders tool results with a pithy summary and budget state", () => {
+    const text = renderProgress({
+      type: "tool_result",
+      message: "Tool result: found 2 services; top Example Data (0.01 USDC)",
+      data: {
+        budget_before: { budget_cents: 100, spent_cents: 0, remaining_cents: 100 },
+        budget_after: { budget_cents: 100, spent_cents: 7, remaining_cents: 93 }
+      }
+    });
+
+    expect(text).toContain("Done found 2 services");
+    expect(text).toContain("budget $1.00 | remaining $0.93 | spent $0.07 | delta $0.07");
+    expect(text.split("\n")[0].length).toBeLessThanOrEqual(118);
+  });
+
+  it("renders a compact ledger summary table", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "yolo" });
+    await appendLedgerEntry(session.ledgerPath, {
+      session_id: session.sessionId,
+      type: "llm_call",
+      model: "openai-gpt-55",
+      charged_cost_cents: 4,
+      status: "charged",
+      permission_mode: "yolo"
+    });
+    session.spentCents = 4;
+
+    const summary = await renderLedgerSummary(session);
+
+    expect(summary).toContain("Budget $1.00 | remaining $0.96 | spent $0.04");
+    expect(summary).toContain("Recent ledger:");
+    expect(summary).toContain("llm_call/charged");
+    expect(summary).toContain("openai-gpt-55");
   });
 });
 

@@ -32,6 +32,8 @@ Find a service and summarize options
 
 CLI sessions persist follow-up context in `messages.jsonl`. When a session grows beyond half of the active model context window, OpenCrowd archives the older raw transcript under `context/` and keeps a compacted continuation message in the active context.
 
+`/wallet init` is the recommended wallet setup path. It selects the Agentic Wallet flow for new users, shows the active address, network, and asset, then prints concise funding instructions. Fund that address with Base USDC and run `/wallet balance` to verify spendable funds. Raw private keys in `.env` are treated as a legacy fallback, not the normal setup path.
+
 One-shot commands still work:
 
 ```sh
@@ -58,11 +60,11 @@ npm exec opencrowd -- api --port 8787
 - Conversation: `./sessions/<session-id>/messages.jsonl`
 - Compacted context archives: `./sessions/<session-id>/context/`
 
-For a local EVM wallet, `opencrowd wallet balance` reports the wallet's actual on-chain Base USDC balance as `spendable_balance` and includes Venice's linked x402 credit balance separately as `x402_credit_balance` when available.
+For a local EVM wallet fallback, `opencrowd wallet balance` reports the wallet's actual on-chain Base USDC balance as `spendable_balance` and includes Venice's linked x402 credit balance separately as `x402_credit_balance` when available.
 
 ## Wallet-Funded LLM Calls
 
-The first-party CLI agent uses an x402-paid, OpenAI-compatible LLM route by default. Users fund the active payment wallet externally with USDC on the configured network, choose a model from the provider model list, and set a local session budget for each run.
+The first-party CLI agent uses an x402-paid, OpenAI-compatible LLM route by default. Users initialize a payment wallet with `opencrowd wallet init`, fund the displayed address externally with USDC on the configured network, choose a model from the provider model list, and set a local session budget for each run.
 
 Default model selection is explicit. OpenCrowd starts with `gpt-5.5`; if the configured x402 LLM provider does not return that model, run `opencrowd models list` and choose an available model with `opencrowd models set <model>` or pass `opencrowd run --model <model> ...`.
 

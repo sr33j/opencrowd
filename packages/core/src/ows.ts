@@ -399,25 +399,53 @@ export async function activePaymentWallet(): Promise<PaymentWallet> {
 }
 
 export async function walletInit(): Promise<Record<string, unknown>> {
-  const config = await loadConfig();
-  const status = await runAgenticWalletJson(config, ["status", "--json"]);
+  let config = await loadConfig();
   const localWallet = await localVeniceWalletSummary();
-  const active = await activeWalletSummary().catch((error) => ({ error: (error as Error).message }));
+  if (config.paymentWallet === "auto") {
+    config = await updateConfig({ paymentWallet: "agentic-wallet" });
+  }
+  const status = await runAgenticWalletJson(config, ["status", "--json"]).catch((error) => ({
+    error: (error as Error).message,
+    auth: { authenticated: false }
+  }));
+  const authenticated = Boolean((status.auth as { authenticated?: unknown } | undefined)?.authenticated);
+  const explicitLocalWallet = config.paymentWallet === "local-evm" && Boolean(localWallet);
+  const active = authenticated || explicitLocalWallet
+    ? await activeWalletSummary().catch((error) => ({ error: (error as Error).message }))
+    : { error: "Authenticate Agentic Wallet to create and reveal a funding address." };
+  const address = walletAddressFromSummary(active);
+  const network = address?.network ?? config.x402PaymentNetwork;
+  const asset = address?.asset ?? config.x402PaymentAsset;
+  const fundingInstructions = address?.address
+    ? [
+      `Send ${asset} on ${network} to ${address.address}.`,
+      "Use Base USDC for the default x402 LLM and service payments.",
+      "Run `opencrowd wallet balance` after the transfer confirms."
+    ]
+    : [
+      "Run `npx awal auth login <email>` and complete the OTP verification.",
+      "Run `opencrowd wallet init` again to show the new funding address.",
+      `Fund the displayed address with ${asset} on ${network}.`
+    ];
   return {
     ok: true,
     selected_wallet: config.paymentWallet,
     active_wallet: active,
+    network,
+    asset,
     command: [config.agenticWalletCommand, ...config.agenticWalletArgs].join(" "),
     status,
     local_wallet: localWallet,
-    next_steps: (status.auth as { authenticated?: unknown } | undefined)?.authenticated
-      ? ["Run `opencrowd wallet balance` to verify spendable USDC."]
-      : localWallet?.canConsume
-        ? ["A local Venice x402 wallet is configured and spendable. Run `opencrowd wallet balance` to verify it."]
+    funding_instructions: fundingInstructions,
+    local_private_key_warning: localWallet
+      ? "A local private-key wallet was detected. It is supported as a legacy fallback; the recommended setup is Agentic Wallet via `opencrowd wallet init`."
+      : undefined,
+    next_steps: authenticated || explicitLocalWallet
+      ? ["Fund the address above, then run `opencrowd wallet balance`."]
       : [
-        "Sign in with `npx awal auth login <email>`.",
-        "Verify the OTP with `npx awal auth verify <flow-id> <6-digit-code>`.",
-        "Run `opencrowd wallet address` and fund it with USDC, or set WALLET_PRIVATE_KEY for local Venice x402 payments."
+        "Complete Agentic Wallet authentication with `npx awal auth login <email>`.",
+        "Verify the OTP with the command printed by Agentic Wallet.",
+        "Run `opencrowd wallet init` again to display the funding address."
       ]
   };
 }
@@ -433,7 +461,10 @@ export async function walletStatus(): Promise<Record<string, unknown>> {
     active_wallet: active,
     command: [config.agenticWalletCommand, ...config.agenticWalletArgs].join(" "),
     status,
-    local_wallet: localWallet
+    local_wallet: localWallet,
+    local_private_key_warning: localWallet
+      ? "A local private-key wallet was detected. It works, but new users should prefer `opencrowd wallet init` with Agentic Wallet funding."
+      : undefined
   };
 }
 
@@ -857,6 +888,26 @@ async function activeWalletSummary(): Promise<Record<string, unknown>> {
     kind: wallet.kind,
     address: await wallet.address(),
     balance: await wallet.balance()
+  };
+}
+
+function walletAddressFromSummary(summary: unknown): WalletAddress | undefined {
+  if (!summary || typeof summary !== "object" || Array.isArray(summary)) {
+    return undefined;
+  }
+  const address = (summary as Record<string, unknown>).address;
+  if (!address || typeof address !== "object" || Array.isArray(address)) {
+    return undefined;
+  }
+  const record = address as Record<string, unknown>;
+  if (typeof record.address !== "string") {
+    return undefined;
+  }
+  return {
+    account: stringValue(record.account) ?? "wallet",
+    address: record.address,
+    network: stringValue(record.network) ?? "base",
+    asset: stringValue(record.asset) ?? "USDC"
   };
 }
 
