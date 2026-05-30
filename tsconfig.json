@@ -1,0 +1,10 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./packages/core" },
+    { "path": "./packages/agent-runtime" },
+    { "path": "./packages/mcp" },
+    { "path": "./packages/local-api" },
+    { "path": "./apps/cli" }
+  ]
+}

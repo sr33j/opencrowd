@@ -1,0 +1,25 @@
+{
+  "name": "opencrowd-workspace",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "opencrowd": "apps/cli/dist/index.js"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli && chmod +x apps/cli/dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli",
+    "lint": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vitest": "^3.1.4"
+  }
+}

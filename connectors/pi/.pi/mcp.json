@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "opencrowd": {
+      "command": "opencrowd",
+      "args": ["mcp"],
+      "env": {
+        "OPENCROWD_BUDGET_CENTS": "100"
+      }
+    }
+  }
+}
