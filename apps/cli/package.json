@@ -1,0 +1,17 @@
+{
+  "name": "opencrowd",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "opencrowd": "dist/index.js"
+  },
+  "dependencies": {
+    "@opencrowd/agent-runtime": "0.1.0",
+    "@opencrowd/core": "0.1.0",
+    "@opencrowd/local-api": "0.1.0",
+    "@opencrowd/mcp": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -b && chmod +x dist/index.js"
+  }
+}

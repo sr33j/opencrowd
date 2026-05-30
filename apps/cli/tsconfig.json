@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "references": [
+    { "path": "../../packages/core" },
+    { "path": "../../packages/agent-runtime" },
+    { "path": "../../packages/mcp" },
+    { "path": "../../packages/local-api" }
+  ],
+  "include": ["src/**/*.ts"]
+}
