@@ -7,6 +7,8 @@ import {
   createMockToolExecutor,
   MOCK_X402_SERVICES,
   MockLlmProvider,
+  renderCompactPurchaseSummary,
+  renderProgress,
   runAgentTask,
   X402LlmProvider,
   type LlmMessage,
@@ -306,6 +308,38 @@ describe("mock test mode", () => {
       notes: "mock test mode service call"
     }));
     expect(session.spentCents).toBe(0);
+  });
+});
+
+describe("terminal rendering", () => {
+  it("renders pretty progress rows with truncation and color disabled", () => {
+    expect(renderProgress({
+      type: "calling_llm",
+      message: "Calling LLM provider (turn 3/100)"
+    }, { style: "pretty", width: 80, color: false })).toBe("* turn 3/100");
+
+    const toolRow = renderProgress({
+      type: "calling_tool",
+      message: "Tool call: call_service POST https://example.com/very/long/path/that/should/not/fill/the/terminal"
+    }, { style: "pretty", width: 48, color: false });
+
+    expect(toolRow).toMatch(/^  -> call_service POST ht/);
+    expect(toolRow).toContain("…");
+    expect(toolRow.length).toBeLessThanOrEqual(48);
+  });
+
+  it("renders compact purchase summaries without verbose sections", () => {
+    const output = renderCompactPurchaseSummary({
+      final_message: "Done.",
+      budget: {
+        total_spent_cents: 12,
+        remaining_cents: 88
+      },
+      service_calls: [{ charged_cost_cents: "7" }],
+      artifacts: ["sessions/demo/artifacts/result.json"]
+    });
+
+    expect(output).toBe("Done.\nsummary: spent $0.12, remaining $0.88, services 1, $0.07, artifacts 1");
   });
 });
 

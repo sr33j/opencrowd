@@ -773,11 +773,18 @@ export async function buildSessionSummary(
 
 export interface RenderProgressOptions {
   compact?: boolean;
+  style?: "plain" | "compact" | "pretty";
+  width?: number;
+  color?: boolean;
 }
 
 export function renderProgress(event: ProgressEvent, options: RenderProgressOptions = {}): string {
-  if (!options.compact) {
+  const style = options.style ?? (options.compact ? "compact" : "plain");
+  if (style === "plain") {
     return event.message;
+  }
+  if (style === "pretty") {
+    return renderPrettyProgress(event, options);
   }
   switch (event.type) {
     case "calling_llm":
@@ -799,11 +806,42 @@ export function renderProgress(event: ProgressEvent, options: RenderProgressOpti
   }
 }
 
+function renderPrettyProgress(event: ProgressEvent, options: RenderProgressOptions): string {
+  const color = options.color ?? false;
+  const accent = (value: string) => color ? `\x1b[36m${value}\x1b[0m` : value;
+  const muted = (value: string) => color ? `\x1b[2m${value}\x1b[0m` : value;
+  const ok = (value: string) => color ? `\x1b[32m${value}\x1b[0m` : value;
+  const width = Math.max(40, options.width ?? 100);
+  switch (event.type) {
+    case "calling_llm":
+      return `${accent("*")} ${event.message.replace(/^Calling LLM provider \(turn /, "turn ").replace(/\)$/, "")}`;
+    case "calling_tool":
+      return `  ${accent("->")} ${truncateMiddle(event.message.replace(/^Tool call: /, ""), width - 7)}`;
+    case "tool_result":
+      return `  ${ok("<-")} ${truncateMiddle(event.message.replace(/^Tool result: /, ""), width - 7)}`;
+    case "searching":
+    case "ranking":
+    case "checking_budget":
+    case "checking_permission":
+    case "requesting_permission":
+    case "reserving_spend":
+    case "signing_with_ows":
+    case "calling_service":
+    case "saving_artifact":
+    case "running_shell":
+      return `     ${muted(truncateMiddle(event.message, width - 5))}`;
+    case "complete":
+      return event.message;
+    default:
+      return "";
+  }
+}
+
 function renderAgentSummary(summary: Record<string, unknown>, options: AgentRunOptions): string {
   return options.compactOutput ? renderCompactPurchaseSummary(summary) : renderPurchaseSummary(summary);
 }
 
-function renderCompactPurchaseSummary(summary: Record<string, unknown>): string {
+export function renderCompactPurchaseSummary(summary: Record<string, unknown>): string {
   const budget = summary.budget as Record<string, unknown> | undefined;
   const purchases = Array.isArray(summary.service_calls)
     ? summary.service_calls as Record<string, string>[]
@@ -962,6 +1000,18 @@ function compactJson(value: unknown, maxLength: number): string {
     return "";
   }
   return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+function truncateMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  if (maxLength <= 1) {
+    return value.slice(0, maxLength);
+  }
+  const head = Math.ceil((maxLength - 1) / 2);
+  const tail = Math.floor((maxLength - 1) / 2);
+  return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
 }
 
 function toOpenAiMessage(message: LlmMessage): OpenAI.Chat.Completions.ChatCompletionMessageParam {
