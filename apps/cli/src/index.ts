@@ -35,7 +35,15 @@ import {
   type ServiceCandidate,
   type SessionState
 } from "@opencrowd/core";
-import { buildSessionSummary, renderProgress, runAgentTask, type LlmMessage } from "@opencrowd/agent-runtime";
+import {
+  buildSessionSummary,
+  createMockToolExecutor,
+  MockLlmProvider,
+  renderProgress,
+  runAgentTask,
+  type LlmMessage,
+  type ToolExecutor
+} from "@opencrowd/agent-runtime";
 import { startMcpServer } from "@opencrowd/mcp";
 import { startLocalApi } from "@opencrowd/local-api";
 
@@ -43,6 +51,17 @@ async function main(argv: string[]): Promise<void> {
   const [command, ...rest] = argv;
   if (!command) {
     await repl();
+    return;
+  }
+  if (command === "--test-mode") {
+    const extraArgs = rest.filter((arg, index) => !isConsumedOption(rest, index, ["--test-seed"]));
+    if (extraArgs.length > 0) {
+      throw new Error("top-level --test-mode launches the REPL; use `opencrowd run --test-mode \"task\"` for one-shot tasks");
+    }
+    await repl({
+      testMode: true,
+      testSeed: readOption(rest, "--test-seed")
+    });
     return;
   }
   switch (command) {
@@ -80,11 +99,22 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-async function repl(): Promise<void> {
-  const session = await createOpenCrowdSession({ workspaceRoot: process.cwd(), surface: "cli" });
+async function repl(options: { testMode?: boolean; testSeed?: string } = {}): Promise<void> {
+  const initialTestMode = options.testMode ?? envFlag("OPENCROWD_TEST_MODE");
+  const session = await createOpenCrowdSession({
+    workspaceRoot: process.cwd(),
+    surface: "cli",
+    useWalletBalanceBudget: !initialTestMode
+  });
   const rl = createInterface({ input, output });
-  const state: { model?: string } = {};
-  console.log(`OpenCrowd session ${session.sessionId}`);
+  const state: ReplState = {
+    testMode: initialTestMode,
+    testSeed: options.testSeed ?? process.env.OPENCROWD_TEST_SEED
+  };
+  if (state.testMode) {
+    ensureMockRuntime(state);
+  }
+  console.log(`OpenCrowd session ${session.sessionId}${state.testMode ? " (test mode)" : ""}`);
   printReplHelp();
   try {
     if (!input.isTTY) {
@@ -119,7 +149,7 @@ async function repl(): Promise<void> {
   }
 }
 
-async function handleReplLine(session: SessionState, state: { model?: string }, line: string): Promise<boolean> {
+async function handleReplLine(session: SessionState, state: ReplState, line: string): Promise<boolean> {
   if (!line) {
     return false;
   }
@@ -128,7 +158,7 @@ async function handleReplLine(session: SessionState, state: { model?: string }, 
       return await replCommand(session, state, line.slice(1));
     }
     if (line === ":quit" || line === ":exit") {
-      console.log(await buildSessionSummary(session, "Interactive session ended."));
+      console.log(await buildSessionSummary(session, "Interactive session ended.", { compact: state.testMode }));
       return true;
     }
     if (line.startsWith(":budget")) {
@@ -137,12 +167,16 @@ async function handleReplLine(session: SessionState, state: { model?: string }, 
       return false;
     }
     if (line === ":summary") {
-      console.log(await buildSessionSummary(session, "Interactive summary."));
+      console.log(await buildSessionSummary(session, "Interactive summary.", { compact: state.testMode }));
       return false;
     }
     console.log(await runPersistentAgentTask(session, line, {
       model: state.model,
-      onProgress: (event) => console.log(renderProgress(event))
+      testMode: state.testMode,
+      testSeed: state.testSeed,
+      mockProvider: state.mockProvider,
+      mockToolExecutor: state.mockToolExecutor,
+      onProgress: progressLogger(state.testMode)
     }));
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
@@ -150,7 +184,15 @@ async function handleReplLine(session: SessionState, state: { model?: string }, 
   return false;
 }
 
-async function replCommand(session: SessionState, state: { model?: string }, inputLine: string): Promise<boolean> {
+interface ReplState {
+  model?: string;
+  testMode: boolean;
+  testSeed?: string;
+  mockProvider?: MockLlmProvider;
+  mockToolExecutor?: ToolExecutor;
+}
+
+async function replCommand(session: SessionState, state: ReplState, inputLine: string): Promise<boolean> {
   const args = splitArgs(inputLine);
   const [command, ...rest] = args;
   switch (command) {
@@ -161,14 +203,14 @@ async function replCommand(session: SessionState, state: { model?: string }, inp
       return false;
     case "quit":
     case "exit":
-      console.log(await buildSessionSummary(session, "Interactive session ended."));
+      console.log(await buildSessionSummary(session, "Interactive session ended.", { compact: state.testMode }));
       return true;
     case "budget":
       await setSessionBudget(session, parseUsd(rest[0] ?? "0"));
       console.log(JSON.stringify(budgetStatus(session), null, 2));
       return false;
     case "summary":
-      console.log(await buildSessionSummary(session, "Interactive summary."));
+      console.log(await buildSessionSummary(session, "Interactive summary.", { compact: state.testMode }));
       return false;
     case "model":
       if (!rest[0]) {
@@ -177,6 +219,32 @@ async function replCommand(session: SessionState, state: { model?: string }, inp
       }
       state.model = rest[0];
       console.log(JSON.stringify({ model: state.model }, null, 2));
+      return false;
+    case "test-mode":
+      if (!rest[0]) {
+        console.log(JSON.stringify({ test_mode: state.testMode, test_seed: state.testSeed }, null, 2));
+        return false;
+      }
+      if (!["on", "off"].includes(rest[0])) {
+        throw new Error("/test-mode supports on or off");
+      }
+      state.testMode = rest[0] === "on";
+      if (state.testMode) {
+        ensureMockRuntime(state);
+      }
+      console.log(JSON.stringify({ test_mode: state.testMode, test_seed: state.testSeed }, null, 2));
+      return false;
+    case "test-seed":
+      if (!rest[0]) {
+        console.log(JSON.stringify({ test_seed: state.testSeed }, null, 2));
+        return false;
+      }
+      state.testSeed = rest[0];
+      if (state.testMode) {
+        state.mockProvider = new MockLlmProvider({ seed: state.testSeed });
+        state.mockToolExecutor ??= createMockToolExecutor();
+      }
+      console.log(JSON.stringify({ test_seed: state.testSeed }, null, 2));
       return false;
     case "run":
       await replRunCommand(session, state, rest);
@@ -206,28 +274,43 @@ async function replCommand(session: SessionState, state: { model?: string }, inp
   }
 }
 
-async function replRunCommand(session: SessionState, state: { model?: string }, args: string[]): Promise<void> {
+async function replRunCommand(session: SessionState, state: ReplState, args: string[]): Promise<void> {
   const budgetArg = readOption(args, "--budget");
   if (budgetArg !== undefined) {
     await setSessionBudget(session, parseUsd(budgetArg));
   }
   const model = readOption(args, "--model") ?? state.model;
-  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--model"])).join(" ");
+  const testMode = args.includes("--test-mode") || state.testMode;
+  const testSeed = readOption(args, "--test-seed") ?? state.testSeed;
+  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--model", "--test-seed"]) && arg !== "--test-mode").join(" ");
   if (!task) {
     throw new Error("/run requires a task string");
   }
   console.log(await runPersistentAgentTask(session, task, {
     model,
-    onProgress: (event) => console.log(renderProgress(event))
+    testMode,
+    testSeed,
+    mockProvider: testMode ? ensureMockRuntime(state).mockProvider : undefined,
+    mockToolExecutor: testMode ? ensureMockRuntime(state).mockToolExecutor : undefined,
+    onProgress: progressLogger(testMode)
   }));
 }
 
 async function runPersistentAgentTask(
   session: SessionState,
   task: string,
-  options: { model?: string; onProgress?: (event: ProgressEvent) => void } = {}
+  options: {
+    model?: string;
+    testMode?: boolean;
+    testSeed?: string;
+    mockProvider?: MockLlmProvider;
+    mockToolExecutor?: ToolExecutor;
+    onProgress?: (event: ProgressEvent) => void;
+  } = {}
 ): Promise<string> {
-  const contextWindowTokens = await resolveContextWindowTokens(options.model);
+  const contextWindowTokens = options.testMode
+    ? fallbackContextWindowTokens("mock-test-mode")
+    : await resolveContextWindowTokens(options.model);
   const compaction = await compactConversationIfNeeded(session, { contextWindowTokens });
   if (compaction.compacted) {
     options.onProgress?.({
@@ -238,7 +321,11 @@ async function runPersistentAgentTask(
   }
   const history = (compaction.compacted ? compaction.messages : await readConversationMessages(session)) as ConversationMessage[];
   return runAgentTask(session, task, {
-    ...options,
+    model: options.model,
+    onProgress: options.onProgress,
+    provider: options.testMode ? options.mockProvider ?? new MockLlmProvider({ seed: options.testSeed }) : undefined,
+    toolExecutor: options.testMode ? options.mockToolExecutor ?? createMockToolExecutor() : undefined,
+    compactOutput: options.testMode,
     history: history as LlmMessage[],
     onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
   });
@@ -256,6 +343,21 @@ async function resolveContextWindowTokens(model: string | undefined): Promise<nu
   }
 }
 
+function ensureMockRuntime(state: ReplState): ReplState {
+  state.mockProvider ??= new MockLlmProvider({ seed: state.testSeed });
+  state.mockToolExecutor ??= createMockToolExecutor();
+  return state;
+}
+
+function progressLogger(compact: boolean): (event: ProgressEvent) => void {
+  return (event) => {
+    const message = renderProgress(event, { compact });
+    if (message) {
+      console.log(message);
+    }
+  };
+}
+
 function printReplHelp(): void {
   console.log(`Type a task, or use slash commands:
   /budget <usd>
@@ -263,7 +365,9 @@ function printReplHelp(): void {
   /wallet use auto|local-evm|agentic-wallet
   /models list|set <model>
   /model <model>
-  /run [--budget <usd>] [--model <model>] "<task>"
+  /test-mode on|off
+  /test-seed <seed>
+  /run [--budget <usd>] [--model <model>] [--test-mode] [--test-seed <seed>] "<task>"
   /search "<query>"
   /permissions list|allow|remove|block
   /ledger show [--session <id>]
@@ -274,13 +378,18 @@ function printReplHelp(): void {
 async function runCommand(args: string[]): Promise<void> {
   const budgetArg = readOption(args, "--budget");
   const model = readOption(args, "--model");
+  const testMode = args.includes("--test-mode") || envFlag("OPENCROWD_TEST_MODE");
+  const testSeed = readOption(args, "--test-seed") ?? process.env.OPENCROWD_TEST_SEED;
   const mode = (readOption(args, "--mode") ?? "yolo") as PermissionMode;
   if (!["ask_first", "yolo", "blocked"].includes(mode)) {
     throw new Error("mode must be ask_first, yolo, or blocked");
   }
   const shellEnabled = args.includes("--enable-shell") ? true : args.includes("--disable-shell") ? false : undefined;
   const sessionId = readOption(args, "--session");
-  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--mode", "--model", "--session"]) && arg !== "--enable-shell" && arg !== "--disable-shell").join(" ");
+  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--mode", "--model", "--session", "--test-seed"])
+    && arg !== "--enable-shell"
+    && arg !== "--disable-shell"
+    && arg !== "--test-mode").join(" ");
   if (!task) {
     throw new Error("run requires a task string");
   }
@@ -288,10 +397,11 @@ async function runCommand(args: string[]): Promise<void> {
     ? await loadSession(process.cwd(), sessionId)
     : await createOpenCrowdSession({
       workspaceRoot: process.cwd(),
-      budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
+      budgetCents: budgetArg === undefined ? (testMode ? 0 : undefined) : parseUsd(budgetArg),
       permissionMode: mode,
       shellEnabled,
-      surface: "cli"
+      surface: "cli",
+      useWalletBalanceBudget: !testMode
     });
   if (sessionId) {
     if (budgetArg !== undefined) {
@@ -305,7 +415,9 @@ async function runCommand(args: string[]): Promise<void> {
   }
   const outputText = await runPersistentAgentTask(session, task, {
     model,
-    onProgress: (event) => console.log(renderProgress(event))
+    testMode,
+    testSeed,
+    onProgress: progressLogger(testMode)
   });
   console.log(outputText);
 }
@@ -428,8 +540,8 @@ async function apiCommand(args: string[]): Promise<void> {
 
 function printHelp(): void {
   console.log(`Usage:
-  opencrowd
-  opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--mode ask_first|yolo|blocked] [--disable-shell] "<task>"
+  opencrowd [--test-mode [--test-seed <seed>]]
+  opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--mode ask_first|yolo|blocked] [--test-mode] [--test-seed <seed>] [--disable-shell] "<task>"
   opencrowd search "<query>"
   opencrowd permissions list|allow|remove|block
   opencrowd ledger show [--session <id>]
@@ -519,6 +631,11 @@ function splitArgs(inputLine: string): string[] {
 function optionCents(args: string[], option: string): number | undefined {
   const value = readOption(args, option);
   return value === undefined ? undefined : parseUsd(value);
+}
+
+function envFlag(name: string): boolean {
+  const value = process.env[name];
+  return value === "1" || value === "true" || value === "yes" || value === "on";
 }
 
 function isConsumedOption(args: string[], index: number, options: string[]): boolean {

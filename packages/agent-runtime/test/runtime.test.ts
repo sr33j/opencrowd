@@ -3,7 +3,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSession, readLedger, updateConfig, type PaymentAdapter, type PaymentRequest } from "../../core/src/index.js";
-import { runAgentTask, X402LlmProvider, type LlmMessage, type LlmProvider, type LlmResponse } from "../src/index.js";
+import {
+  createMockToolExecutor,
+  MOCK_X402_SERVICES,
+  MockLlmProvider,
+  runAgentTask,
+  X402LlmProvider,
+  type LlmMessage,
+  type LlmProvider,
+  type LlmResponse
+} from "../src/index.js";
 
 const tmpRoots: string[] = [];
 
@@ -217,6 +226,86 @@ describe("agent loop transcript", () => {
     expect(JSON.parse(toolMessage?.content ?? "{}")).toMatchObject({
       result: { ok: true, data: { remaining_cents: 50 } }
     });
+  });
+});
+
+describe("mock test mode", () => {
+  it("counts mock tool turns from the latest user prompt instead of all history", async () => {
+    const provider = new MockLlmProvider({
+      seed: "history-seed",
+      tools: ["get_budget_status"],
+      endProbability: 1
+    });
+    const response = await provider.complete([
+      { role: "user", content: "old task" },
+      { role: "assistant", content: "", toolCalls: [{ id: "old_call", name: "get_budget_status", arguments: {} }] },
+      { role: "tool", toolCallId: "old_call", content: "{}" },
+      { role: "user", content: "new task" }
+    ]);
+
+    expect(response.toolCalls).toHaveLength(1);
+    expect(response.toolCalls[0]).toMatchObject({ name: "get_budget_status" });
+  });
+
+  it("runs the full agent loop with mock service search and zero spend", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const persisted: LlmMessage[] = [];
+    const toolExecutor = createMockToolExecutor();
+
+    const rawSearch = await toolExecutor("search_services", { query: "mock", limit: 10 }, { session });
+    expect(rawSearch.data).toHaveLength(10);
+
+    const output = await runAgentTask(session, "find a mock service", {
+      provider: new MockLlmProvider({
+        seed: "search-seed",
+        tools: ["search_services"],
+        endProbability: 1
+      }),
+      toolExecutor,
+      onMessage: (message) => {
+        persisted.push(message);
+      }
+    });
+
+    expect(output).toContain("Total spent: $0.00");
+    expect(output).toContain("External service spend: $0.00");
+    const toolMessage = persisted.find((message) => message.role === "tool");
+    const payload = JSON.parse(toolMessage?.content ?? "{}") as Record<string, unknown>;
+    const result = payload.result as { data?: unknown[] } | undefined;
+    expect(result?.data).toHaveLength(8);
+    expect(result?.data?.[0]).toMatchObject({
+      resource_url: MOCK_X402_SERVICES[0].resource_url,
+      title: MOCK_X402_SERVICES[0].title
+    });
+    const rows = await readLedger(session.ledgerPath);
+    expect(rows.filter((row) => row.type === "llm_call")).toHaveLength(0);
+    expect(rows.filter((row) => row.type === "service_call")).toHaveLength(0);
+  });
+
+  it("mocks call_service output and records a zero-cost service ledger row", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+
+    const output = await runAgentTask(session, "call a mock service", {
+      provider: new MockLlmProvider({
+        seed: "call-service-seed",
+        tools: ["call_service"],
+        endProbability: 1
+      }),
+      toolExecutor: createMockToolExecutor()
+    });
+
+    expect(output).toContain("Total spent: $0.00");
+    expect(output).toContain("Purchased services:");
+    const rows = await readLedger(session.ledgerPath);
+    expect(rows).toContainEqual(expect.objectContaining({
+      type: "service_call",
+      status: "charged",
+      charged_cost_cents: "0",
+      notes: "mock test mode service call"
+    }));
+    expect(session.spentCents).toBe(0);
   });
 });
 

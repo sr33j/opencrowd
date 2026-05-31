@@ -22,6 +22,8 @@ import {
   type PaymentAdapter,
   type ProgressEvent,
   type SessionState,
+  type ServiceCandidate,
+  type ToolContext,
   type ToolResult,
   type ToolName
 } from "@opencrowd/core";
@@ -47,6 +49,12 @@ export interface LlmResponse {
 export interface LlmProvider {
   complete(messages: LlmMessage[]): Promise<LlmResponse>;
 }
+
+export type ToolExecutor = (
+  name: ToolName,
+  args: Record<string, unknown>,
+  context: ToolContext
+) => Promise<ToolResult>;
 
 export class OpenAiProvider implements LlmProvider {
   private readonly client: OpenAI;
@@ -118,6 +126,310 @@ export class AnthropicProvider implements LlmProvider {
     }
     return parseAnthropicMessage(body);
   }
+}
+
+export interface MockLlmProviderOptions {
+  seed?: string | number;
+  endProbability?: number;
+  maxToolTurns?: number;
+  tools?: ToolName[];
+}
+
+export class MockLlmProvider implements LlmProvider {
+  private readonly random: SeededRandom;
+  private readonly endProbability: number;
+  private readonly maxToolTurns: number;
+  private readonly tools: ToolName[];
+  private turn = 0;
+
+  constructor(options: MockLlmProviderOptions = {}) {
+    this.random = new SeededRandom(options.seed ?? "opencrowd-test-mode");
+    this.endProbability = options.endProbability ?? 0.35;
+    this.maxToolTurns = options.maxToolTurns ?? 8;
+    this.tools = options.tools?.length ? options.tools : TOOL_NAMES;
+  }
+
+  async complete(messages: LlmMessage[]): Promise<LlmResponse> {
+    this.turn += 1;
+    const currentRunMessages = messages.slice(lastUserMessageIndex(messages) + 1);
+    const toolResultCount = currentRunMessages.filter((message) => message.role === "tool").length;
+    const shouldEnd = toolResultCount > 0
+      && (toolResultCount >= this.maxToolTurns || this.random.next() < this.endProbability);
+    if (shouldEnd) {
+      return {
+        content: `Mock test mode completed after ${toolResultCount} tool result${toolResultCount === 1 ? "" : "s"}.`,
+        toolCalls: []
+      };
+    }
+
+    const selectableTools = this.tools.filter((tool) => tool !== "complete_session" || toolResultCount > 0);
+    const name = selectableTools[this.random.integer(selectableTools.length)] ?? "get_budget_status";
+    return {
+      content: "",
+      toolCalls: [{
+        id: `mock_tool_${this.turn}`,
+        name,
+        arguments: mockToolArguments(name, messages, this.turn, this.random)
+      }]
+    };
+  }
+}
+
+function lastUserMessageIndex(messages: LlmMessage[]): number {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "user") {
+      return index;
+    }
+  }
+  return -1;
+}
+
+export interface MockToolExecutorOptions {
+  services?: ServiceCandidate[];
+}
+
+export function createMockToolExecutor(options: MockToolExecutorOptions = {}): ToolExecutor {
+  const services = options.services ?? MOCK_X402_SERVICES;
+  return async (name, args, context) => {
+    try {
+      switch (name) {
+        case "search_services": {
+          const limit = integerValue(args.limit) ?? services.length;
+          const maxBudgetCents = integerValue(args.max_budget_cents);
+          const query = stringValue(args.query) ?? "mock service";
+          context.onProgress?.({ type: "searching", message: `Mock searching Bazaar for "${query}"` });
+          context.onProgress?.({ type: "ranking", message: "Mock ranking service candidates" });
+          return ok(services
+            .filter((service) => maxBudgetCents === undefined || service.price_cents === undefined || service.price_cents <= maxBudgetCents)
+            .slice(0, limit));
+        }
+        case "get_budget_status":
+          return ok(budgetStatus(context.session));
+        case "list_allowed_services":
+          return ok([
+            {
+              resource_url: services[0]?.resource_url ?? "https://mock.opencrowd.test/x402/service-1",
+              mode: "yolo",
+              caps: { max_cost_cents: 0, session_max_cents: 0 },
+              created_at: context.session.createdAt,
+              updated_at: context.session.updatedAt,
+              notes: "mock test mode permission"
+            }
+          ]);
+        case "add_allowed_service":
+        case "request_service_permission":
+          return ok({
+            resource_url: stringValue(args.resource_url) ?? services[0]?.resource_url,
+            mode: name === "request_service_permission" ? "ask_first" : "yolo",
+            caps: objectValue(args.caps) ?? {},
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            notes: stringValue(args.reason) ?? "mock test mode permission"
+          });
+        case "remove_allowed_service":
+          return ok({ removed: true, resource_url: stringValue(args.resource_url) });
+        case "block_service":
+          return ok({
+            resource_url: stringValue(args.resource_url) ?? services[0]?.resource_url,
+            mode: "blocked",
+            caps: {},
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+            notes: "mock test mode block"
+          });
+        case "call_service": {
+          const resourceUrl = stringValue(args.resource_url) ?? services[0]?.resource_url ?? "https://mock.opencrowd.test/x402/service-1";
+          const method = stringValue(args.method) ?? "GET";
+          const artifactPath = `artifacts/mock-service-calls/${Date.now()}-${slugUrl(resourceUrl)}.json`;
+          context.onProgress?.({ type: "checking_budget", message: "Mock checking session budget" });
+          context.onProgress?.({ type: "checking_permission", message: `Mock checking permission for ${resourceUrl}` });
+          context.onProgress?.({ type: "reserving_spend", message: "Mock reserving 0 cents" });
+          context.onProgress?.({ type: "calling_service", message: `Mock calling ${resourceUrl}` });
+          context.onProgress?.({ type: "saving_artifact", message: "Mock saving service response artifact" });
+          await appendLedgerEntry(context.session.ledgerPath, {
+            session_id: context.session.sessionId,
+            type: "service_call",
+            resource_url: resourceUrl,
+            method,
+            quoted_cost_cents: integerValue(args.quoted_cost_cents) ?? 0,
+            charged_cost_cents: 0,
+            status: "charged",
+            permission_mode: context.session.permissionMode,
+            artifact_path: artifactPath,
+            notes: "mock test mode service call"
+          });
+          return ok({
+            status: 200,
+            headers: { "content-type": "application/json", "x-opencrowd-mock": "true" },
+            body: {
+              ok: true,
+              mock: true,
+              resource_url: resourceUrl,
+              method,
+              summary: "This is a mock x402 service response. No network request or payment occurred."
+            },
+            charged_cost_cents: 0,
+            artifact_path: artifactPath
+          });
+        }
+        case "save_file":
+          return ok({
+            path: `artifacts/${stringValue(args.path) ?? "mock-output.txt"}`,
+            bytes: Buffer.byteLength(stringValue(args.content) ?? ""),
+            metadata: objectValue(args.metadata)
+          });
+        case "read_file":
+          return ok({ content: `Mock file content for ${stringValue(args.path) ?? "unknown path"}.` });
+        case "list_files":
+          return ok([
+            "mock-output.txt",
+            "mock-service-calls/service-1.json"
+          ].filter((path) => path.startsWith(stringValue(args.prefix) ?? "")));
+        case "run_shell":
+          context.onProgress?.({ type: "running_shell", message: "Mock running gated shell command" });
+          return ok({
+            command: stringValue(args.command) ?? "",
+            cwd: stringValue(args.cwd) ?? context.session.workspaceRoot,
+            exit_code: 0,
+            timed_out: false,
+            stdout: "mock shell stdout\n",
+            stderr: ""
+          });
+        case "complete_session":
+          return ok(await completeSession(context.session, stringValue(args.final_message) ?? "Mock test mode session completed."));
+      }
+    } catch (error) {
+      return { ok: false, error: (error as Error).message };
+    }
+  };
+}
+
+export const MOCK_X402_SERVICES: ServiceCandidate[] = Array.from({ length: 10 }, (_, index) => {
+  const number = index + 1;
+  const method = number % 3 === 0 ? "POST" : "GET";
+  const priceCents = number;
+  return {
+    resource_url: `https://mock.opencrowd.test/x402/service-${number}`,
+    title: `Mock x402 Service ${number}`,
+    description: `Deterministic mock x402 service ${number} for OpenCrowd test mode.`,
+    methods: [method],
+    price_cents: priceCents,
+    price_display: `$${(priceCents / 100).toFixed(2)} USDC`,
+    currency: "USDC",
+    tags: ["mock", "x402", number % 2 === 0 ? "data" : "analysis"],
+    score: 1 - index / 20,
+    raw: { mock: true, id: number }
+  };
+});
+
+function mockToolArguments(
+  name: ToolName,
+  messages: LlmMessage[],
+  turn: number,
+  random: SeededRandom
+): Record<string, unknown> {
+  const service = MOCK_X402_SERVICES[random.integer(MOCK_X402_SERVICES.length)] ?? MOCK_X402_SERVICES[0];
+  const task = [...messages].reverse().find((message) => message.role === "user")?.content ?? "mock OpenCrowd task";
+  switch (name) {
+    case "search_services":
+      return { query: task.slice(0, 80) || "mock OpenCrowd service", limit: 10 };
+    case "get_budget_status":
+    case "list_allowed_services":
+      return {};
+    case "add_allowed_service":
+      return { resource_url: service.resource_url, caps: { max_cost_cents: service.price_cents ?? 0 } };
+    case "remove_allowed_service":
+    case "block_service":
+      return { resource_url: service.resource_url };
+    case "request_service_permission":
+      return {
+        resource_url: service.resource_url,
+        reason: "Mock test mode wants to exercise permission handling.",
+        caps: { max_cost_cents: service.price_cents ?? 0 }
+      };
+    case "call_service":
+      return {
+        resource_url: service.resource_url,
+        method: service.methods[0] ?? "GET",
+        quoted_cost_cents: service.price_cents ?? 0,
+        body: { mock: true, task }
+      };
+    case "save_file":
+      return {
+        path: `mock-output-${turn}.txt`,
+        content: `Mock output for: ${task}`,
+        metadata: { mock: true, turn }
+      };
+    case "read_file":
+      return { path: "mock-output.txt" };
+    case "list_files":
+      return {};
+    case "run_shell":
+      return { command: "echo mock test mode", cwd: ".", timeout_ms: 1000 };
+    case "complete_session":
+      return { final_message: `Mock test mode completed task: ${task.slice(0, 120)}` };
+  }
+}
+
+class SeededRandom {
+  private state: number;
+
+  constructor(seed: string | number) {
+    this.state = normalizeSeed(seed);
+  }
+
+  next(): number {
+    this.state = (1664525 * this.state + 1013904223) >>> 0;
+    return this.state / 0x100000000;
+  }
+
+  integer(maxExclusive: number): number {
+    if (!Number.isInteger(maxExclusive) || maxExclusive <= 0) {
+      return 0;
+    }
+    return Math.floor(this.next() * maxExclusive);
+  }
+}
+
+function normalizeSeed(seed: string | number): number {
+  if (typeof seed === "number" && Number.isFinite(seed)) {
+    return seed >>> 0 || 1;
+  }
+  const text = String(seed);
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0 || 1;
+}
+
+function ok(data: unknown): ToolResult {
+  return { ok: true, data };
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function integerValue(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isInteger(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim() !== "" && Number.isInteger(Number(value))) {
+    return Number(value);
+  }
+  return undefined;
+}
+
+function objectValue(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function slugUrl(url: string): string {
+  return url.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 80) || "service";
 }
 
 export interface X402LlmProviderOptions {
@@ -296,11 +608,14 @@ export interface AgentRunOptions {
   history?: LlmMessage[];
   onMessage?: (message: LlmMessage) => Promise<void> | void;
   onProgress?: (event: ProgressEvent) => void;
+  toolExecutor?: ToolExecutor;
+  compactOutput?: boolean;
   maxTurns?: number;
 }
 
 export async function runAgentTask(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<string> {
   const provider = options.provider ?? defaultProvider(session, options.model);
+  const toolExecutor = options.toolExecutor ?? executeTool;
   const messages: LlmMessage[] = [
     {
       role: "system",
@@ -332,12 +647,12 @@ export async function runAgentTask(session: SessionState, task: string, options:
     }
     if (response.toolCalls.length === 0) {
       const summary = await completeSession(session, response.content || "Session completed.");
-      return renderPurchaseSummary(summary);
+      return renderAgentSummary(summary, options);
     }
     for (const call of response.toolCalls) {
       options.onProgress?.({ type: "calling_tool", message: `Tool call: ${summarizeToolCall(call)}` });
       const budgetBeforeToolCall = budgetStatus(session);
-      const result = await executeTool(call.name, call.arguments, { session, onProgress: options.onProgress });
+      const result = await toolExecutor(call.name, call.arguments, { session, onProgress: options.onProgress });
       const budgetAfterToolCall = budgetStatus(session);
       options.onProgress?.({ type: "tool_result", message: `Tool result: ${summarizeToolResult(call.name, result)}` });
       const toolMessage = {
@@ -356,7 +671,7 @@ export async function runAgentTask(session: SessionState, task: string, options:
           serviceCallFailures += 1;
           if (serviceCallFailures >= 3) {
             const summary = await completeSession(session, `Stopped after ${serviceCallFailures} service call failures. Last error: ${result.error}`);
-            return renderPurchaseSummary(summary);
+            return renderAgentSummary(summary, options);
           }
         }
         const key = `${call.name}:${JSON.stringify(call.arguments)}:${result.error}`;
@@ -364,20 +679,20 @@ export async function runAgentTask(session: SessionState, task: string, options:
         repeatedFailures.set(key, count);
         if (count >= 2) {
           const summary = await completeSession(session, `Stopped because ${call.name} failed repeatedly: ${result.error}`);
-          return renderPurchaseSummary(summary);
+          return renderAgentSummary(summary, options);
         }
       }
       if (call.name === "complete_session") {
         if (result.ok && result.data && typeof result.data === "object") {
-          return renderPurchaseSummary(result.data as Record<string, unknown>);
+          return renderAgentSummary(result.data as Record<string, unknown>, options);
         }
         const summary = await completeSession(session, response.content || result.error || "Session completed.");
-        return renderPurchaseSummary(summary);
+        return renderAgentSummary(summary, options);
       }
     }
   }
   const summary = await completeSession(session, "Stopped after reaching the maximum tool loop turns.");
-  return renderPurchaseSummary(summary);
+  return renderAgentSummary(summary, options);
 }
 
 function toolMessagePayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -447,12 +762,68 @@ function defaultProvider(session: SessionState, model: string | undefined): LlmP
   return new X402LlmProvider(session, { model });
 }
 
-export async function buildSessionSummary(session: SessionState, finalMessage: string): Promise<string> {
+export async function buildSessionSummary(
+  session: SessionState,
+  finalMessage: string,
+  options: { compact?: boolean } = {}
+): Promise<string> {
   const summary = await completeSession(session, finalMessage);
-  return renderPurchaseSummary(summary);
+  return options.compact ? renderCompactPurchaseSummary(summary) : renderPurchaseSummary(summary);
 }
 
-export function renderProgress(event: ProgressEvent): string {
+export interface RenderProgressOptions {
+  compact?: boolean;
+}
+
+export function renderProgress(event: ProgressEvent, options: RenderProgressOptions = {}): string {
+  if (!options.compact) {
+    return event.message;
+  }
+  switch (event.type) {
+    case "calling_llm":
+      return event.message.replace(/^Calling LLM provider \(turn /, "turn ").replace(/\)$/, "");
+    case "calling_tool":
+      return `  -> ${event.message.replace(/^Tool call: /, "")}`;
+    case "tool_result":
+      return `  <- ${event.message.replace(/^Tool result: /, "")}`;
+    case "searching":
+      return `     ${event.message}`;
+    case "calling_service":
+      return `     ${event.message}`;
+    case "running_shell":
+      return `     ${event.message}`;
+    case "complete":
+      return event.message;
+    default:
+      return "";
+  }
+}
+
+function renderAgentSummary(summary: Record<string, unknown>, options: AgentRunOptions): string {
+  return options.compactOutput ? renderCompactPurchaseSummary(summary) : renderPurchaseSummary(summary);
+}
+
+function renderCompactPurchaseSummary(summary: Record<string, unknown>): string {
+  const budget = summary.budget as Record<string, unknown> | undefined;
+  const purchases = Array.isArray(summary.service_calls)
+    ? summary.service_calls as Record<string, string>[]
+    : Array.isArray(summary.purchases)
+      ? summary.purchases as Record<string, string>[]
+      : [];
+  const artifacts = Array.isArray(summary.artifacts) ? summary.artifacts as string[] : [];
+  const spent = formatCents(Number(budget?.total_spent_cents ?? budget?.spent_cents ?? 0));
+  const remaining = formatCents(Number(budget?.remaining_cents ?? 0));
+  const services = purchases.length === 0
+    ? "services none"
+    : `services ${purchases.length}, $${(sumCents(purchases) / 100).toFixed(2)}`;
+  const artifactSummary = artifacts.length === 0 ? "artifacts none" : `artifacts ${artifacts.length}`;
+  return [
+    String(summary.final_message ?? "Session complete."),
+    `summary: spent ${spent}, remaining ${remaining}, ${services}, ${artifactSummary}`
+  ].join("\n");
+}
+
+export function renderProgressMessage(event: ProgressEvent): string {
   return event.message;
 }
 
