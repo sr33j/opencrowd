@@ -78,10 +78,10 @@ async function main(argv: string[]): Promise<void> {
     }
     return;
   }
-  if (command === "--test-mode") {
+  if (command === "--test-mode" || command === "--demo" || command === "demo") {
     const extraArgs = rest.filter((arg, index) => !isConsumedOption(rest, index, ["--test-seed"]));
     if (extraArgs.length > 0) {
-      throw new Error("top-level --test-mode launches the REPL; use `opencrowd run --test-mode \"task\"` for one-shot tasks");
+      throw new Error("top-level --demo/--test-mode launches the interactive UI; use `opencrowd run --test-mode \"task\"` for one-shot tasks");
     }
     const options = { testMode: true, testSeed: readOption(rest, "--test-seed") };
     if (input.isTTY) {
@@ -722,6 +722,8 @@ async function apiCommand(args: string[]): Promise<void> {
 
 function printHelp(): void {
   console.log(`Usage:
+  opencrowd                       interactive agent UI (first run walks you through wallet setup)
+  opencrowd --demo                try the full loop with a mock wallet, mock services, and no real money
   opencrowd [--test-mode [--test-seed <seed>]]
   opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--mode ask_first|yolo|blocked] [--test-mode] [--test-seed <seed>] [--disable-shell] [--verbose] "<task>"
   opencrowd search [--json] "<query>"

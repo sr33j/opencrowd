@@ -671,7 +671,7 @@ function TranscriptLine({ item, width, sessionId, modeLabel, modelLabel, testMod
               <Text color="cyan" bold>OpenCrowd</Text>
               <Text dimColor> — an agent with its own wallet</Text>
             </Text>
-            <Text dimColor>session {sessionId.slice(0, 8)}…{sessionId.slice(-6)} · mode {modeLabel} · model {modelLabel}{testMode ? " · TEST MODE" : ""}</Text>
+            <Text dimColor>session {sessionId.slice(0, 8)}…{sessionId.slice(-6)} · mode {modeLabel} · model {modelLabel}{testMode ? " · DEMO — mock wallet, no real money" : ""}</Text>
           </Box>
           <Text dimColor>  type a task and press enter · /help for commands · shift+tab toggles ask_first/yolo · ctrl+c to quit</Text>
         </Box>
