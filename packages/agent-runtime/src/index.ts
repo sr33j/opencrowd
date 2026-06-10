@@ -22,6 +22,7 @@ import {
   type PaidHttpClient,
   type PaymentAdapter,
   type ProgressEvent,
+  type ServiceCaps,
   type SessionState,
   type ServiceCandidate,
   type ToolContext,
@@ -626,12 +627,25 @@ interface PaidLlmResponse {
   txHash?: string;
 }
 
+export interface PermissionRequest {
+  resource_url: string;
+  reason: string;
+  caps?: ServiceCaps;
+}
+
 export interface AgentRunOptions {
   provider?: LlmProvider;
   model?: string;
   history?: LlmMessage[];
   onMessage?: (message: LlmMessage) => Promise<void> | void;
   onProgress?: (event: ProgressEvent) => void;
+  /**
+   * Human-in-the-loop gate for request_service_permission. When set, the
+   * permission is only recorded if this resolves true; otherwise the agent
+   * receives a denial. When unset (MCP/local-api/non-interactive), the
+   * request is recorded directly as before.
+   */
+  onPermissionRequest?: (request: PermissionRequest) => Promise<boolean>;
   toolExecutor?: ToolExecutor;
   compactOutput?: boolean;
   maxTurns?: number;
@@ -676,11 +690,19 @@ export async function runAgentTask(session: SessionState, task: string, options:
       return renderAgentSummary(summary, options);
     }
     for (const call of response.toolCalls) {
-      options.onProgress?.({ type: "calling_tool", message: `Tool call: ${summarizeToolCall(call)}` });
+      options.onProgress?.({
+        type: "calling_tool",
+        message: `Tool call: ${summarizeToolCall(call)}`,
+        data: { tool: call.name, arguments: call.arguments }
+      });
       const budgetBeforeToolCall = budgetStatus(session);
-      const result = await toolExecutor(call.name, call.arguments, { session, onProgress: options.onProgress });
+      const result = await runGatedTool(toolExecutor, call, session, options);
       const budgetAfterToolCall = budgetStatus(session);
-      options.onProgress?.({ type: "tool_result", message: `Tool result: ${summarizeToolResult(call.name, result)}` });
+      options.onProgress?.({
+        type: "tool_result",
+        message: `Tool result: ${summarizeToolResult(call.name, result)}`,
+        data: { tool: call.name, ok: result.ok, error: result.error, result: result.data as Record<string, unknown> | undefined }
+      });
       const toolMessage = {
         role: "tool",
         toolCallId: call.id,
@@ -719,6 +741,34 @@ export async function runAgentTask(session: SessionState, task: string, options:
   }
   const summary = await completeSession(session, "Stopped after reaching the maximum tool loop turns.");
   return renderAgentSummary(summary, options);
+}
+
+async function runGatedTool(
+  toolExecutor: ToolExecutor,
+  call: LlmToolCall,
+  session: SessionState,
+  options: AgentRunOptions
+): Promise<ToolResult> {
+  if (call.name === "request_service_permission" && options.onPermissionRequest) {
+    const request: PermissionRequest = {
+      resource_url: String(call.arguments.resource_url ?? ""),
+      reason: String(call.arguments.reason ?? ""),
+      caps: objectValue(call.arguments.caps) as ServiceCaps | undefined
+    };
+    options.onProgress?.({
+      type: "requesting_permission",
+      message: `Waiting for user approval: ${request.resource_url}`,
+      data: { ...request } as unknown as Record<string, unknown>
+    });
+    const approved = await options.onPermissionRequest(request);
+    if (!approved) {
+      return {
+        ok: false,
+        error: `user denied permission for ${request.resource_url}; do not retry this service unless the user asks`
+      };
+    }
+  }
+  return toolExecutor(call.name, call.arguments, { session, onProgress: options.onProgress });
 }
 
 function assistantMessageFromResponse(response: LlmResponse): LlmMessage {

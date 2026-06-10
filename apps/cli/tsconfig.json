@@ -3,7 +3,8 @@
   "compilerOptions": {
     "composite": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "jsx": "react-jsx"
   },
   "references": [
     { "path": "../../packages/core" },
@@ -11,5 +12,5 @@
     { "path": "../../packages/mcp" },
     { "path": "../../packages/local-api" }
   ],
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
 }

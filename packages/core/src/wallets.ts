@@ -131,6 +131,8 @@ export async function createTestWallet(label?: string, initialBalanceCents = 0):
   return wallet;
 }
 
+const DEFAULT_TEST_WALLET_BALANCE_CENTS = 2500;
+
 export async function ensureDefaultTestWallet(): Promise<StoredWallet> {
   const registry = await loadWalletRegistry();
   const active = activeWalletFromRegistry(registry);
@@ -143,7 +145,7 @@ export async function ensureDefaultTestWallet(): Promise<StoredWallet> {
     await saveWalletRegistry(registry);
     return existing;
   }
-  return createTestWallet();
+  return createTestWallet(undefined, DEFAULT_TEST_WALLET_BALANCE_CENTS);
 }
 
 export async function listStoredWallets(options: { includeBalances?: boolean } = {}): Promise<WalletListEntry[]> {
