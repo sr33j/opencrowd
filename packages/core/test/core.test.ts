@@ -71,16 +71,26 @@ describe("budget accounting", () => {
 });
 
 describe("OpenCrowd session defaults", () => {
-  it("defaults to yolo mode, CLI shell access, and active wallet-balance budget", async () => {
+  it("defaults to ask_first mode, CLI shell access, and wallet-balance budget", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await createTestWallet("mango", 1234);
 
     const session = await createOpenCrowdSession({ workspaceRoot: root, surface: "cli" });
 
-    expect(session.permissionMode).toBe("yolo");
+    expect(session.permissionMode).toBe("ask_first");
     expect(session.shellEnabled).toBe(true);
     expect(session.budgetCents).toBe(1234);
+  });
+
+  it("caps the default budget at $20 even when the wallet balance is larger", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    await createTestWallet("papaya", 50_000);
+
+    const session = await createOpenCrowdSession({ workspaceRoot: root, surface: "cli" });
+
+    expect(session.budgetCents).toBe(2000);
   });
 });
 

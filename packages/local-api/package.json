@@ -1,7 +1,21 @@
 {
   "name": "@opencrowd/local-api",
   "version": "0.1.0",
+  "description": "OpenCrowd localhost HTTP API: the OpenCrowd tool surface over JSON",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/local-api"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -9,6 +23,12 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@opencrowd/core": "0.1.0"

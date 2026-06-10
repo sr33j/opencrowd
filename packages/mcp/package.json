@@ -1,7 +1,21 @@
 {
   "name": "@opencrowd/mcp",
   "version": "0.1.0",
+  "description": "OpenCrowd MCP server: expose wallet-funded x402 tools to Claude, Codex, and other MCP clients",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/mcp"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -9,6 +23,12 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",

@@ -2,8 +2,6 @@
 
 Local-first OpenCrowd runtime for discovering services, gating paid x402 calls, storing artifacts, and exposing the same tool surface through a first-party CLI, MCP server, and localhost API.
 
-The previous app is preserved under `scratch/` as archived reference material. New build and test scripts operate only on the workspace packages.
-
 ## Quick Start
 
 ```sh
@@ -72,7 +70,7 @@ The first-party CLI agent uses an x402-paid, OpenAI-compatible LLM route by defa
 
 Default model selection is explicit. OpenCrowd starts with `claude-opus-4-6`; if the configured x402 LLM provider does not return that model, run `opencrowd models list` and choose an available model with `opencrowd models set <model>` or pass `opencrowd run --model <model> ...`.
 
-The session budget is a local cap, not a prepayment or escrow. By default, new OpenCrowd sessions use the active wallet's spendable balance as the local cap and run in `yolo` permission mode, where services are allowed unless explicitly blocked. You can override this with `--budget`, `--mode ask_first`, `--mode blocked`, or `OPENCROWD_BUDGET_CENTS`.
+The session budget is a local cap, not a prepayment or escrow. By default, new OpenCrowd sessions cap spend at the smaller of $20.00 and the active wallet's spendable balance, and run in `ask_first` permission mode, where each new service requires confirmation before it is paid. You can override this with `--budget`, `--mode yolo` (allow services unless explicitly blocked), `--mode blocked`, or `OPENCROWD_BUDGET_CENTS`.
 
 Unused budget never leaves the wallet. Each LLM loop iteration reserves the estimated maximum local cost, signs an x402 payment through the active wallet, records the actual charged cost from response metadata, and releases unused reservation. External service spend and LLM spend are separated in the final summary and `ledger.csv`. Every agent tool result includes the budget before and after that tool call.
 

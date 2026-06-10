@@ -413,8 +413,8 @@ async function runCommand(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose");
   const testMode = args.includes("--test-mode") || envFlag("OPENCROWD_TEST_MODE");
   const testSeed = readOption(args, "--test-seed") ?? process.env.OPENCROWD_TEST_SEED;
-  const mode = (readOption(args, "--mode") ?? "yolo") as PermissionMode;
-  if (!["ask_first", "yolo", "blocked"].includes(mode)) {
+  const mode = readOption(args, "--mode") as PermissionMode | undefined;
+  if (mode !== undefined && !["ask_first", "yolo", "blocked"].includes(mode)) {
     throw new Error("mode must be ask_first, yolo, or blocked");
   }
   const shellEnabled = args.includes("--enable-shell") ? true : args.includes("--disable-shell") ? false : undefined;
@@ -444,7 +444,9 @@ async function runCommand(args: string[]): Promise<void> {
     if (budgetArg !== undefined) {
       await setSessionBudget(session, parseUsd(budgetArg));
     }
-    await setPermissionMode(session, mode);
+    if (mode !== undefined) {
+      await setPermissionMode(session, mode);
+    }
     if (shellEnabled !== undefined) {
       session.shellEnabled = shellEnabled;
       await saveSession(session);

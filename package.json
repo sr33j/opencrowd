@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "bin": {
     "opencrowd": "apps/cli/dist/index.js"
   },

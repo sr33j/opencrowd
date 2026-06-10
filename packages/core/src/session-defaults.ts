@@ -29,7 +29,7 @@ function defaultPermissionMode(): PermissionMode {
   if (value === "ask_first" || value === "yolo" || value === "blocked") {
     return value;
   }
-  return "yolo";
+  return "ask_first";
 }
 
 function defaultShellEnabled(surface: OpenCrowdSurface, config: Awaited<ReturnType<typeof loadConfig>>): boolean {
@@ -49,14 +49,18 @@ function defaultShellEnabled(surface: OpenCrowdSurface, config: Awaited<ReturnTy
   return true;
 }
 
+const DEFAULT_BUDGET_CAP_CENTS = 2000;
+
 async function activeWalletBudgetCents(): Promise<number> {
   try {
     const balance = await walletBalance();
     if (balance.spendable_balance_cents !== undefined) {
-      return Math.max(0, balance.spendable_balance_cents);
+      return Math.min(DEFAULT_BUDGET_CAP_CENTS, Math.max(0, balance.spendable_balance_cents));
     }
     const parsed = Number(balance.spendable_balance);
-    return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed * 100)) : 0;
+    return Number.isFinite(parsed)
+      ? Math.min(DEFAULT_BUDGET_CAP_CENTS, Math.max(0, Math.floor(parsed * 100)))
+      : 0;
   } catch {
     return 0;
   }
