@@ -37,6 +37,7 @@
     "@opencrowd/local-api": "0.1.0",
     "@opencrowd/mcp": "0.1.0",
     "ink": "^7.0.5",
+    "qrcode": "^1.5.4",
     "react": "^19.2.7"
   },
   "scripts": {

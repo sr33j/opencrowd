@@ -6,14 +6,17 @@ import {
   createOpenCrowdSession,
   createWalletDraft,
   ensureDefaultTestWallet,
+  listStoredWallets,
   loadConfig,
   setPermissionMode,
   setSessionBudget,
+  walletBalance,
   walletList,
   type PermissionMode,
   type ProgressEvent,
   type SessionState
 } from "@opencrowd/core";
+import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } from "./funding.js";
 import { exportWalletSecret } from "@opencrowd/core";
 import { buildSessionSummary, type PermissionRequest } from "@opencrowd/agent-runtime";
 import { ensureMockRuntime, runPersistentAgentTask, type ReplState } from "../agent-task.js";
@@ -39,8 +42,15 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 
 type Modal =
   | { type: "permission"; request: PermissionRequest; resolve: (approved: boolean) => void }
-  | { type: "seed-backup"; draft: Awaited<ReturnType<typeof createWalletDraft>>; value: string; error?: string }
   | { type: "seed-export"; target: string; value: string; error?: string };
+
+type WalletDraft = Awaited<ReturnType<typeof createWalletDraft>>;
+
+type Wizard =
+  | { step: "welcome" }
+  | { step: "seed"; draft: WalletDraft; value: string; error?: string }
+  | { step: "fund"; address: string; qr?: string; balanceCents: number }
+  | { step: "done"; funded: boolean; budgetCents: number };
 
 const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -49,6 +59,7 @@ interface AppProps {
   initialTestMode: boolean;
   initialTestSeed?: string;
   defaultModel: string;
+  needsOnboarding: boolean;
 }
 
 interface WalletInfo {
@@ -56,7 +67,7 @@ interface WalletInfo {
   balanceCents?: number;
 }
 
-function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppProps): React.ReactElement {
+function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnboarding }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const width = Math.max(60, Math.min(140, stdout?.columns ?? 100));
@@ -75,6 +86,7 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
   const [activity, setActivity] = useState("");
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [modal, setModal] = useState<Modal | null>(null);
+  const [wizard, setWizard] = useState<Wizard | null>(needsOnboarding ? { step: "welcome" } : null);
   const [wallet, setWallet] = useState<WalletInfo>({});
   const [tick, setTick] = useState(0);
   const [exiting, setExiting] = useState(false);
@@ -101,12 +113,12 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
   }, []);
 
   useEffect(() => {
-    if (!busy) {
+    if (!busy && wizard?.step !== "fund") {
       return;
     }
-    const timer = setInterval(() => setSpinnerFrame((frame) => (frame + 1) % SPINNER_FRAMES.length), 80);
+    const timer = setInterval(() => setSpinnerFrame((frame) => (frame + 1) % SPINNER_FRAMES.length), 120);
     return () => clearInterval(timer);
-  }, [busy]);
+  }, [busy, wizard?.step]);
 
   const suggestions = useMemo(() => {
     if (!input.startsWith("/") || input.includes(" ")) {
@@ -118,6 +130,79 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
   useEffect(() => {
     setSuggestionIndex(0);
   }, [input]);
+
+  const startWalletCreation = useCallback(async (label?: string) => {
+    try {
+      const draft = await createWalletDraft(label);
+      setWizard({ step: "seed", draft, value: "" });
+    } catch (error) {
+      setWizard(null);
+      push({ kind: "error", text: (error as Error).message });
+    }
+  }, [push]);
+
+  const handleSeedSubmit = useCallback(async (wizardState: Extract<Wizard, { step: "seed" }>, submitted: string) => {
+    const words = wizardState.draft.mnemonic.split(/\s+/);
+    const expected = [words[2], words[7], words[11]].join(" ").toLowerCase();
+    if (submitted.trim().toLowerCase() !== expected) {
+      setWizard({ ...wizardState, value: "", error: "those words do not match — check the seed phrase and try again (esc to cancel)" });
+      return;
+    }
+    try {
+      const wallet = await confirmWalletDraft(wizardState.draft);
+      push({ kind: "block", label: "Wallet created", text: [
+        `  label    ${wallet.label}`,
+        `  address  ${wallet.address}`,
+        `  network  ${wallet.network}`,
+        `  asset    ${wallet.asset}`
+      ].join("\n") });
+      setWizard({ step: "fund", address: wallet.address, balanceCents: 0 });
+      void refreshWallet();
+    } catch (error) {
+      setWizard(null);
+      push({ kind: "error", text: (error as Error).message });
+    }
+  }, [push, refreshWallet]);
+
+  useEffect(() => {
+    if (wizard?.step !== "fund") {
+      return;
+    }
+    const address = wizard.address;
+    let cancelled = false;
+    if (!wizard.qr) {
+      void qrTerminal(usdcTransferUri(address, SUGGESTED_FUND_CENTS))
+        .then((qr) => setWizard((current) => !cancelled && current?.step === "fund" ? { ...current, qr } : current))
+        .catch(() => {});
+    }
+    const poll = async () => {
+      try {
+        const balance = await walletBalance();
+        const cents = balance.spendable_balance_cents ?? Math.floor(Number(balance.spendable_balance) * 100);
+        if (cancelled || !Number.isFinite(cents)) {
+          return;
+        }
+        if (cents > 0) {
+          const budgetCents = Math.min(2000, cents);
+          await setSessionBudget(session, budgetCents);
+          if (!cancelled) {
+            setWizard({ step: "done", funded: true, budgetCents });
+            void refreshWallet();
+          }
+          return;
+        }
+        setWizard((current) => current?.step === "fund" ? { ...current, balanceCents: Math.max(0, cents) } : current);
+      } catch {
+        // transient RPC failures are fine while polling
+      }
+    };
+    const timer = setInterval(() => void poll(), 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizard?.step === "fund" ? wizard.address : null]);
 
   const finalize = useCallback(async (reason: string) => {
     if (exiting) {
@@ -234,11 +319,9 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
         }
         await submitTask(result.task, result.overrides);
         return;
-      case "wallet-new": {
-        const draft = await createWalletDraft(result.label);
-        setModal({ type: "seed-backup", draft, value: "" });
+      case "wallet-new":
+        await startWalletCreation(result.label);
         return;
-      }
       case "wallet-export":
         setModal({ type: "seed-export", target: result.target, value: "" });
         return;
@@ -310,10 +393,57 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
       }
       return;
     }
-    if (modal?.type === "seed-backup" || modal?.type === "seed-export") {
+    if (wizard) {
+      if (wizard.step === "welcome") {
+        if (isReturn) {
+          void startWalletCreation();
+        } else if (key.escape || char === "s") {
+          setWizard(null);
+          push({ kind: "note", text: "skipped setup — run /wallet new whenever you are ready, or /test-mode on to try it without funds" });
+        }
+        return;
+      }
+      if (wizard.step === "seed") {
+        if (key.escape) {
+          setWizard(null);
+          push({ kind: "note", text: "wallet creation cancelled; nothing was saved" });
+          return;
+        }
+        if (isReturn) {
+          void handleSeedSubmit(wizard, wizard.value);
+          return;
+        }
+        if (key.backspace || key.delete) {
+          setWizard({ ...wizard, value: wizard.value.slice(0, -1) });
+          return;
+        }
+        if (char && !key.ctrl && !key.meta) {
+          const [first, hasNewline] = splitChunk(char);
+          const nextValue = wizard.value + first;
+          setWizard({ ...wizard, value: nextValue });
+          if (hasNewline) {
+            void handleSeedSubmit(wizard, nextValue);
+          }
+        }
+        return;
+      }
+      if (wizard.step === "fund") {
+        if (char === "s" || key.escape) {
+          setWizard({ step: "done", funded: false, budgetCents: 0 });
+        }
+        return;
+      }
+      if (wizard.step === "done") {
+        if (isReturn || key.escape || char === "s") {
+          setWizard(null);
+        }
+        return;
+      }
+    }
+    if (modal?.type === "seed-export") {
       if (key.escape) {
         setModal(null);
-        push({ kind: "note", text: modal.type === "seed-backup" ? "wallet creation cancelled; nothing was saved" : "export cancelled" });
+        push({ kind: "note", text: "export cancelled" });
         return;
       }
       if (isReturn) {
@@ -432,30 +562,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
       return;
     }
     const submitted = valueOverride ?? modal.value;
-    if (modal.type === "seed-backup") {
-      const words = modal.draft.mnemonic.split(/\s+/);
-      const expected = [words[2], words[7], words[11]].join(" ").toLowerCase();
-      if (submitted.trim().toLowerCase() !== expected) {
-        setModal({ ...modal, value: "", error: "those words do not match — check the seed phrase and try again (esc to cancel)" });
-        return;
-      }
-      try {
-        const wallet = await confirmWalletDraft(modal.draft);
-        setModal(null);
-        push({ kind: "block", label: "Wallet created", text: [
-          `  label    ${wallet.label}`,
-          `  address  ${wallet.address}`,
-          `  network  ${wallet.network}`,
-          `  asset    ${wallet.asset}`,
-          "  active   true"
-        ].join("\n") });
-        void refreshWallet();
-      } catch (error) {
-        setModal(null);
-        push({ kind: "error", text: (error as Error).message });
-      }
-      return;
-    }
     if (modal.type === "seed-export") {
       if (submitted.trim() !== "EXPORT") {
         setModal({ ...modal, value: "", error: "type EXPORT exactly to reveal the seed phrase (esc to cancel)" });
@@ -487,15 +593,18 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel }: AppPro
         {(item) => <TranscriptLine key={item.id} item={item} width={width} sessionId={session.sessionId} modeLabel={modeLabel} modelLabel={modelLabel} testMode={state.testMode} />}
       </Static>
       {modal?.type === "permission" ? <PermissionModal request={modal.request} /> : null}
-      {modal?.type === "seed-backup" ? <SeedBackupModal mnemonic={modal.draft.mnemonic} value={modal.value} error={modal.error} /> : null}
       {modal?.type === "seed-export" ? <SeedExportModal value={modal.value} error={modal.error} /> : null}
+      {wizard?.step === "welcome" ? <WelcomePanel /> : null}
+      {wizard?.step === "seed" ? <SeedBackupPanel mnemonic={wizard.draft.mnemonic} value={wizard.value} error={wizard.error} /> : null}
+      {wizard?.step === "fund" ? <FundPanel address={wizard.address} qr={wizard.qr} spinnerFrame={spinnerFrame} /> : null}
+      {wizard?.step === "done" ? <DonePanel funded={wizard.funded} budgetCents={wizard.budgetCents} /> : null}
       {busy ? (
         <Box>
           <Text color="cyan">{SPINNER_FRAMES[spinnerFrame]} </Text>
           <Text dimColor>{truncateMiddle(activity || "working…", width - 4)}</Text>
         </Box>
       ) : null}
-      {!modal && !exiting ? (
+      {!modal && !wizard && !exiting ? (
         <Box flexDirection="column">
           <Box>
             <Text color="cyan" bold>{"❯ "}</Text>
@@ -621,7 +730,57 @@ function PermissionModal({ request }: { request: PermissionRequest }): React.Rea
   );
 }
 
-function SeedBackupModal({ mnemonic, value, error }: { mnemonic: string; value: string; error?: string }): React.ReactElement {
+function WelcomePanel(): React.ReactElement {
+  return (
+    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
+      <Text color="cyan" bold>Let's set up your agent's wallet</Text>
+      <Text>OpenCrowd gives the agent its own small USDC wallet on Base. You stay in control:</Text>
+      <Text>  1. Create a fresh wallet (it lives only on this machine)</Text>
+      <Text>  2. Back up its seed phrase</Text>
+      <Text>  3. Fund it with a few dollars of USDC — this is the agent's entire blast radius</Text>
+      <Text dimColor>enter: create wallet · s: skip for now (try /test-mode on for a zero-cost demo)</Text>
+    </Box>
+  );
+}
+
+function FundPanel({ address, qr, spinnerFrame }: { address: string; qr?: string; spinnerFrame: number }): React.ReactElement {
+  return (
+    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
+      <Text color="cyan" bold>Fund the agent wallet (suggested: {formatCents(SUGGESTED_FUND_CENTS)} USDC on Base)</Text>
+      <Text>  address  <Text color="cyan">{address}</Text></Text>
+      <Text>  send USDC on Base from any wallet or exchange — or scan / tap below</Text>
+      {qr ? <Text>{qr}</Text> : null}
+      <Text>  MetaMask mobile: <Text color="cyan">{metamaskDeepLink(address, SUGGESTED_FUND_CENTS)}</Text></Text>
+      <Box marginTop={1}>
+        <Text color="cyan">{SPINNER_FRAMES[spinnerFrame]} </Text>
+        <Text dimColor>waiting for USDC to arrive — checking every few seconds…</Text>
+      </Box>
+      <Text dimColor>  s: skip for now (you can fund this address any time)</Text>
+    </Box>
+  );
+}
+
+function DonePanel({ funded, budgetCents }: { funded: boolean; budgetCents: number }): React.ReactElement {
+  return (
+    <Box borderStyle="round" borderColor="green" flexDirection="column" paddingX={1} marginTop={1}>
+      {funded ? (
+        <>
+          <Text color="green" bold>Funds received — you're ready to go</Text>
+          <Text>Session budget set to {formatCents(budgetCents)}. The agent asks before paying any new service.</Text>
+        </>
+      ) : (
+        <>
+          <Text color="green" bold>Setup complete</Text>
+          <Text>Fund the wallet address any time; the agent can't spend what isn't there.</Text>
+        </>
+      )}
+      <Text>Try: <Text color="cyan">find an x402 service that returns live weather and get today's forecast</Text></Text>
+      <Text dimColor>enter to start</Text>
+    </Box>
+  );
+}
+
+function SeedBackupPanel({ mnemonic, value, error }: { mnemonic: string; value: string; error?: string }): React.ReactElement {
   const words = mnemonic.split(/\s+/);
   const rows: string[] = [];
   for (let index = 0; index < words.length; index += 4) {
@@ -703,6 +862,15 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
   if (testMode) {
     await ensureDefaultTestWallet();
   }
+  let needsOnboarding = false;
+  if (!testMode) {
+    try {
+      const wallets = await listStoredWallets({ includeBalances: false });
+      needsOnboarding = wallets.filter((wallet) => wallet.kind !== "test").length === 0;
+    } catch {
+      needsOnboarding = false;
+    }
+  }
   const session = await createOpenCrowdSession({
     workspaceRoot: process.cwd(),
     surface: "cli",
@@ -715,6 +883,7 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
       initialTestMode={testMode}
       initialTestSeed={options.testSeed ?? process.env.OPENCROWD_TEST_SEED}
       defaultModel={config.x402LlmModel}
+      needsOnboarding={needsOnboarding}
     />,
     { exitOnCtrlC: false }
   );
