@@ -8,7 +8,7 @@ new, and writing every cent to a local ledger.
 [![CI](https://github.com/sr33j/opencrowd/actions/workflows/ci.yml/badge.svg)](https://github.com/sr33j/opencrowd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-<!-- demo GIF goes here -->
+![OpenCrowd demo: the agent asks permission, pays an x402 service, and accounts for every cent](docs/demo.gif)
 
 ## Try it in 60 seconds (no crypto required)
 
