@@ -533,11 +533,17 @@ describe("OWS wallet helpers", () => {
 
     expect(JSON.parse(Buffer.from(wrapped, "base64").toString("utf8"))).toEqual({
       x402Version: 2,
-      accepted: expect.objectContaining({
+      // accepted must round-trip the offered requirement exactly; v2
+      // middleware deep-matches it and rejects injected fields
+      accepted: {
+        scheme: "exact",
         network: "eip155:8453",
         amount: "1000",
-        resource: { url: "https://service.example/stock/TSLA" }
-      }),
+        asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        payTo: "0xpayto",
+        maxTimeoutSeconds: 300,
+        extra: { name: "USD Coin", version: "2" }
+      },
       payload: expect.objectContaining({
         signature: "0xsig",
         authorization: expect.objectContaining({ value: "1000" })
@@ -664,10 +670,10 @@ describe("OWS wallet helpers", () => {
       const decoded = JSON.parse(Buffer.from(paymentHeader ?? "", "base64").toString("utf8"));
       expect(decoded).toMatchObject({
         x402Version: 2,
+        // accepted round-trips the offered requirement exactly (no injected resource)
         accepted: {
           network: "eip155:8453",
-          amount: "5000",
-          resource: { url }
+          amount: "5000"
         },
         payload: {
           authorization: {
@@ -676,6 +682,7 @@ describe("OWS wallet helpers", () => {
           }
         }
       });
+      expect((decoded as { accepted: Record<string, unknown> }).accepted.resource).toBeUndefined();
     } finally {
       await closeServer(server);
     }

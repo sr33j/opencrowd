@@ -615,20 +615,33 @@ async function genericX402Fetch(privateKey: string, url: string, init: RequestIn
     return first;
   }
   const selectedRequirement = selectBasePaymentRequirement(paymentChallenge.accepts);
-  const originalRequirement = mergeChallengeRequirement(selectedRequirement, paymentChallenge.resource, url);
-  const requirement = normalizePaymentRequirement(originalRequirement);
+  const mergedRequirement = mergeChallengeRequirement(selectedRequirement, paymentChallenge.resource, url);
+  const requirement = normalizePaymentRequirement(mergedRequirement);
   const signer = await createSigner("base", privateKey);
-  const header = compatiblePaymentHeader(await createPaymentHeader(
+  const rawHeader = await createPaymentHeader(
     signer,
     paymentChallenge.x402Version,
     requirement as never
-  ), paymentChallenge.x402Version, originalRequirement, url);
-  const headers = new Headers(init.headers);
-  headers.set("X-PAYMENT", header);
-  headers.set("PAYMENT-SIGNATURE", header);
-  headers.set("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
-  const paid = await fetch(url, { ...init, headers });
-  if (paid.status === 402) {
+  );
+  // Try the requirement exactly as the service offered it first (standard
+  // x402 v2 middleware deep-matches `accepted` against its own offer), then
+  // fall back to the resource-merged variant some facilitators expect.
+  const headerVariants = [...new Set([
+    compatiblePaymentHeader(rawHeader, paymentChallenge.x402Version, selectedRequirement, url),
+    compatiblePaymentHeader(rawHeader, paymentChallenge.x402Version, mergedRequirement, url)
+  ])];
+  let paid: Response | undefined;
+  for (const header of headerVariants) {
+    const headers = new Headers(init.headers);
+    headers.set("X-PAYMENT", header);
+    headers.set("PAYMENT-SIGNATURE", header);
+    headers.set("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
+    paid = await fetch(url, { ...init, headers });
+    if (paid.status !== 402) {
+      return paid;
+    }
+  }
+  if (paid && paid.status === 402) {
     const retryChallenge = await x402ChallengeFromResponse(paid);
     const notes = paymentChallengeSummary(retryChallenge);
     if (notes) {
@@ -641,7 +654,7 @@ async function genericX402Fetch(privateKey: string, url: string, init: RequestIn
       });
     }
   }
-  return paid;
+  return paid ?? first;
 }
 
 async function signInWithXHeader(privateKey: string, challenge: unknown): Promise<string | undefined> {
@@ -702,14 +715,21 @@ function signInWithXExtension(challenge: unknown): Record<string, unknown> | und
 
 async function x402ChallengeFromResponse(response: Response): Promise<unknown> {
   const bodyChallenge = await response.clone().json().catch(() => undefined);
-  if (bodyChallenge) {
+  if (bodyChallenge && isUsableChallenge(bodyChallenge)) {
     return bodyChallenge;
   }
   const paymentRequired = response.headers.get("payment-required") ?? response.headers.get("x-payment-required");
   if (paymentRequired) {
-    return parseBase64Json(paymentRequired) ?? parseMaybeJson(paymentRequired);
+    const headerChallenge = parseBase64Json(paymentRequired) ?? parseMaybeJson(paymentRequired);
+    if (headerChallenge) {
+      return headerChallenge;
+    }
   }
-  return undefined;
+  return bodyChallenge;
+}
+
+function isUsableChallenge(challenge: unknown): boolean {
+  return Boolean(x402Challenge(challenge)?.accepts.length) || signInWithXExtension(challenge) !== undefined;
 }
 
 function x402Challenge(challenge: unknown): { x402Version: number; accepts: unknown[]; resource?: unknown } | undefined {
@@ -791,28 +811,23 @@ export function compatiblePaymentHeader(header: string, x402Version: number, ori
   return preserveChallengeNetwork(header, originalRequirement);
 }
 
-function v2PaymentHeader(header: string, x402Version: number, originalRequirement: unknown, resourceUrl: string): string {
+function v2PaymentHeader(header: string, x402Version: number, originalRequirement: unknown, _resourceUrl: string): string {
   if (!originalRequirement || typeof originalRequirement !== "object" || Array.isArray(originalRequirement)) {
     return header;
   }
   try {
     const payment = JSON.parse(Buffer.from(header, "base64").toString("utf8")) as { payload?: unknown };
+    // `accepted` must round-trip the requirement exactly as the service
+    // offered it: standard x402 v2 middleware deep-matches it against its
+    // own offers and rejects envelopes with extra fields.
     return Buffer.from(JSON.stringify({
       x402Version,
-      accepted: v2AcceptedRequirement(originalRequirement, resourceUrl),
+      accepted: originalRequirement,
       payload: payment.payload
     })).toString("base64");
   } catch {
     return header;
   }
-}
-
-function v2AcceptedRequirement(originalRequirement: unknown, resourceUrl: string): Record<string, unknown> {
-  const record = originalRequirement as Record<string, unknown>;
-  return {
-    ...record,
-    resource: record.resource ?? { url: resourceUrl }
-  };
 }
 
 function preserveChallengeNetwork(header: string, originalRequirement: unknown): string {
