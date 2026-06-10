@@ -16,7 +16,7 @@ export interface ConversationMessage {
 }
 
 export interface ConversationEntry {
-  type: "message" | "compaction";
+  type: "message" | "compaction" | "clear";
   timestamp: string;
   message?: ConversationMessage;
   archive_path?: string;
@@ -69,6 +69,38 @@ export async function readConversationMessages(session: SessionState): Promise<C
   return (await readConversationEntries(session))
     .filter((entry) => entry.type === "message" && entry.message)
     .map((entry) => entry.message as ConversationMessage);
+}
+
+export interface ConversationClearResult {
+  cleared: boolean;
+  archivePath?: string;
+  messagesCleared: number;
+}
+
+/**
+ * Drop all prior conversation context for the session. The existing
+ * transcript is archived under context/ (same convention as compaction)
+ * rather than deleted, then messages.jsonl starts fresh.
+ */
+export async function clearConversation(session: SessionState): Promise<ConversationClearResult> {
+  const messages = await readConversationMessages(session);
+  if (messages.length === 0) {
+    return { cleared: false, messagesCleared: 0 };
+  }
+  const archivePath = join("context", `cleared-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`);
+  const absoluteArchivePath = join(session.sessionDir, archivePath);
+  await mkdir(dirname(absoluteArchivePath), { recursive: true });
+  await writeFile(
+    absoluteArchivePath,
+    messages.map((message) => `${JSON.stringify({ timestamp: new Date().toISOString(), message })}\n`).join(""),
+    "utf8"
+  );
+  await writeFile(
+    conversationPath(session),
+    `${JSON.stringify({ type: "clear", timestamp: new Date().toISOString(), archive_path: archivePath })}\n`,
+    "utf8"
+  );
+  return { cleared: true, archivePath, messagesCleared: messages.length };
 }
 
 export async function compactConversationIfNeeded(

@@ -6,6 +6,7 @@ import {
   addAllowedService,
   blockService,
   budgetStatus,
+  clearConversation,
   confirmWalletDraft,
   createTestWallet,
   createWalletDraft,
@@ -227,6 +228,13 @@ async function replCommand(session: SessionState, state: ReplState, inputLine: s
     case "exit":
       console.log(await buildSessionSummary(session, "Interactive session ended.", { compact: true }));
       return true;
+    case "clear": {
+      const cleared = await clearConversation(session);
+      console.log(cleared.cleared
+        ? `context cleared — ${cleared.messagesCleared} prior messages archived to ${cleared.archivePath}`
+        : "context is already empty");
+      return false;
+    }
     case "budget":
       await setSessionBudget(session, parseUsd(rest[0] ?? "0"));
       printValue("Budget", budgetStatus(session), { pretty: renderKeyValues(asRecord(budgetStatus(session))) });
@@ -359,6 +367,7 @@ async function renderReplIntro(session: SessionState, state: ReplState): Promise
       "/permissions list|allow|remove|block",
       "/ledger show [--session <id>]",
       "/summary [verbose]",
+      "/clear",
       "/quit"
     ])
   ].join("\n");

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Box, render, Static, Text, useApp, useInput, useStdout } from "ink";
 import {
   budgetStatus,
+  clearConversation,
   confirmWalletDraft,
   createOpenCrowdSession,
   createWalletDraft,
@@ -310,6 +311,21 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
       case "help":
         push({ kind: "block", label: "Commands", text: renderHelp() });
         return;
+      case "clear": {
+        const cleared = await clearConversation(session);
+        // Static items already flushed to the terminal can only be removed
+        // by clearing the screen; the items array must keep growing because
+        // Static tracks how many entries it has rendered.
+        stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+        push({ kind: "banner", text: "" });
+        push({
+          kind: "note",
+          text: cleared.cleared
+            ? `context cleared — ${cleared.messagesCleared} prior messages archived to ${cleared.archivePath}`
+            : "context is already empty"
+        });
+        return;
+      }
       case "exit":
         await finalize("Interactive session ended.");
         return;
@@ -326,7 +342,7 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
         setModal({ type: "seed-export", target: result.target, value: "" });
         return;
     }
-  }, [finalize, push, session, submitTask]);
+  }, [finalize, push, session, startWalletCreation, stdout, submitTask]);
 
   const handleSubmit = useCallback(async (line: string) => {
     const trimmed = line.trim();

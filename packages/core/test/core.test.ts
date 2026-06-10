@@ -9,8 +9,10 @@ import {
   blockService,
   callPaidService,
   chooseFruitLabel,
+  clearConversation,
   compactConversationIfNeeded,
   appendConversationMessage,
+  readConversationMessages,
   confirmWalletDraft,
   createTestWallet,
   createWalletDraft,
@@ -134,6 +136,26 @@ describe("wallet registry", () => {
       spendable_balance_cents: 125
     }));
     await expect(listStoredWallets()).resolves.toHaveLength(1);
+  });
+});
+
+describe("conversation clearing", () => {
+  it("archives prior messages and starts the context fresh", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100 });
+    await appendConversationMessage(session, { role: "user", content: "first task" });
+    await appendConversationMessage(session, { role: "assistant", content: "done" });
+
+    const result = await clearConversation(session);
+
+    expect(result.cleared).toBe(true);
+    expect(result.messagesCleared).toBe(2);
+    expect(result.archivePath).toMatch(/^context\/cleared-/);
+    await expect(readConversationMessages(session)).resolves.toEqual([]);
+    const archived = await readFile(join(session.sessionDir, result.archivePath ?? ""), "utf8");
+    expect(archived).toContain("first task");
+
+    await expect(clearConversation(session)).resolves.toMatchObject({ cleared: false, messagesCleared: 0 });
   });
 });
 

@@ -39,6 +39,7 @@ import { ensureMockRuntime, type ReplState } from "../agent-task.js";
 
 export type CommandResult =
   | { kind: "text"; label?: string; body: string }
+  | { kind: "clear" }
   | { kind: "exit" }
   | { kind: "run-task"; task: string; overrides: { budgetCents?: number; model?: string; testMode?: boolean; testSeed?: string } }
   | { kind: "wallet-new"; label?: string }
@@ -53,6 +54,7 @@ export interface CommandSpec {
 
 export const COMMANDS: CommandSpec[] = [
   { name: "help", usage: "/help", summary: "Show commands and session info" },
+  { name: "clear", usage: "/clear", summary: "Clear all previous conversation context" },
   { name: "budget", usage: "/budget <usd>", summary: "Set the local session spend cap" },
   { name: "mode", usage: "/mode ask_first|yolo|blocked", summary: "Set the permission mode (shift+tab toggles)" },
   { name: "wallet", usage: "/wallet new|list|status|address|balance|use|fund|export", summary: "Manage payment wallets" },
@@ -88,6 +90,8 @@ export async function runSlashCommand(
     case "quit":
     case "exit":
       return { kind: "exit" };
+    case "clear":
+      return { kind: "clear" };
     case "budget": {
       await setSessionBudget(session, parseUsd(rest[0] ?? "0"));
       return { kind: "text", label: "Budget", body: renderKeyValues(asRecord(budgetStatus(session))) };
