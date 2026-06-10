@@ -8,12 +8,20 @@ import {
   assertServiceAllowed,
   blockService,
   callPaidService,
+  chooseFruitLabel,
   compactConversationIfNeeded,
   appendConversationMessage,
+  confirmWalletDraft,
+  createTestWallet,
+  createWalletDraft,
   createOpenCrowdSession,
   createSession,
   ensureVeniceCreditTopUp,
+  exportWalletSecret,
+  FRUIT_LABELS,
+  fundActiveTestWallet,
   listArtifacts,
+  listStoredWallets,
   normalizeLlmModels,
   AgenticWalletPaidHttpClient,
   compatiblePaymentHeader,
@@ -28,6 +36,7 @@ import {
   saveArtifact,
   setPreferredLlmModel,
   updateConfig,
+  walletList,
   walletAddress,
   walletBalance,
   runShell,
@@ -45,6 +54,7 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   delete process.env.OPENCROWD_CONFIG_DIR;
+  delete process.env.OPENCROWD_WALLET_SECRET_STORE;
   await Promise.all(tmpRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -61,25 +71,58 @@ describe("budget accounting", () => {
 });
 
 describe("OpenCrowd session defaults", () => {
-  it("defaults to yolo mode, CLI shell access, and wallet-balance budget", async () => {
+  it("defaults to yolo mode, CLI shell access, and active wallet-balance budget", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const script = join(root, "awal-balance.sh");
-    await writeFile(script, [
-      "#!/bin/sh",
-      "case \"$*\" in",
-      "  *\"balance\"*) echo '{\"address\":\"0xabc\",\"spendable_balance\":\"12.34\",\"spendable_balance_cents\":1234,\"network\":\"base\",\"asset\":\"USDC\"}' ;;",
-      "  *) echo '{}' ;;",
-      "esac"
-    ].join("\n"), "utf8");
-    await chmod(script, 0o755);
-    await updateConfig({ paymentWallet: "agentic-wallet", agenticWalletCommand: script, agenticWalletArgs: [] });
+    await createTestWallet("mango", 1234);
 
     const session = await createOpenCrowdSession({ workspaceRoot: root, surface: "cli" });
 
     expect(session.permissionMode).toBe("yolo");
     expect(session.shellEnabled).toBe(true);
     expect(session.budgetCents).toBe(1234);
+  });
+});
+
+describe("wallet registry", () => {
+  it("assigns unused fruit labels and falls back after fruit exhaustion", () => {
+    expect(FRUIT_LABELS.length).toBeGreaterThanOrEqual(100);
+    expect(chooseFruitLabel(["durian", "mango"])).not.toMatch(/^(durian|mango)$/);
+    expect(chooseFruitLabel([...FRUIT_LABELS])).toBe("fruit-1");
+  });
+
+  it("creates confirmed wallets without writing secrets into wallets.json", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    process.env.OPENCROWD_WALLET_SECRET_STORE = "file";
+
+    const draft = await createWalletDraft("dragonfruit");
+    const wallet = await confirmWalletDraft(draft);
+    const exported = await exportWalletSecret("dragonfruit");
+    const walletFile = await readFile(join(root, "config", "wallets.json"), "utf8");
+
+    expect(wallet.label).toBe("dragonfruit");
+    expect(exported.mnemonic).toBe(draft.mnemonic);
+    expect(walletFile).not.toContain(draft.mnemonic);
+    expect(await walletAddress()).toMatchObject({ account: "dragonfruit", address: draft.address });
+  });
+
+  it("lists and funds active test wallets", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    await createTestWallet("passionfruit", 100);
+    await fundActiveTestWallet(25);
+
+    await expect(walletBalance()).resolves.toMatchObject({
+      account: "passionfruit",
+      spendable_balance_cents: 125
+    });
+    await expect(walletList()).resolves.toContainEqual(expect.objectContaining({
+      label: "passionfruit",
+      active: true,
+      spendable_balance_cents: 125
+    }));
+    await expect(listStoredWallets()).resolves.toHaveLength(1);
   });
 });
 
@@ -333,32 +376,22 @@ describe("paid x402 calls", () => {
 });
 
 describe("OWS wallet helpers", () => {
-  it("parses wallet address and balance responses", async () => {
+  it("reads active test wallet address and balance", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const script = join(root, "ows-mock.sh");
-    await writeFile(script, [
-      "#!/bin/sh",
-      "case \"$*\" in",
-      "  *\"address\"*) echo '{\"address\":\"0xabc\",\"network\":\"base\",\"asset\":\"USDC\"}' ;;",
-      "  *\"balance\"*) echo '{\"address\":\"0xabc\",\"spendable_balance\":\"12.34\",\"spendable_balance_cents\":1234,\"network\":\"base\",\"asset\":\"USDC\"}' ;;",
-      "  *) echo '{}' ;;",
-      "esac"
-    ].join("\n"), "utf8");
-    await chmod(script, 0o755);
-    await updateConfig({ agenticWalletCommand: script, agenticWalletArgs: [] });
+    const wallet = await createTestWallet("lychee", 1234);
 
     await expect(walletAddress()).resolves.toEqual({
-      account: "agentic-wallet",
-      address: "0xabc",
-      network: "base",
-      asset: "USDC"
+      account: "lychee",
+      address: wallet.address,
+      network: "mock-base",
+      asset: "mock-USDC"
     });
     await expect(walletBalance()).resolves.toEqual({
-      account: "agentic-wallet",
-      address: "0xabc",
-      network: "base",
-      asset: "USDC",
+      account: "lychee",
+      address: wallet.address,
+      network: "mock-base",
+      asset: "mock-USDC",
       spendable_balance: "12.34",
       spendable_balance_cents: 1234
     });
@@ -383,8 +416,8 @@ describe("OWS wallet helpers", () => {
     };
     const config = {
       veniceAutoTopUpEnabled: true,
-      veniceAutoTopUpThresholdCents: 200,
-      veniceAutoTopUpTargetCents: 500,
+      veniceAutoTopUpThresholdCents: 500,
+      veniceAutoTopUpTargetCents: 750,
       veniceAutoTopUpMinimumCents: 500,
       x402LlmBaseUrl: "https://api.venice.ai/api/v1"
     } as OpenCrowdConfig;
@@ -392,18 +425,18 @@ describe("OWS wallet helpers", () => {
     await expect(ensureVeniceCreditTopUp(session, wallet, config)).resolves.toMatchObject({
       top_up_required: true,
       before_balance_cents: 150,
-      top_up_cents: 500,
-      after_balance_cents: 650
+      top_up_cents: 600,
+      after_balance_cents: 750
     });
-    expect(topUpCents).toBe(500);
-    expect(session.spentCents).toBe(500);
+    expect(topUpCents).toBe(600);
+    expect(session.spentCents).toBe(600);
     expect(session.reservedCents).toBe(0);
     const rows = await readLedger(session.ledgerPath);
     expect(rows).toContainEqual(expect.objectContaining({
       type: "wallet_top_up",
       status: "charged",
-      quoted_cost_cents: "500",
-      charged_cost_cents: "500"
+      quoted_cost_cents: "600",
+      charged_cost_cents: "600"
     }));
   });
 
@@ -448,18 +481,10 @@ describe("OWS wallet helpers", () => {
     });
   });
 
-  it("fails clearly when account is missing and constructs upto signing requests", async () => {
+  it("fails clearly when no wallet exists and constructs upto signing requests", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const walletScript = join(root, "wallet-fail.sh");
-    await writeFile(walletScript, [
-      "#!/bin/sh",
-      "echo 'Authentication required.' >&2",
-      "exit 1"
-    ].join("\n"), "utf8");
-    await chmod(walletScript, 0o755);
-    await updateConfig({ agenticWalletCommand: walletScript, agenticWalletArgs: [] });
-    await expect(walletAddress()).rejects.toThrow("Authentication required");
+    await expect(walletAddress()).rejects.toThrow("No active wallet");
 
     const argsPath = join(root, "args.txt");
     const script = join(root, "ows-sign.sh");

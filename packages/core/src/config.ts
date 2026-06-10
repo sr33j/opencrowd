@@ -32,11 +32,11 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   agenticWalletArgs: ["--yes", "awal"],
   owsCommand: "ows",
   x402LlmBaseUrl: "https://api.venice.ai/api/v1",
-  x402LlmModel: "openai-gpt-55",
+  x402LlmModel: "claude-opus-4-6",
   x402LlmMaxCostCents: 25,
   veniceAutoTopUpEnabled: true,
-  veniceAutoTopUpThresholdCents: 200,
-  veniceAutoTopUpTargetCents: 500,
+  veniceAutoTopUpThresholdCents: 500,
+  veniceAutoTopUpTargetCents: 750,
   veniceAutoTopUpMinimumCents: 500,
   x402PaymentAsset: "USDC",
   x402PaymentNetwork: "base",
@@ -57,6 +57,14 @@ export function configPath(): string {
 
 export function permissionsPath(): string {
   return join(configDir(), "permissions.json");
+}
+
+export function walletsPath(): string {
+  return join(configDir(), "wallets.json");
+}
+
+export function walletSecretsPath(): string {
+  return join(configDir(), "wallet-secrets.json");
 }
 
 export async function loadConfig(): Promise<OpenCrowdConfig> {
@@ -83,8 +91,20 @@ export async function updateConfig(patch: Partial<OpenCrowdConfig>): Promise<Ope
 }
 
 function normalizeConfig(config: OpenCrowdConfig): OpenCrowdConfig {
-  if (config.bazaarUrl === AGENTIC_MARKET_DEFAULT_URL) {
-    return { ...config, bazaarUrl: COINBASE_BAZAAR_URL };
+  let next = { ...config };
+  if (next.bazaarUrl === AGENTIC_MARKET_DEFAULT_URL) {
+    next = { ...next, bazaarUrl: COINBASE_BAZAAR_URL };
   }
-  return config;
+  if (
+    next.veniceAutoTopUpThresholdCents === 200
+    && next.veniceAutoTopUpTargetCents === 500
+    && next.veniceAutoTopUpMinimumCents === 500
+  ) {
+    next = {
+      ...next,
+      veniceAutoTopUpThresholdCents: DEFAULT_CONFIG.veniceAutoTopUpThresholdCents,
+      veniceAutoTopUpTargetCents: DEFAULT_CONFIG.veniceAutoTopUpTargetCents
+    };
+  }
+  return next;
 }

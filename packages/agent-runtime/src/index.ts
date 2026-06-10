@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import {
   appendLedgerEntry,
   budgetStatus,
+  chargeActiveTestWallet,
   completeSession,
   createDefaultPaidHttpClient,
   createOwsPaymentAdapter,
@@ -240,24 +241,47 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
         case "call_service": {
           const resourceUrl = stringValue(args.resource_url) ?? services[0]?.resource_url ?? "https://mock.opencrowd.test/x402/service-1";
           const method = stringValue(args.method) ?? "GET";
+          const matchedService = services.find((service) => service.resource_url === resourceUrl);
+          const costCents = integerValue(args.quoted_cost_cents) ?? matchedService?.price_cents ?? 0;
           const artifactPath = `artifacts/mock-service-calls/${Date.now()}-${slugUrl(resourceUrl)}.json`;
           context.onProgress?.({ type: "checking_budget", message: "Mock checking session budget" });
           context.onProgress?.({ type: "checking_permission", message: `Mock checking permission for ${resourceUrl}` });
-          context.onProgress?.({ type: "reserving_spend", message: "Mock reserving 0 cents" });
-          context.onProgress?.({ type: "calling_service", message: `Mock calling ${resourceUrl}` });
-          context.onProgress?.({ type: "saving_artifact", message: "Mock saving service response artifact" });
-          await appendLedgerEntry(context.session.ledgerPath, {
-            session_id: context.session.sessionId,
-            type: "service_call",
-            resource_url: resourceUrl,
-            method,
-            quoted_cost_cents: integerValue(args.quoted_cost_cents) ?? 0,
-            charged_cost_cents: 0,
-            status: "charged",
-            permission_mode: context.session.permissionMode,
-            artifact_path: artifactPath,
-            notes: "mock test mode service call"
-          });
+          context.onProgress?.({ type: "reserving_spend", message: `Mock reserving ${costCents} cents` });
+          const reservation = await reserveBudget(context.session, costCents);
+          try {
+            await chargeActiveTestWallet(costCents);
+            await finalizeReservation(context.session, reservation, costCents);
+            context.onProgress?.({ type: "calling_service", message: `Mock calling ${resourceUrl}` });
+            context.onProgress?.({ type: "saving_artifact", message: "Mock saving service response artifact" });
+            await appendLedgerEntry(context.session.ledgerPath, {
+              session_id: context.session.sessionId,
+              type: "service_call",
+              resource_url: resourceUrl,
+              method,
+              quoted_cost_cents: costCents,
+              charged_cost_cents: costCents,
+              status: "charged",
+              permission_mode: context.session.permissionMode,
+              artifact_path: artifactPath,
+              payment_id: "mock-payment",
+              notes: "mock test mode service call"
+            });
+          } catch (error) {
+            await releaseReservation(context.session, reservation);
+            await appendLedgerEntry(context.session.ledgerPath, {
+              session_id: context.session.sessionId,
+              type: "service_call",
+              resource_url: resourceUrl,
+              method,
+              quoted_cost_cents: costCents,
+              charged_cost_cents: 0,
+              status: "failed",
+              permission_mode: context.session.permissionMode,
+              artifact_path: artifactPath,
+              notes: (error as Error).message
+            });
+            throw error;
+          }
           return ok({
             status: 200,
             headers: { "content-type": "application/json", "x-opencrowd-mock": "true" },
@@ -266,9 +290,9 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
               mock: true,
               resource_url: resourceUrl,
               method,
-              summary: "This is a mock x402 service response. No network request or payment occurred."
+              summary: "This is a mock x402 service response. No network request occurred."
             },
-            charged_cost_cents: 0,
+            charged_cost_cents: costCents,
             artifact_path: artifactPath
           });
         }
@@ -454,8 +478,8 @@ export class X402LlmProvider implements LlmProvider {
     const models = await this.getModels(config.x402LlmBaseUrl);
     const model = models.find((candidate) => candidate.id === modelId);
     if (!model) {
-      const prefix = modelId === "gpt-5.5"
-        ? "Default model `gpt-5.5` is not available from the configured x402 LLM provider."
+      const prefix = modelId === "claude-opus-4-6"
+        ? "Default model `claude-opus-4-6` is not available from the configured x402 LLM provider."
         : `Model \`${modelId}\` is not available from the configured x402 LLM provider.`;
       throw new Error(`${prefix} Run \`opencrowd models list\` and choose an available model with \`opencrowd models set <model>\`, or pass \`opencrowd run --model <model>\`.`);
     }
@@ -639,9 +663,11 @@ export async function runAgentTask(session: SessionState, task: string, options:
   let serviceCallFailures = 0;
   for (let turn = 0; turn < maxTurns; turn += 1) {
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
-    const response = await provider.complete(messages);
+    const response = provider instanceof MockLlmProvider
+      ? await completeMockLlmCall(session, provider, messages, turn + 1)
+      : await provider.complete(messages);
     if (response.content || response.toolCalls.length > 0) {
-      const assistantMessage = { role: "assistant", content: response.content, toolCalls: response.toolCalls } as LlmMessage;
+      const assistantMessage = assistantMessageFromResponse(response);
       messages.push(assistantMessage);
       await options.onMessage?.(assistantMessage);
     }
@@ -693,6 +719,61 @@ export async function runAgentTask(session: SessionState, task: string, options:
   }
   const summary = await completeSession(session, "Stopped after reaching the maximum tool loop turns.");
   return renderAgentSummary(summary, options);
+}
+
+function assistantMessageFromResponse(response: LlmResponse): LlmMessage {
+  return {
+    role: "assistant",
+    content: response.toolCalls.length > 0 ? "" : response.content,
+    toolCalls: response.toolCalls
+  };
+}
+
+async function completeMockLlmCall(
+  session: SessionState,
+  provider: MockLlmProvider,
+  messages: LlmMessage[],
+  turn: number
+): Promise<LlmResponse> {
+  const costCents = 1;
+  const reservation = await reserveBudget(session, costCents);
+  const started = Date.now();
+  try {
+    const response = await provider.complete(messages);
+    await chargeActiveTestWallet(costCents);
+    await finalizeReservation(session, reservation, costCents);
+    await appendLedgerEntry(session.ledgerPath, {
+      session_id: session.sessionId,
+      type: "llm_call",
+      endpoint: "mock://llm",
+      model: "mock-test-mode",
+      method: "POST",
+      quoted_cost_cents: costCents,
+      charged_cost_cents: costCents,
+      status: "charged",
+      permission_mode: session.permissionMode,
+      payment_id: `mock-llm-${turn}`,
+      latency_ms: Date.now() - started,
+      notes: "mock test mode LLM call"
+    });
+    return response;
+  } catch (error) {
+    await releaseReservation(session, reservation);
+    await appendLedgerEntry(session.ledgerPath, {
+      session_id: session.sessionId,
+      type: "llm_call",
+      endpoint: "mock://llm",
+      model: "mock-test-mode",
+      method: "POST",
+      quoted_cost_cents: costCents,
+      charged_cost_cents: 0,
+      status: "failed",
+      permission_mode: session.permissionMode,
+      latency_ms: Date.now() - started,
+      notes: (error as Error).message
+    });
+    throw error;
+  }
 }
 
 function toolMessagePayload(payload: Record<string, unknown>): Record<string, unknown> {
@@ -1023,17 +1104,23 @@ function toOpenAiMessage(message: LlmMessage): OpenAI.Chat.Completions.ChatCompl
     };
   }
   if (message.role === "assistant") {
+    const toolCalls = message.toolCalls?.map((toolCall) => ({
+      id: toolCall.id,
+      type: "function" as const,
+      function: {
+        name: toolCall.name,
+        arguments: JSON.stringify(toolCall.arguments)
+      }
+    }));
+    if (toolCalls?.length) {
+      return {
+        role: "assistant",
+        tool_calls: toolCalls
+      } as OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
+    }
     return {
       role: "assistant",
-      content: message.content,
-      tool_calls: message.toolCalls?.map((toolCall) => ({
-        id: toolCall.id,
-        type: "function",
-        function: {
-          name: toolCall.name,
-          arguments: JSON.stringify(toolCall.arguments)
-        }
-      }))
+      content: message.content
     } as OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
   }
   return {

@@ -13,6 +13,14 @@ import { reserveBudget, finalizeReservation, releaseReservation } from "./budget
 import { loadConfig, updateConfig, type OpenCrowdConfig } from "./config.js";
 import { appendLedgerEntry } from "./ledger.js";
 import type { SessionState } from "./types.js";
+import {
+  activeStoredWallet,
+  listStoredWallets,
+  privateKeyForStoredWallet,
+  setActiveStoredWallet,
+  type StoredWallet,
+  type WalletListEntry
+} from "./wallets.js";
 
 export interface PaymentRequest {
   resourceUrl: string;
@@ -378,62 +386,33 @@ export async function createDefaultPaidHttpClient(): Promise<PaymentWallet> {
 }
 
 export async function activePaymentWallet(): Promise<PaymentWallet> {
-  const config = await loadConfig();
-  if (config.paymentWallet === "local-evm" || config.paymentWallet === "auto") {
-    const privateKey = await loadWalletPrivateKey();
-    if (privateKey) {
-      return new VeniceWalletPaidHttpClient(privateKey);
-    }
-    if (config.paymentWallet === "local-evm") {
-      throw new Error("Local EVM wallet is selected but WALLET_PRIVATE_KEY is not configured.");
-    }
+  const wallet = await activeStoredWallet();
+  if (wallet.kind === "test") {
+    throw new Error("Active wallet is a test wallet. Test wallets can only be used with --test-mode mock LLM and mock x402 services.");
   }
-  if (config.paymentWallet === "agentic-wallet" || config.paymentWallet === "auto") {
-    return new AgenticWalletPaidHttpClient(config);
-  }
-  const privateKey = await loadWalletPrivateKey();
-  if (privateKey) {
-    return new VeniceWalletPaidHttpClient(privateKey);
-  }
-  return new AgenticWalletPaidHttpClient(config);
+  return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet));
 }
 
 export async function walletInit(): Promise<Record<string, unknown>> {
-  const config = await loadConfig();
-  const status = await runAgenticWalletJson(config, ["status", "--json"]);
-  const localWallet = await localVeniceWalletSummary();
   const active = await activeWalletSummary().catch((error) => ({ error: (error as Error).message }));
+  const wallets = await walletList().catch(() => []);
   return {
-    ok: true,
-    selected_wallet: config.paymentWallet,
+    configured: !("error" in active),
     active_wallet: active,
-    command: [config.agenticWalletCommand, ...config.agenticWalletArgs].join(" "),
-    status,
-    local_wallet: localWallet,
-    next_steps: (status.auth as { authenticated?: unknown } | undefined)?.authenticated
-      ? ["Run `opencrowd wallet balance` to verify spendable USDC."]
-      : localWallet?.canConsume
-        ? ["A local Venice x402 wallet is configured and spendable. Run `opencrowd wallet balance` to verify it."]
-      : [
-        "Sign in with `npx awal auth login <email>`.",
-        "Verify the OTP with `npx awal auth verify <flow-id> <6-digit-code>`.",
-        "Run `opencrowd wallet address` and fund it with USDC, or set WALLET_PRIVATE_KEY for local Venice x402 payments."
-      ]
+    wallets,
+    next_steps: wallets.length === 0
+      ? ["Run `opencrowd wallet new` to create a fresh OpenCrowd wallet."]
+      : ["Run `opencrowd wallet list` to see wallets and balances."]
   };
 }
 
 export async function walletStatus(): Promise<Record<string, unknown>> {
-  const config = await loadConfig();
-  const status = await runAgenticWalletJson(config, ["status", "--json"]);
-  const localWallet = await localVeniceWalletSummary();
   const active = await activeWalletSummary().catch((error) => ({ error: (error as Error).message }));
+  const wallets = await listStoredWallets();
   return {
     configured: !("error" in active),
-    selected_wallet: config.paymentWallet,
     active_wallet: active,
-    command: [config.agenticWalletCommand, ...config.agenticWalletArgs].join(" "),
-    status,
-    local_wallet: localWallet
+    wallet_count: wallets.length
   };
 }
 
@@ -458,11 +437,23 @@ export interface WalletBalance {
 }
 
 export async function walletAddress(): Promise<WalletAddress> {
-  return (await activePaymentWallet()).address();
+  const wallet = await activeStoredWallet();
+  return walletAddressFromStored(wallet);
 }
 
 export async function walletBalance(): Promise<WalletBalance> {
-  return (await activePaymentWallet()).balance();
+  const wallet = await activeStoredWallet();
+  return walletBalanceFromStored(wallet);
+}
+
+export async function walletList(): Promise<WalletListEntry[]> {
+  const rows = await listStoredWallets();
+  return Promise.all(rows.map(async (wallet) => ({
+    ...wallet,
+    ...(await walletBalanceFromStored(wallet).catch((error) => ({
+      spendable_balance: `error: ${(error as Error).message}`
+    })))
+  })));
 }
 
 export async function setWalletAccount(account: string): Promise<{ account: string }> {
@@ -470,9 +461,33 @@ export async function setWalletAccount(account: string): Promise<{ account: stri
   return { account };
 }
 
-export async function setActivePaymentWallet(wallet: "auto" | "local-evm" | "agentic-wallet"): Promise<{ wallet: string }> {
-  await updateConfig({ paymentWallet: wallet });
-  return { wallet };
+export async function setActivePaymentWallet(wallet: string): Promise<{ wallet: string; address: string }> {
+  const next = await setActiveStoredWallet(wallet);
+  return { wallet: next.label, address: next.address };
+}
+
+function walletAddressFromStored(wallet: StoredWallet): WalletAddress {
+  return {
+    account: wallet.label,
+    address: wallet.address,
+    network: wallet.network,
+    asset: wallet.asset
+  };
+}
+
+async function walletBalanceFromStored(wallet: StoredWallet): Promise<WalletBalance> {
+  if (wallet.kind === "test") {
+    const cents = wallet.mock_balance_cents ?? 0;
+    return {
+      account: wallet.label,
+      address: wallet.address,
+      network: wallet.network,
+      asset: wallet.asset,
+      spendable_balance: (cents / 100).toFixed(2),
+      spendable_balance_cents: cents
+    };
+  }
+  return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet)).balance();
 }
 
 async function runAgenticWalletJson(config: OpenCrowdConfig, args: string[]): Promise<Record<string, unknown>> {

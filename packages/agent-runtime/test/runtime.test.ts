@@ -35,7 +35,7 @@ describe("x402 LLM provider", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await updateConfig({
       x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "gpt-5.5",
+      x402LlmModel: "claude-opus-4-6",
       x402LlmMaxCostCents: 10
     });
     const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
@@ -51,11 +51,11 @@ describe("x402 LLM provider", () => {
       fetchImpl: async (input, init) => {
         const url = String(input);
         if (url === "https://llm.example/v1/models") {
-          return jsonResponse({ data: [{ id: "gpt-5.5", max_cost_cents: 10 }] });
+          return jsonResponse({ data: [{ id: "claude-opus-4-6", max_cost_cents: 10 }] });
         }
         expect(url).toBe("https://llm.example/v1/chat/completions");
         expect((init?.headers as Record<string, string>)["x-payment"]).toBe("signed");
-        expect(JSON.parse(String(init?.body))).toMatchObject({ model: "gpt-5.5" });
+        expect(JSON.parse(String(init?.body))).toMatchObject({ model: "claude-opus-4-6" });
         return jsonResponse({
           choices: [{ message: { content: "done" } }],
           usage: { prompt_tokens: 11, completion_tokens: 3 }
@@ -78,7 +78,7 @@ describe("x402 LLM provider", () => {
     const rows = await readLedger(session.ledgerPath);
     expect(rows).toContainEqual(expect.objectContaining({
       type: "llm_call",
-      model: "gpt-5.5",
+      model: "claude-opus-4-6",
       status: "charged",
       charged_cost_cents: "4",
       payment_id: "pay_header",
@@ -92,14 +92,14 @@ describe("x402 LLM provider", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await updateConfig({
       x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "gpt-5.5",
+      x402LlmModel: "claude-opus-4-6",
       x402LlmMaxCostCents: 1
     });
     const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
     const provider = new X402LlmProvider(session, {
       fetchImpl: async () => jsonResponse({ data: [{ id: "available" }] })
     });
-    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `gpt-5.5` is not available");
+    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `claude-opus-4-6` is not available");
   });
 
   it("uses explicit model override instead of the stored preferred model", async () => {
@@ -130,6 +130,56 @@ describe("x402 LLM provider", () => {
 
     await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toMatchObject({ content: "done" });
     expect(calledModel).toBe("available");
+  });
+
+  it("omits assistant content when serializing tool-call history", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    await updateConfig({
+      x402LlmBaseUrl: "https://llm.example/v1",
+      x402LlmModel: "gpt-5.5",
+      x402LlmMaxCostCents: 3
+    });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
+    let assistantMessage: Record<string, unknown> | undefined;
+    const provider = new X402LlmProvider(session, {
+      paymentAdapter: {
+        async sign() {
+          return { headers: { "x-payment": "signed" } };
+        }
+      },
+      fetchImpl: async (input, init) => {
+        if (String(input).endsWith("/models")) {
+          return jsonResponse({ data: [{ id: "gpt-5.5", max_cost_cents: 3 }] });
+        }
+        const body = JSON.parse(String(init?.body)) as { messages: Record<string, unknown>[] };
+        assistantMessage = body.messages.find((message) => message.role === "assistant");
+        return jsonResponse({ choices: [{ message: { content: "done" } }] }, { "x402-charged-cost-cents": "1" });
+      }
+    });
+
+    await provider.complete([
+      { role: "user", content: "show services" },
+      {
+        role: "assistant",
+        content: "I'll check available services.",
+        toolCalls: [{ id: "call_1", name: "search_services", arguments: { query: "all services", limit: 20 } }]
+      },
+      { role: "tool", toolCallId: "call_1", content: "{}" }
+    ]);
+
+    expect(assistantMessage).toMatchObject({
+      role: "assistant",
+      tool_calls: [{
+        id: "call_1",
+        type: "function",
+        function: {
+          name: "search_services",
+          arguments: JSON.stringify({ query: "all services", limit: 20 })
+        }
+      }]
+    });
+    expect(assistantMessage).not.toHaveProperty("content");
   });
 
   it("rejects over-budget LLM calls before OWS signing", async () => {
@@ -270,7 +320,7 @@ describe("mock test mode", () => {
       }
     });
 
-    expect(output).toContain("Total spent: $0.00");
+    expect(output).toContain("Total spent: $0.02");
     expect(output).toContain("External service spend: $0.00");
     const toolMessage = persisted.find((message) => message.role === "tool");
     const payload = JSON.parse(toolMessage?.content ?? "{}") as Record<string, unknown>;
@@ -281,11 +331,11 @@ describe("mock test mode", () => {
       title: MOCK_X402_SERVICES[0].title
     });
     const rows = await readLedger(session.ledgerPath);
-    expect(rows.filter((row) => row.type === "llm_call")).toHaveLength(0);
+    expect(rows.filter((row) => row.type === "llm_call")).toHaveLength(2);
     expect(rows.filter((row) => row.type === "service_call")).toHaveLength(0);
   });
 
-  it("mocks call_service output and records a zero-cost service ledger row", async () => {
+  it("mocks call_service output and records a charged service ledger row", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
 
@@ -298,16 +348,17 @@ describe("mock test mode", () => {
       toolExecutor: createMockToolExecutor()
     });
 
-    expect(output).toContain("Total spent: $0.00");
+    expect(output).toContain("Total spent:");
     expect(output).toContain("Purchased services:");
     const rows = await readLedger(session.ledgerPath);
     expect(rows).toContainEqual(expect.objectContaining({
       type: "service_call",
       status: "charged",
-      charged_cost_cents: "0",
       notes: "mock test mode service call"
     }));
-    expect(session.spentCents).toBe(0);
+    const serviceRow = rows.find((row) => row.type === "service_call");
+    expect(Number(serviceRow?.charged_cost_cents ?? 0)).toBeGreaterThan(0);
+    expect(session.spentCents).toBeGreaterThan(0);
   });
 });
 
