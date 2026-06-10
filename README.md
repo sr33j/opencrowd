@@ -91,6 +91,11 @@ Or in any MCP client config:
 
 There's also a localhost HTTP API: `opencrowd api --port 8787`.
 
+Here's Claude Code discovering a live weather service on the Bazaar and paying
+it 0.001 USDC on Base through OpenCrowd — real money, real on-chain settlement:
+
+![Claude Code paying a real x402 service through the OpenCrowd MCP server](docs/mcp-demo.gif)
+
 ## Commands
 
 Inside the interactive UI (`/help` shows this live):
