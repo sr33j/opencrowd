@@ -24,6 +24,7 @@ import {
   listStoredWallets,
   normalizeLlmModels,
   AgenticWalletPaidHttpClient,
+  appendLedgerEntry,
   compatiblePaymentHeader,
   VeniceWalletPaidHttpClient,
   normalizeBazaarResponse,
@@ -152,6 +153,59 @@ describe("conversation compaction", () => {
     expect(result.compacted).toBe(true);
     expect(result.archivePath).toMatch(/^context\//);
     expect(result.messages[0]?.content).toContain("Original transcript archive:");
+  });
+});
+
+describe("permission gates", () => {
+  it("blocks paid calls to unknown services in ask_first mode", async () => {
+    const root = await tempRoot();
+    const permissionPath = join(root, "permissions.json");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
+
+    await expect(assertServiceAllowed(session, "https://unknown.example/api", "POST", 5, permissionPath))
+      .rejects.toThrow("permission required before paid call");
+  });
+
+  it("enforces per-call cost caps", async () => {
+    const root = await tempRoot();
+    const permissionPath = join(root, "permissions.json");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
+    await addAllowedService("https://svc.example/api", { max_cost_cents: 10 }, "yolo", permissionPath);
+
+    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 11, permissionPath))
+      .rejects.toThrow("quoted cost exceeds service cap");
+    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 10, permissionPath))
+      .resolves.toMatchObject({ resource_url: "https://svc.example/api" });
+  });
+
+  it("enforces per-session service spend caps from the ledger", async () => {
+    const root = await tempRoot();
+    const permissionPath = join(root, "permissions.json");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
+    await addAllowedService("https://svc.example/api", { session_max_cents: 15 }, "yolo", permissionPath);
+    await appendLedgerEntry(session.ledgerPath, {
+      session_id: session.sessionId,
+      type: "service_call",
+      resource_url: "https://svc.example/api",
+      charged_cost_cents: 10,
+      status: "charged",
+      permission_mode: "yolo"
+    });
+
+    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 6, permissionPath))
+      .rejects.toThrow("quoted cost exceeds session cap");
+    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 5, permissionPath))
+      .resolves.toMatchObject({ resource_url: "https://svc.example/api" });
+  });
+
+  it("blocks everything when the session mode is blocked", async () => {
+    const root = await tempRoot();
+    const permissionPath = join(root, "permissions.json");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "blocked" });
+    await addAllowedService("https://svc.example/api", {}, "yolo", permissionPath);
+
+    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 1, permissionPath))
+      .rejects.toThrow("session permission mode is blocked");
   });
 });
 

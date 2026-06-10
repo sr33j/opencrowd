@@ -394,6 +394,95 @@ describe("terminal rendering", () => {
   });
 });
 
+describe("human-in-the-loop permission gate", () => {
+  function permissionSeekingProvider(onSecondTurn: (toolMessage: LlmMessage) => void): LlmProvider {
+    return {
+      async complete(messages: LlmMessage[]): Promise<LlmResponse> {
+        const toolMessages = messages.filter((message) => message.role === "tool");
+        if (toolMessages.length === 0) {
+          return {
+            content: "",
+            toolCalls: [{
+              id: "call_1",
+              name: "request_service_permission",
+              arguments: { resource_url: "https://svc.example/api", reason: "needed for the task", caps: { max_cost_cents: 5 } }
+            }]
+          };
+        }
+        onSecondTurn(toolMessages[0]!);
+        return { content: "finished", toolCalls: [] };
+      }
+    };
+  }
+
+  it("never records the permission and tells the model when the user denies", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
+    const seen: string[] = [];
+    let executorCalls = 0;
+    let denialReachedModel = false;
+    const provider = permissionSeekingProvider((toolMessage) => {
+      denialReachedModel = toolMessage.content.includes("user denied permission");
+    });
+
+    const result = await runAgentTask(session, "buy the thing", {
+      provider,
+      toolExecutor: async () => {
+        executorCalls += 1;
+        return { ok: true, data: {} };
+      },
+      onPermissionRequest: async (request) => {
+        seen.push(request.resource_url);
+        return false;
+      }
+    });
+
+    expect(seen).toEqual(["https://svc.example/api"]);
+    expect(executorCalls).toBe(0);
+    expect(denialReachedModel).toBe(true);
+    expect(result).toContain("finished");
+  });
+
+  it("executes the permission tool when the user approves", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
+    let executorCalls = 0;
+    const provider = permissionSeekingProvider(() => {});
+
+    await runAgentTask(session, "buy the thing", {
+      provider,
+      toolExecutor: async (name) => {
+        executorCalls += 1;
+        expect(name).toBe("request_service_permission");
+        return { ok: true, data: { resource_url: "https://svc.example/api", mode: "ask_first" } };
+      },
+      onPermissionRequest: async () => true
+    });
+
+    expect(executorCalls).toBe(1);
+  });
+
+  it("records permission requests directly when no approval hook is set", async () => {
+    const root = await tempRoot();
+    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
+    let executorCalls = 0;
+    const provider = permissionSeekingProvider(() => {});
+
+    await runAgentTask(session, "buy the thing", {
+      provider,
+      toolExecutor: async () => {
+        executorCalls += 1;
+        return { ok: true, data: {} };
+      }
+    });
+
+    expect(executorCalls).toBe(1);
+  });
+});
+
 function jsonResponse(body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
