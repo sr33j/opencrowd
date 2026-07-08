@@ -62,7 +62,7 @@ export function openCrowdToolDefinition(name: ToolName): OpenCrowdToolDefinition
 function toolDescription(name: ToolName): string {
   switch (name) {
     case "search_services":
-      return "Search the x402 service marketplace for paid APIs or external data services relevant to a user request.";
+      return "Search the x402 service marketplace for bespoke paid services that provide external capabilities such as hosted services, deployment help, remote compute, live APIs, data access, or task-specific execution beyond the local device.";
     case "get_budget_status":
       return "Inspect the current local session budget, spent amount, reserved amount, and remaining cap.";
     case "list_allowed_services":

@@ -61,6 +61,10 @@ function execute(
     let timedOut = false;
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
+    let forceKillTimer: NodeJS.Timeout | undefined;
+    let closeGraceTimer: NodeJS.Timeout | undefined;
+    let exitCode: number | null = null;
+    const detached = process.platform !== "win32";
     const settle = (result: ShellResult) => {
       if (settled) {
         return;
@@ -69,17 +73,29 @@ function execute(
       if (timer) {
         clearTimeout(timer);
       }
+      if (forceKillTimer) {
+        clearTimeout(forceKillTimer);
+      }
+      if (closeGraceTimer) {
+        clearTimeout(closeGraceTimer);
+      }
+      cleanupProcessGroup(child, detached);
       resolvePromise(result);
     };
     const child = spawn(command, {
       cwd,
       shell: true,
       env,
+      detached,
       stdio: ["ignore", "pipe", "pipe"]
     });
     timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      signalProcessGroup(child, detached, "SIGTERM");
+      forceKillTimer = setTimeout(() => {
+        signalProcessGroup(child, detached, "SIGKILL");
+        settle({ command, cwd, exit_code: exitCode, timed_out: timedOut, stdout, stderr });
+      }, 1_000);
     }, timeoutMs);
     child.stdout.on("data", (chunk) => {
       stdout = capOutput(stdout + String(chunk), outputCapBytes);
@@ -90,10 +106,37 @@ function execute(
     child.on("error", (error) => {
       settle({ command, cwd, exit_code: null, timed_out: timedOut, stdout, stderr: capOutput(`${stderr}${error.message}`, outputCapBytes) });
     });
+    child.on("exit", (code) => {
+      exitCode = code;
+      closeGraceTimer = setTimeout(() => {
+        settle({ command, cwd, exit_code: code, timed_out: timedOut, stdout, stderr });
+      }, 250);
+    });
     child.on("close", (code) => {
       settle({ command, cwd, exit_code: code, timed_out: timedOut, stdout, stderr });
     });
   });
+}
+
+function signalProcessGroup(child: ReturnType<typeof spawn>, detached: boolean, signal: NodeJS.Signals): void {
+  if (!child.pid) {
+    return;
+  }
+  try {
+    if (detached) {
+      process.kill(-child.pid, signal);
+    } else {
+      child.kill(signal);
+    }
+  } catch {
+    // The process may already be gone by the time cleanup runs.
+  }
+}
+
+function cleanupProcessGroup(child: ReturnType<typeof spawn>, detached: boolean): void {
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+  signalProcessGroup(child, detached, "SIGTERM");
 }
 
 function resolveShellCwd(state: SessionState, cwd: string): string {

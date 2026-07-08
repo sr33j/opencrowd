@@ -31,6 +31,7 @@ import {
   VeniceWalletPaidHttpClient,
   normalizeBazaarResponse,
   OwsPaymentAdapter,
+  openCrowdToolDefinition,
   readLedger,
   removeAllowedService,
   reserveBudget,
@@ -94,6 +95,18 @@ describe("OpenCrowd session defaults", () => {
     const session = await createOpenCrowdSession({ workspaceRoot: root, surface: "cli" });
 
     expect(session.budgetCents).toBe(2000);
+  });
+});
+
+describe("tool definitions", () => {
+  it("describes search_services as the external capability discovery path", () => {
+    const description = openCrowdToolDefinition("search_services").description;
+
+    expect(description).toContain("bespoke paid services");
+    expect(description).toContain("external capabilities");
+    expect(description).toContain("hosted services");
+    expect(description).toContain("remote compute");
+    expect(description).toContain("beyond the local device");
   });
 });
 
@@ -390,6 +403,25 @@ describe("shell policy", () => {
       cwd: join(root, "missing-dir"),
       exit_code: null
     });
+  });
+
+  it("returns when a background child keeps stdio open after the shell exits", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+    await writeFile(
+      join(root, "background-child.js"),
+      "setInterval(() => process.stdout.write('still-running\\n'), 1000);\n"
+    );
+
+    const startedAt = Date.now();
+    const result = await runShell(session, `"${process.execPath}" background-child.js & echo done`, root, 5_000);
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(result).toMatchObject({
+      exit_code: 0,
+      timed_out: false
+    });
+    expect(result.stdout).toContain("done");
   });
 });
 

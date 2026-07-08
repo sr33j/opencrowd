@@ -245,6 +245,29 @@ describe("x402 LLM provider", () => {
 });
 
 describe("agent loop transcript", () => {
+  it("tells the agent about local CLI or MCP limits and service discovery", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    let firstMessages: LlmMessage[] | undefined;
+    const provider: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        firstMessages = messages;
+        return { content: "done", toolCalls: [] };
+      }
+    };
+
+    await runAgentTask(session, "host an app", { provider });
+
+    const systemPrompt = firstMessages?.find((message) => message.role === "system")?.content ?? "";
+    expect(systemPrompt).toContain("CLI or MCP-backed");
+    expect(systemPrompt).toContain("personal machine");
+    expect(systemPrompt).toContain("installed tools");
+    expect(systemPrompt).toContain("process lifetime");
+    expect(systemPrompt).toContain("When the local or hosted computer is not the right environment");
+    expect(systemPrompt).toContain("use search_services");
+    expect(systemPrompt).toContain("superpower");
+  });
+
   it("includes budget snapshots on every tool result message", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
