@@ -7,6 +7,7 @@ import {
   createDefaultPaidHttpClient,
   createOwsPaymentAdapter,
   executeTool,
+  DEFAULT_LLM_MODEL,
   finalizeReservation,
   ensureVeniceCreditTopUp,
   listLlmModels,
@@ -479,8 +480,8 @@ export class X402LlmProvider implements LlmProvider {
     const models = await this.getModels(config.x402LlmBaseUrl);
     const model = models.find((candidate) => candidate.id === modelId);
     if (!model) {
-      const prefix = modelId === "claude-opus-4-6"
-        ? "Default model `claude-opus-4-6` is not available from the configured x402 LLM provider."
+      const prefix = modelId === DEFAULT_LLM_MODEL
+        ? `Default model \`${DEFAULT_LLM_MODEL}\` is not available from the configured x402 LLM provider.`
         : `Model \`${modelId}\` is not available from the configured x402 LLM provider.`;
       throw new Error(`${prefix} Run \`opencrowd models list\` and choose an available model with \`opencrowd models set <model>\`, or pass \`opencrowd run --model <model>\`.`);
     }

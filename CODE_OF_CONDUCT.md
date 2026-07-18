@@ -5,4 +5,5 @@ This project follows the [Contributor Covenant, version 2.1](https://www.contrib
 In short: be respectful, be constructive, assume good faith. Harassment and
 personal attacks are not tolerated.
 
-Reports: 7104877+sr33j@users.noreply.github.com.
+Reports: open a [GitHub issue](https://github.com/sr33j/opencrowd/issues) or
+contact the maintainer via their GitHub profile.

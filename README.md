@@ -135,8 +135,9 @@ outgrow the model's context window (archives kept under `sessions/<id>/context/`
 
 ## Configuration notes
 
-- **Model**: starts as `claude-opus-4-6` on the Venice x402 route. If your
-  provider doesn't offer it, `opencrowd models list` then `models set <model>`.
+- **Model**: starts as `zai-org-glm-4.7-flash` (fast/cheap) on the Venice x402
+  route. If your provider doesn't offer it, or you want a stronger model,
+  `opencrowd models list` then `models set <model>`.
 - **Venice credit top-ups**: when the linked x402 credit drops below $5.00,
   OpenCrowd tops it back up to $7.50 from the wallet (configurable; recorded
   as `wallet_top_up` ledger rows).

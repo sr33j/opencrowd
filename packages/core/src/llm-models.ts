@@ -73,7 +73,7 @@ export function fallbackContextWindowTokens(modelId: string | undefined): number
   if (model.includes("gpt-5") || model.includes("gpt-4.1") || model.includes("claude") || model.includes("gemini")) {
     return 200_000;
   }
-  if (model.includes("gpt-4o")) {
+  if (model.includes("gpt-4o") || model.includes("glm")) {
     return 128_000;
   }
   return 64_000;

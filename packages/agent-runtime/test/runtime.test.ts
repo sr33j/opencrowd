@@ -35,7 +35,7 @@ describe("x402 LLM provider", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await updateConfig({
       x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "claude-opus-4-6",
+      x402LlmModel: "zai-org-glm-4.7-flash",
       x402LlmMaxCostCents: 10
     });
     const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
@@ -51,11 +51,11 @@ describe("x402 LLM provider", () => {
       fetchImpl: async (input, init) => {
         const url = String(input);
         if (url === "https://llm.example/v1/models") {
-          return jsonResponse({ data: [{ id: "claude-opus-4-6", max_cost_cents: 10 }] });
+          return jsonResponse({ data: [{ id: "zai-org-glm-4.7-flash", max_cost_cents: 10 }] });
         }
         expect(url).toBe("https://llm.example/v1/chat/completions");
         expect((init?.headers as Record<string, string>)["x-payment"]).toBe("signed");
-        expect(JSON.parse(String(init?.body))).toMatchObject({ model: "claude-opus-4-6" });
+        expect(JSON.parse(String(init?.body))).toMatchObject({ model: "zai-org-glm-4.7-flash" });
         return jsonResponse({
           choices: [{ message: { content: "done" } }],
           usage: { prompt_tokens: 11, completion_tokens: 3 }
@@ -78,7 +78,7 @@ describe("x402 LLM provider", () => {
     const rows = await readLedger(session.ledgerPath);
     expect(rows).toContainEqual(expect.objectContaining({
       type: "llm_call",
-      model: "claude-opus-4-6",
+      model: "zai-org-glm-4.7-flash",
       status: "charged",
       charged_cost_cents: "4",
       payment_id: "pay_header",
@@ -92,14 +92,14 @@ describe("x402 LLM provider", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await updateConfig({
       x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "claude-opus-4-6",
+      x402LlmModel: "zai-org-glm-4.7-flash",
       x402LlmMaxCostCents: 1
     });
     const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
     const provider = new X402LlmProvider(session, {
       fetchImpl: async () => jsonResponse({ data: [{ id: "available" }] })
     });
-    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `claude-opus-4-6` is not available");
+    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `zai-org-glm-4.7-flash` is not available");
   });
 
   it("uses explicit model override instead of the stored preferred model", async () => {

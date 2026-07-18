@@ -25,6 +25,8 @@ export interface OpenCrowdConfig {
 const COINBASE_BAZAAR_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
 const AGENTIC_MARKET_DEFAULT_URL = "https://api.agentic.market/v1/services";
 
+export const DEFAULT_LLM_MODEL = "zai-org-glm-4.7-flash";
+
 const DEFAULT_CONFIG: OpenCrowdConfig = {
   bazaarUrl: COINBASE_BAZAAR_URL,
   paymentWallet: "auto",
@@ -32,7 +34,7 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   agenticWalletArgs: ["--yes", "awal"],
   owsCommand: "ows",
   x402LlmBaseUrl: "https://api.venice.ai/api/v1",
-  x402LlmModel: "claude-opus-4-6",
+  x402LlmModel: DEFAULT_LLM_MODEL,
   x402LlmMaxCostCents: 25,
   veniceAutoTopUpEnabled: true,
   veniceAutoTopUpThresholdCents: 500,

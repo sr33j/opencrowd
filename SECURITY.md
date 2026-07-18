@@ -5,9 +5,11 @@ Read this before pointing it at funds you care about.
 
 ## Reporting a vulnerability
 
-Please email **7104877+sr33j@users.noreply.github.com** with a description and reproduction
-steps. Do not open a public issue for anything that could put user funds at
-risk. You should receive a response within 72 hours.
+Please report vulnerabilities privately via
+[GitHub Security Advisories](https://github.com/sr33j/opencrowd/security/advisories/new)
+with a description and reproduction steps. Do not open a public issue for
+anything that could put user funds at risk. You should receive a response
+within 72 hours.
 
 ## Threat model
 
