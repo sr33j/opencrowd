@@ -179,7 +179,7 @@ export class MockLlmProvider implements LlmProvider {
     this.random = new SeededRandom(options.seed ?? "opencrowd-test-mode");
     this.endProbability = options.endProbability ?? 0.35;
     this.maxToolTurns = options.maxToolTurns ?? 8;
-    this.tools = options.tools?.length ? options.tools : TOOL_NAMES.filter((name) => name !== "spawn_subagent");
+    this.tools = options.tools?.length ? options.tools : TOOL_NAMES.filter((name) => name !== "spawn_subagent" && name !== "check_subagents");
   }
 
   async complete(messages: LlmMessage[]): Promise<LlmResponse> {
@@ -358,8 +358,11 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
             outcome: "completed",
             final_message: `Mock subagent completed task: ${stringValue(args.task) ?? "mock subtask"}`,
             turns: 1,
-            trajectory_path: `${context.session.sessionDir}/subagents/mock/messages.jsonl`
+            trajectory_path: `${context.session.sessionDir}/subagents/mock/messages.jsonl`,
+            artifacts_written: []
           });
+        case "check_subagents":
+          return ok({ subagents: [] });
         case "complete_session":
           return ok(await completeSession(context.session, stringValue(args.final_message) ?? "Mock test mode session completed."));
       }
@@ -433,6 +436,8 @@ function mockToolArguments(
       return { command: "echo mock test mode", cwd: ".", timeout_ms: 1000 };
     case "spawn_subagent":
       return { task: `Mock subtask for: ${task.slice(0, 80)}` };
+    case "check_subagents":
+      return {};
     case "complete_session":
       return { final_message: `Mock test mode completed task: ${task.slice(0, 120)}` };
   }
@@ -741,6 +746,17 @@ export interface SubagentOptions {
   costHint?: string;
   /** Explicit subagent provider (tests and custom wiring). */
   provider?: LlmProvider;
+  /** Concurrent subagents per batch (default 4). */
+  maxParallel?: number;
+}
+
+/** Tracks background (fire-and-forget) subagents for check_subagents and completion draining. */
+interface BackgroundSubagent {
+  index: number;
+  task: string;
+  status: "running" | "finished";
+  promise: Promise<ToolResult>;
+  result?: ToolResult;
 }
 
 export type AgentTaskOutcome = "completed" | "stopped" | "max_turns";
@@ -789,9 +805,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (options.subagent) {
     systemPromptParts.push(
       `Delegation: spawn_subagent runs a cheaper, faster model (${options.subagent.model}${options.subagent.costHint ? `, ${options.subagent.costHint}` : ""}) with local file and shell tools only.`,
-      "Delegate bounded, parallelizable, low-judgment work such as searching files, summarizing, extracting, or mechanical edits.",
-      "Keep planning, paid-service decisions, and final answers in this main loop.",
-      "Subagents see none of this conversation, so pass explicit context (file paths, constraints) in the task."
+      "Multiple spawn_subagent calls in one reply run in parallel, so batch independent subtasks into a single reply; scale effort to the task (simple lookups need no subagents; broad sweeps merit 2-4).",
+      "Give each subagent an objective, expected output format, and clear boundaries so parallel subagents cannot make conflicting decisions; they see none of this conversation, so pass explicit context (file paths, constraints).",
+      "Each subagent's files land under artifacts/subagents/<n>/ and its completion lists what it wrote.",
+      "Delegate bounded, low-judgment work such as searching, summarizing, extracting, or mechanical edits; keep planning, paid-service decisions, and final answers in this main loop."
     );
   }
   const messages: LlmMessage[] = [
@@ -805,6 +822,19 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   const repeatedFailures = new Map<string, number>();
   let serviceCallFailures = 0;
   let subagentCount = 0;
+  const backgroundSubagents = new Map<string, BackgroundSubagent>();
+  const subagentLimiter = createLimiter(options.subagent?.maxParallel ?? 4);
+  const drainBackground = async (): Promise<Record<string, unknown>[]> => {
+    const outstanding = [...backgroundSubagents.values()];
+    await Promise.all(outstanding.map((entry) => entry.promise));
+    return outstanding.map((entry) => ({
+      subagent_index: entry.index,
+      task: entry.task,
+      ...(entry.result?.ok && entry.result.data && typeof entry.result.data === "object"
+        ? entry.result.data as Record<string, unknown>
+        : { outcome: "error", error: entry.result?.error })
+    }));
+  };
   for (let turn = 0; turn < maxTurns; turn += 1) {
     if (options.contextWindowTokens) {
       const compacted = compactMessagesInPlace(messages, options.contextWindowTokens);
@@ -828,6 +858,40 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const summary = await completeSession(session, response.content || "Session completed.");
       return { outcome: "completed", summary, turns: turn + 1 };
     }
+    // Launch every spawn_subagent in this reply immediately (bounded
+    // concurrency): one assistant turn is the parallelism unit, with a
+    // barrier at the turn boundary — background spawns skip the barrier.
+    const spawnedThisTurn = new Map<string, Promise<ToolResult>>();
+    if (options.subagent) {
+      for (const call of response.toolCalls) {
+        if (call.name !== "spawn_subagent") {
+          continue;
+        }
+        subagentCount += 1;
+        const index = subagentCount;
+        const subagent = options.subagent;
+        const promise = subagentLimiter(() => runSubagentTask(session, call.arguments, subagent, index, options));
+        if (call.arguments.background === true) {
+          const entry: BackgroundSubagent = {
+            index,
+            task: String(call.arguments.task ?? ""),
+            status: "running",
+            promise: promise.then((result) => {
+              entry.status = "finished";
+              entry.result = result;
+              return result;
+            })
+          };
+          backgroundSubagents.set(String(index), entry);
+          spawnedThisTurn.set(call.id, Promise.resolve({
+            ok: true,
+            data: { subagent_index: index, status: "running", note: "running in the background; collect the result with check_subagents" }
+          }));
+        } else {
+          spawnedThisTurn.set(call.id, promise);
+        }
+      }
+    }
     for (const call of response.toolCalls) {
       options.onProgress?.({
         type: "calling_tool",
@@ -837,11 +901,26 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const budgetBeforeToolCall = budgetStatus(session);
       let result: ToolResult;
       if (call.name === "spawn_subagent") {
-        if (!options.subagent) {
-          result = { ok: false, error: "subagents are not enabled for this session" };
+        result = options.subagent
+          ? await (spawnedThisTurn.get(call.id) ?? Promise.resolve({ ok: false, error: "subagent launch failed" }))
+          : { ok: false, error: "subagents are not enabled for this session" };
+      } else if (call.name === "check_subagents") {
+        if (call.arguments.wait === true) {
+          result = { ok: true, data: { subagents: await drainBackground() } };
         } else {
-          subagentCount += 1;
-          result = await runSubagentTask(session, call.arguments, options.subagent, subagentCount, options);
+          result = {
+            ok: true,
+            data: {
+              subagents: [...backgroundSubagents.values()].map((entry) => ({
+                subagent_index: entry.index,
+                task: entry.task,
+                status: entry.status,
+                ...(entry.status === "finished" && entry.result?.ok && entry.result.data && typeof entry.result.data === "object"
+                  ? entry.result.data as Record<string, unknown>
+                  : entry.status === "finished" ? { outcome: "error", error: entry.result?.error } : {})
+              }))
+            }
+          };
         }
       } else if (TOOL_NAMES.includes(call.name as ToolName)) {
         result = await runGatedTool(toolExecutor, call as LlmToolCall & { name: ToolName }, session, options);
@@ -884,16 +963,48 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         }
       }
       if (call.name === "complete_session") {
+        const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
         if (result.ok && result.data && typeof result.data === "object") {
-          return { outcome: "completed", summary: result.data as Record<string, unknown>, turns: turn + 1 };
+          const summary = result.data as Record<string, unknown>;
+          if (backgroundResults) {
+            summary.background_subagents = backgroundResults;
+          }
+          return { outcome: "completed", summary, turns: turn + 1 };
         }
         const summary = await completeSession(session, response.content || result.error || "Session completed.");
+        if (backgroundResults) {
+          summary.background_subagents = backgroundResults;
+        }
         return { outcome: "completed", summary, turns: turn + 1 };
       }
     }
   }
+  if (backgroundSubagents.size > 0) {
+    await drainBackground();
+  }
   const summary = await completeSession(session, "Stopped after reaching the maximum tool loop turns.");
   return { outcome: "max_turns", summary, turns: maxTurns };
+}
+
+/** Minimal concurrency limiter: at most `max` tasks in flight. */
+function createLimiter(max: number): <T>(fn: () => Promise<T>) => Promise<T> {
+  let active = 0;
+  const queue: Array<() => void> = [];
+  const next = () => {
+    active -= 1;
+    queue.shift()?.();
+  };
+  return async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= max) {
+      await new Promise<void>((resolve) => queue.push(resolve));
+    }
+    active += 1;
+    try {
+      return await fn();
+    } finally {
+      next();
+    }
+  };
 }
 
 interface SubagentCompletion {
@@ -903,6 +1014,8 @@ interface SubagentCompletion {
   final_message: string;
   turns: number;
   trajectory_path: string;
+  /** Artifact paths this subagent wrote (namespaced under subagents/<n>/). */
+  artifacts_written: string[];
 }
 
 /**
@@ -959,6 +1072,7 @@ async function runSubagentTask(
   }
 
   const repeatedFailures = new Map<string, number>();
+  const artifactsWritten: string[] = [];
   const finish = async (outcome: SubagentCompletion["outcome"], finalMessage: string, turns: number): Promise<ToolResult> => {
     const completion: SubagentCompletion = {
       subagent_id: subagentId,
@@ -966,7 +1080,8 @@ async function runSubagentTask(
       outcome,
       final_message: finalMessage,
       turns,
-      trajectory_path: trajectoryPath
+      trajectory_path: trajectoryPath,
+      artifacts_written: artifactsWritten
     };
     return { ok: true, data: completion };
   };
@@ -997,8 +1112,17 @@ async function runSubagentTask(
           message: `Tool call: ${summarizeToolCall(call)}`,
           data: { tool: call.name, arguments: call.arguments }
         });
+        // Writes are namespaced per subagent so parallel subagents can never
+        // clobber each other's artifacts (reads stay workspace-wide).
+        let callArguments = call.arguments;
+        if (call.name === "save_file" && typeof call.arguments.path === "string") {
+          const namespace = `subagents/${index}/`;
+          const path = call.arguments.path.startsWith(namespace) ? call.arguments.path : `${namespace}${call.arguments.path}`;
+          callArguments = { ...call.arguments, path };
+          artifactsWritten.push(path);
+        }
         const result = SUBAGENT_TOOL_NAMES.includes(call.name as ToolName)
-          ? await toolExecutor(call.name as ToolName, call.arguments, { session, onProgress: forwardProgress })
+          ? await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: forwardProgress })
           : { ok: false, error: `${call.name} is not available to subagents; local tools only` };
         forwardProgress({
           type: "tool_result",

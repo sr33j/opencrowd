@@ -12,6 +12,7 @@ export type ToolName =
   | "list_files"
   | "run_shell"
   | "spawn_subagent"
+  | "check_subagents"
   | "complete_session";
 
 export const TOOL_NAMES: ToolName[] = [
@@ -28,6 +29,7 @@ export const TOOL_NAMES: ToolName[] = [
   "list_files",
   "run_shell",
   "spawn_subagent",
+  "check_subagents",
   "complete_session"
 ];
 
@@ -97,7 +99,9 @@ function toolDescription(name: ToolName): string {
     case "run_shell":
       return "Run a gated local shell command only when shell access is enabled for the session.";
     case "spawn_subagent":
-      return "Delegate a bounded, parallelizable, low-judgment subtask (search a file tree, summarize, extract, mechanical edits) to a cheap fast subagent with local tools only. Keep planning, paid-service decisions, and final answers in the main loop. Subagents cannot spawn subagents or spend on paid services.";
+      return "Delegate a bounded, parallelizable, low-judgment subtask (search, summarize, extract, mechanical work) to a cheap fast subagent with local tools only. Multiple spawn_subagent calls in one reply run in parallel. Give each an objective, expected output format, and clear boundaries so parallel subagents cannot conflict. Set background=true only for long tasks whose results you will collect later with check_subagents. Keep planning, paid-service decisions, and final answers in the main loop.";
+    case "check_subagents":
+      return "Check on background subagents started with spawn_subagent background=true: returns each one's status and, when finished, its structured result. Set wait=true to block until all outstanding background subagents finish.";
     case "complete_session":
       return "Finish the agent run and present a concise final answer.";
   }
@@ -158,8 +162,13 @@ function toolParameters(name: ToolName): JsonSchema {
       return objectSchema({
         task: stringSchema("Self-contained task description for the subagent."),
         context: stringSchema("Explicit context the subagent needs: relevant file paths, constraints, and prior findings. Subagents see none of this conversation."),
-        expected_output: stringSchema("What the subagent should return in its final message, for example `a bullet list of matching files`.")
+        expected_output: stringSchema("What the subagent should return in its final message, for example `a bullet list of matching files`."),
+        background: { type: "boolean", description: "Run without blocking this turn; collect the result later with check_subagents. Default false." }
       }, ["task"]);
+    case "check_subagents":
+      return objectSchema({
+        wait: { type: "boolean", description: "Block until all outstanding background subagents finish. Default false." }
+      });
     case "complete_session":
       return objectSchema({
         final_message: stringSchema("Concise final message to show the user.")

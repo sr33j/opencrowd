@@ -656,6 +656,99 @@ describe("subagent delegation", () => {
   });
 });
 
+describe("parallel and background subagents", () => {
+  function slowSubagent(label: string, delayMs: number, events: string[]): LlmProvider {
+    return {
+      async complete(): Promise<LlmResponse> {
+        events.push(`start:${label}`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        events.push(`end:${label}`);
+        return { content: "", toolCalls: [{ id: "sub", name: "complete_session", arguments: { final_message: `${label} done` } }] };
+      }
+    };
+  }
+
+  it("runs spawns from one reply concurrently and namespaces their writes", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const events: string[] = [];
+    let subagentCalls = 0;
+    const subagentProvider: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          subagentCalls += 1;
+          const label = `sub${subagentCalls}`;
+          events.push(`start:${label}`);
+          await new Promise((resolve) => setTimeout(resolve, 80));
+          events.push(`end:${label}`);
+          return { content: "", toolCalls: [{ id: "s1", name: "save_file", arguments: { path: "notes.txt", content: label } }] };
+        }
+        return { content: "", toolCalls: [{ id: "s2", name: "complete_session", arguments: { final_message: "wrote notes" } }] };
+      }
+    };
+    const mainProvider: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return {
+            content: "",
+            toolCalls: [
+              { id: "call_1", name: "spawn_subagent", arguments: { task: "first" } },
+              { id: "call_2", name: "spawn_subagent", arguments: { task: "second" } }
+            ]
+          };
+        }
+        const results = messages.filter((message) => message.role === "tool").map((message) => JSON.parse(message.content) as { result: { ok: boolean; data: { artifacts_written: string[] } } });
+        for (const parsed of results) {
+          expect(parsed.result.ok).toBe(true);
+        }
+        return { content: "", toolCalls: [{ id: "call_3", name: "complete_session", arguments: { final_message: "done" } }] };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "parallel work", {
+      provider: mainProvider,
+      subagent: { model: "cheap-model", provider: subagentProvider }
+    });
+
+    expect(result.outcome).toBe("completed");
+    // Both subagents started before either finished: concurrent, not serial.
+    expect(events.slice(0, 2).every((event) => event.startsWith("start:"))).toBe(true);
+    const written = await readFile(join(session.artifactsDir, "subagents", "1", "notes.txt"), "utf8").catch(() => undefined)
+      ?? await readFile(join(session.artifactsDir, "subagents", "2", "notes.txt"), "utf8");
+    expect(written).toMatch(/sub[12]/);
+  });
+
+  it("supports background spawns joined via check_subagents", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const events: string[] = [];
+    const mainProvider: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        const toolMessages = messages.filter((message) => message.role === "tool");
+        if (toolMessages.length === 0) {
+          return { content: "", toolCalls: [{ id: "call_1", name: "spawn_subagent", arguments: { task: "long job", background: true } }] };
+        }
+        if (toolMessages.length === 1) {
+          const parsed = JSON.parse(toolMessages[0].content) as { result: { data: { status: string } } };
+          expect(parsed.result.data.status).toBe("running");
+          return { content: "", toolCalls: [{ id: "call_2", name: "check_subagents", arguments: { wait: true } }] };
+        }
+        const parsed = JSON.parse(toolMessages[1].content) as { result: { data: { subagents: Array<{ final_message: string }> } } };
+        expect(parsed.result.data.subagents[0].final_message).toBe("bg done");
+        return { content: "", toolCalls: [{ id: "call_3", name: "complete_session", arguments: { final_message: "collected" } }] };
+      }
+    };
+    const result = await runAgentTaskDetailed(session, "background work", {
+      provider: mainProvider,
+      subagent: { model: "cheap-model", provider: slowSubagent("bg", 60, events) }
+    });
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("collected");
+  });
+});
+
 function jsonResponse(body: unknown, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status: 200,
