@@ -25,16 +25,16 @@ against a mock wallet, mock x402 services, and a mock LLM. No real money moves.
 npx opencrowd
 ```
 
-First launch walks you through setup:
+First launch is two steps — there is no wallet setup:
 
-1. **Create a wallet** — a fresh keypair that lives only on your machine
-   (seed phrase in your OS keychain, backup confirmed before anything is saved).
-2. **Fund it** — scan the QR or tap the MetaMask link to send a few dollars of
-   USDC on Base. The wallet is the agent's entire blast radius: it can never
-   spend more than you put in.
-3. **Give it a task** — type what you want. The agent searches the
-   [Coinbase x402 Bazaar](https://docs.cdp.coinbase.com/x402/docs/welcome) for
-   services that can help, and asks your permission before paying any new one.
+1. **Fund the wallet** — it already exists (created automatically, shared
+   with the AgentCash and CrowdCode tools so everything draws one balance).
+   Scan the QR or tap the MetaMask link to send a few dollars of USDC on
+   Base. The wallet is the agent's entire blast radius: it can never spend
+   more than you put in.
+2. **Give it a task** — type what you want. The agent discovers paid
+   x402/MPP services through its connectors, checks their CrowdCode
+   reputation, and pays per call.
 
 ```text
 ❯ find an x402 service that returns live weather and get today's forecast

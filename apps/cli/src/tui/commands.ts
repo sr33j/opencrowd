@@ -42,7 +42,6 @@ export type CommandResult =
   | { kind: "clear" }
   | { kind: "exit" }
   | { kind: "run-task"; task: string; overrides: { budgetCents?: number; model?: string; testMode?: boolean; testSeed?: string } }
-  | { kind: "wallet-new"; label?: string }
   | { kind: "wallet-export"; target: string }
   | { kind: "help" };
 
@@ -57,7 +56,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "clear", usage: "/clear", summary: "Clear all previous conversation context" },
   { name: "budget", usage: "/budget <usd>", summary: "Set the local session spend cap" },
   { name: "mode", usage: "/mode ask_first|yolo|blocked", summary: "Set the permission mode (shift+tab toggles)" },
-  { name: "wallet", usage: "/wallet new|list|status|address|balance|use|fund|export", summary: "Manage payment wallets" },
+  { name: "wallet", usage: "/wallet list|status|address|balance|use|fund|export", summary: "Inspect the shared wallet" },
   { name: "models", usage: "/models list|set <model>", summary: "List or set the x402 LLM model" },
   { name: "model", usage: "/model <model>", summary: "Set the model for this session only" },
   { name: "run", usage: "/run [--budget <usd>] [--model <m>] \"<task>\"", summary: "Run a task with one-off overrides" },
@@ -256,7 +255,11 @@ async function walletSlashCommand(session: SessionState, state: ReplState, args:
       await syncSessionBudgetToActiveWallet(session);
       return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(wallet)) };
     }
-    return { kind: "wallet-new", label: subaction };
+    return {
+      kind: "text",
+      label: "Wallet",
+      body: "  OpenCrowd uses the shared AgentCash wallet — it already exists, nothing to create.\n  Use /wallet address to see where to deposit USDC."
+    };
   }
   if (action === "list" || action === undefined) {
     const wallets = await walletList();

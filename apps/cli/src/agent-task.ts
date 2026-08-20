@@ -114,6 +114,26 @@ async function preparePersistentRun(
 }
 
 /**
+ * Start the connector MCP servers and touch the wallet balance before a
+ * session is created. On a fresh machine this both installs the pinned
+ * vendors (npx cache) and auto-creates the shared AgentCash wallet, so the
+ * session budget can read a real balance on the very first run.
+ */
+export async function warmStartEconomy(): Promise<void> {
+  if (process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
+    return;
+  }
+  try {
+    const manager = await sharedConnectorManager();
+    if (manager.hasTool("agentcash_get_balance")) {
+      await manager.execute("agentcash_get_balance", {});
+    }
+  } catch {
+    // Connectors are optional; the session falls back to legacy behavior.
+  }
+}
+
+/**
  * Connector-ingested vendor tools (integration spec). Unavailable connectors
  * degrade to the legacy economic path rather than failing the run.
  */

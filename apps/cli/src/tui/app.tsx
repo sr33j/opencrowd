@@ -3,11 +3,8 @@ import { Box, render, Static, Text, useApp, useInput, useStdout } from "ink";
 import {
   budgetStatus,
   clearConversation,
-  confirmWalletDraft,
   createOpenCrowdSession,
-  createWalletDraft,
   ensureDefaultTestWallet,
-  listStoredWallets,
   loadConfig,
   setPermissionMode,
   setSessionBudget,
@@ -20,7 +17,7 @@ import {
 import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } from "./funding.js";
 import { exportWalletSecret } from "@opencrowd/core";
 import { buildSessionSummary, type PermissionRequest } from "@opencrowd/agent-runtime";
-import { ensureMockRuntime, runPersistentAgentTask, type ReplState } from "../agent-task.js";
+import { ensureMockRuntime, runPersistentAgentTask, warmStartEconomy, type ReplState } from "../agent-task.js";
 import { COMMANDS, matchCommands, runSlashCommand, type CommandResult } from "./commands.js";
 import { envFlag, formatCents, shortUrl, truncateMiddle } from "../shared.js";
 
@@ -45,11 +42,7 @@ type Modal =
   | { type: "permission"; request: PermissionRequest; resolve: (approved: boolean) => void }
   | { type: "seed-export"; target: string; value: string; error?: string };
 
-type WalletDraft = Awaited<ReturnType<typeof createWalletDraft>>;
-
 type Wizard =
-  | { step: "welcome" }
-  | { step: "seed"; draft: WalletDraft; value: string; error?: string }
   | { step: "fund"; address: string; qr?: string; balanceCents: number }
   | { step: "done"; funded: boolean; budgetCents: number };
 
@@ -60,7 +53,8 @@ interface AppProps {
   initialTestMode: boolean;
   initialTestSeed?: string;
   defaultModel: string;
-  needsOnboarding: boolean;
+  /** Present when the shared wallet exists but is unfunded: show the deposit panel. */
+  onboarding?: { address: string };
 }
 
 interface WalletInfo {
@@ -68,7 +62,7 @@ interface WalletInfo {
   balanceCents?: number;
 }
 
-function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnboarding }: AppProps): React.ReactElement {
+function App({ session, initialTestMode, initialTestSeed, defaultModel, onboarding }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const width = Math.max(60, Math.min(140, stdout?.columns ?? 100));
@@ -87,7 +81,7 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
   const [activity, setActivity] = useState("");
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [modal, setModal] = useState<Modal | null>(null);
-  const [wizard, setWizard] = useState<Wizard | null>(needsOnboarding ? { step: "welcome" } : null);
+  const [wizard, setWizard] = useState<Wizard | null>(onboarding ? { step: "fund", address: onboarding.address, balanceCents: 0 } : null);
   const [wallet, setWallet] = useState<WalletInfo>({});
   const [tick, setTick] = useState(0);
   const [exiting, setExiting] = useState(false);
@@ -131,39 +125,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
   useEffect(() => {
     setSuggestionIndex(0);
   }, [input]);
-
-  const startWalletCreation = useCallback(async (label?: string) => {
-    try {
-      const draft = await createWalletDraft(label);
-      setWizard({ step: "seed", draft, value: "" });
-    } catch (error) {
-      setWizard(null);
-      push({ kind: "error", text: (error as Error).message });
-    }
-  }, [push]);
-
-  const handleSeedSubmit = useCallback(async (wizardState: Extract<Wizard, { step: "seed" }>, submitted: string) => {
-    const words = wizardState.draft.mnemonic.split(/\s+/);
-    const expected = [words[2], words[7], words[11]].join(" ").toLowerCase();
-    if (submitted.trim().toLowerCase() !== expected) {
-      setWizard({ ...wizardState, value: "", error: "those words do not match — check the seed phrase and try again (esc to cancel)" });
-      return;
-    }
-    try {
-      const wallet = await confirmWalletDraft(wizardState.draft);
-      push({ kind: "block", label: "Wallet created", text: [
-        `  label    ${wallet.label}`,
-        `  address  ${wallet.address}`,
-        `  network  ${wallet.network}`,
-        `  asset    ${wallet.asset}`
-      ].join("\n") });
-      setWizard({ step: "fund", address: wallet.address, balanceCents: 0 });
-      void refreshWallet();
-    } catch (error) {
-      setWizard(null);
-      push({ kind: "error", text: (error as Error).message });
-    }
-  }, [push, refreshWallet]);
 
   useEffect(() => {
     if (wizard?.step !== "fund") {
@@ -335,14 +296,11 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
         }
         await submitTask(result.task, result.overrides);
         return;
-      case "wallet-new":
-        await startWalletCreation(result.label);
-        return;
       case "wallet-export":
         setModal({ type: "seed-export", target: result.target, value: "" });
         return;
     }
-  }, [finalize, push, session, startWalletCreation, stdout, submitTask]);
+  }, [finalize, push, session, stdout, submitTask]);
 
   const handleSubmit = useCallback(async (line: string) => {
     const trimmed = line.trim();
@@ -410,39 +368,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
       return;
     }
     if (wizard) {
-      if (wizard.step === "welcome") {
-        if (isReturn) {
-          void startWalletCreation();
-        } else if (key.escape || char === "s") {
-          setWizard(null);
-          push({ kind: "note", text: "skipped setup — run /wallet new whenever you are ready, or /test-mode on to try it without funds" });
-        }
-        return;
-      }
-      if (wizard.step === "seed") {
-        if (key.escape) {
-          setWizard(null);
-          push({ kind: "note", text: "wallet creation cancelled; nothing was saved" });
-          return;
-        }
-        if (isReturn) {
-          void handleSeedSubmit(wizard, wizard.value);
-          return;
-        }
-        if (key.backspace || key.delete) {
-          setWizard({ ...wizard, value: wizard.value.slice(0, -1) });
-          return;
-        }
-        if (char && !key.ctrl && !key.meta) {
-          const [first, hasNewline] = splitChunk(char);
-          const nextValue = wizard.value + first;
-          setWizard({ ...wizard, value: nextValue });
-          if (hasNewline) {
-            void handleSeedSubmit(wizard, nextValue);
-          }
-        }
-        return;
-      }
       if (wizard.step === "fund") {
         if (char === "s" || key.escape) {
           setWizard({ step: "done", funded: false, budgetCents: 0 });
@@ -610,8 +535,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, needsOnb
       </Static>
       {modal?.type === "permission" ? <PermissionModal request={modal.request} /> : null}
       {modal?.type === "seed-export" ? <SeedExportModal value={modal.value} error={modal.error} /> : null}
-      {wizard?.step === "welcome" ? <WelcomePanel /> : null}
-      {wizard?.step === "seed" ? <SeedBackupPanel mnemonic={wizard.draft.mnemonic} value={wizard.value} error={wizard.error} /> : null}
       {wizard?.step === "fund" ? <FundPanel address={wizard.address} qr={wizard.qr} spinnerFrame={spinnerFrame} /> : null}
       {wizard?.step === "done" ? <DonePanel funded={wizard.funded} budgetCents={wizard.budgetCents} /> : null}
       {busy ? (
@@ -746,23 +669,10 @@ function PermissionModal({ request }: { request: PermissionRequest }): React.Rea
   );
 }
 
-function WelcomePanel(): React.ReactElement {
-  return (
-    <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
-      <Text color="cyan" bold>Let's set up your agent's wallet</Text>
-      <Text>OpenCrowd gives the agent its own small USDC wallet on Base. You stay in control:</Text>
-      <Text>  1. Create a fresh wallet (it lives only on this machine)</Text>
-      <Text>  2. Back up its seed phrase</Text>
-      <Text>  3. Fund it with a few dollars of USDC — this is the agent's entire blast radius</Text>
-      <Text dimColor>enter: create wallet · s: skip for now (try /test-mode on for a zero-cost demo)</Text>
-    </Box>
-  );
-}
-
 function FundPanel({ address, qr, spinnerFrame }: { address: string; qr?: string; spinnerFrame: number }): React.ReactElement {
   return (
     <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1} marginTop={1}>
-      <Text color="cyan" bold>Fund the agent wallet (suggested: {formatCents(SUGGESTED_FUND_CENTS)} USDC on Base)</Text>
+      <Text color="cyan" bold>Your agent's wallet is ready — fund it to begin (suggested: {formatCents(SUGGESTED_FUND_CENTS)} USDC on Base)</Text>
       <Text>  address  <Text color="cyan">{address}</Text></Text>
       <Text>  send USDC on Base from any wallet or exchange — or scan / tap below</Text>
       {qr ? <Text>{qr}</Text> : null}
@@ -796,26 +706,6 @@ function DonePanel({ funded, budgetCents }: { funded: boolean; budgetCents: numb
   );
 }
 
-function SeedBackupPanel({ mnemonic, value, error }: { mnemonic: string; value: string; error?: string }): React.ReactElement {
-  const words = mnemonic.split(/\s+/);
-  const rows: string[] = [];
-  for (let index = 0; index < words.length; index += 4) {
-    rows.push(words.slice(index, index + 4).map((word, offset) => `${String(index + offset + 1).padStart(2)}. ${word.padEnd(12)}`).join(" "));
-  }
-  return (
-    <Box borderStyle="round" borderColor="yellow" flexDirection="column" paddingX={1} marginTop={1}>
-      <Text color="yellow" bold>Back up this seed phrase now</Text>
-      <Text dimColor>OpenCrowd cannot recover this wallet without it. Write it down somewhere safe.</Text>
-      <Box flexDirection="column" marginY={1}>
-        {rows.map((row) => <Text key={row}>  {row}</Text>)}
-      </Box>
-      {error ? <Text color="red">{error}</Text> : null}
-      <Text>Enter words 3, 8, and 12 separated by spaces: <Text inverse>{value || " "}</Text></Text>
-      <Text dimColor>esc to cancel</Text>
-    </Box>
-  );
-}
-
 function SeedExportModal({ value, error }: { value: string; error?: string }): React.ReactElement {
   return (
     <Box borderStyle="round" borderColor="red" flexDirection="column" paddingX={1} marginTop={1}>
@@ -841,7 +731,7 @@ function StatusBar({ walletLabel, walletBalanceCents, spentCents, remainingCents
 }): React.ReactElement {
   const walletPart = walletLabel
     ? `${walletLabel}${walletBalanceCents !== undefined ? ` ${formatCents(walletBalanceCents)}` : ""}`
-    : "no wallet — /wallet new";
+    : "wallet initializing…";
   const left = ` ${walletPart} · spent ${formatCents(spentCents)} / left ${formatCents(remainingCents)} · ${model}`;
   const modeBadge = ` ${mode}${testMode ? " · TEST" : ""} `;
   const hint = "shift+tab: mode";
@@ -878,13 +768,20 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
   if (testMode) {
     await ensureDefaultTestWallet();
   }
-  let needsOnboarding = false;
+  // Start the connector MCP servers before the session so the shared
+  // AgentCash wallet exists (auto-created on first balance call) and the
+  // session budget can read its balance.
+  let onboarding: { address: string } | undefined;
   if (!testMode) {
+    await warmStartEconomy();
     try {
-      const wallets = await listStoredWallets({ includeBalances: false });
-      needsOnboarding = wallets.filter((wallet) => wallet.kind !== "test").length === 0;
+      const balance = await walletBalance();
+      const cents = balance.spendable_balance_cents ?? Math.floor(Number(balance.spendable_balance) * 100);
+      if (balance.address && (!Number.isFinite(cents) || cents === 0)) {
+        onboarding = { address: balance.address };
+      }
     } catch {
-      needsOnboarding = false;
+      onboarding = undefined;
     }
   }
   const session = await createOpenCrowdSession({
@@ -899,7 +796,7 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
       initialTestMode={testMode}
       initialTestSeed={options.testSeed ?? process.env.OPENCROWD_TEST_SEED}
       defaultModel={config.x402LlmModel}
-      needsOnboarding={needsOnboarding}
+      onboarding={onboarding}
     />,
     { exitOnCtrlC: false }
   );

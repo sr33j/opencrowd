@@ -10,9 +10,7 @@ import {
   blockService,
   budgetStatus,
   clearConversation,
-  confirmWalletDraft,
   createTestWallet,
-  createWalletDraft,
   createOpenCrowdSession,
   ensureDefaultTestWallet,
   exportWalletSecret,
@@ -71,7 +69,7 @@ import {
   terminalWidth
 } from "./shared.js";
 import { closeSharedConnectorManager } from "@opencrowd/connectors";
-import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, type ReplState } from "./agent-task.js";
+import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, warmStartEconomy, type ReplState } from "./agent-task.js";
 import { startTui } from "./tui/app.js";
 
 async function main(argv: string[]): Promise<void> {
@@ -139,6 +137,8 @@ async function repl(options: { testMode?: boolean; testSeed?: string } = {}): Pr
   const initialTestMode = options.testMode ?? envFlag("OPENCROWD_TEST_MODE");
   if (initialTestMode) {
     await ensureDefaultTestWallet();
+  } else {
+    await warmStartEconomy();
   }
   const session = await createOpenCrowdSession({
     workspaceRoot: process.cwd(),
@@ -407,6 +407,8 @@ async function runCommand(args: string[]): Promise<void> {
   }
   if (testMode) {
     await ensureDefaultTestWallet();
+  } else {
+    await warmStartEconomy();
   }
   const session = sessionId
     ? await loadSession(process.cwd(), sessionId)
@@ -464,6 +466,8 @@ async function headlessRunCommand(args: string[]): Promise<void> {
   const workspaceRoot = readOption(args, "--workspace") ?? process.cwd();
   if (testMode) {
     await ensureDefaultTestWallet();
+  } else {
+    await warmStartEconomy();
   }
   const session = await createOpenCrowdSession({
     workspaceRoot,
@@ -633,30 +637,10 @@ async function walletCommand(args: string[], options: { testMode?: boolean; sess
       printValue("Wallet", wallet, { json, pretty: renderKeyValues(asRecord(wallet)) });
       return;
     }
-    console.log(style("Note: OpenCrowd now uses the shared AgentCash wallet by default (one wallet for LLM spend, paid services, and reviews).", "muted"));
-    console.log(style("Creating a separate legacy wallet is deprecated; switch back anytime with `opencrowd wallet use agentcash`.", "muted"));
-    const draft = await createWalletDraft(label);
-    if (json) {
-      throw new Error("wallet new cannot use --json because seed phrase backup requires an interactive confirmation");
-    }
-    await confirmSeedPhraseBackup(draft.mnemonic);
-    const wallet = await confirmWalletDraft(draft);
-    printValue("Wallet", {
-      label: wallet.label,
-      address: wallet.address,
-      network: wallet.network,
-      asset: wallet.asset,
-      active: true
-    }, {
-      pretty: renderKeyValues({
-        label: wallet.label,
-        address: wallet.address,
-        network: wallet.network,
-        asset: wallet.asset,
-        active: true
-      })
-    });
-    return;
+    throw new Error([
+      "OpenCrowd uses the shared AgentCash wallet — it is created automatically and there is nothing to set up.",
+      "Run `opencrowd wallet address` to see where to deposit USDC."
+    ].join(" "));
   }
   if (action === "list") {
     const wallets = await walletList();
@@ -937,30 +921,6 @@ async function evalsCommand(args: string[]): Promise<void> {
     }
   });
   console.log(renderGaiaReport(report));
-}
-
-async function confirmSeedPhraseBackup(mnemonic: string): Promise<void> {
-  if (!input.isTTY) {
-    throw new Error("wallet new requires an interactive terminal so you can back up the seed phrase");
-  }
-  const words = mnemonic.split(/\s+/);
-  console.log([
-    style("Back up this seed phrase now.", "bold"),
-    "OpenCrowd cannot recover this wallet if you lose this computer and do not have the seed phrase.",
-    "",
-    mnemonic,
-    ""
-  ].join("\n"));
-  const rl = createInterface({ input, output });
-  try {
-    const answer = (await rl.question("Enter words 3, 8, and 12 separated by spaces to confirm backup: ")).trim().toLowerCase();
-    const expected = [words[2], words[7], words[11]].join(" ").toLowerCase();
-    if (answer !== expected) {
-      throw new Error("seed phrase confirmation failed; wallet was not saved");
-    }
-  } finally {
-    rl.close();
-  }
 }
 
 async function confirmSeedPhraseExport(): Promise<void> {

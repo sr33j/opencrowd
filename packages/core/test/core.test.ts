@@ -13,12 +13,9 @@ import {
   compactConversationIfNeeded,
   appendConversationMessage,
   readConversationMessages,
-  confirmWalletDraft,
   createTestWallet,
-  createWalletDraft,
   createOpenCrowdSession,
   createSession,
-  exportWalletSecret,
   FRUIT_LABELS,
   fundActiveTestWallet,
   listArtifacts,
@@ -115,22 +112,6 @@ describe("wallet registry", () => {
     expect(FRUIT_LABELS.length).toBeGreaterThanOrEqual(100);
     expect(chooseFruitLabel(["durian", "mango"])).not.toMatch(/^(durian|mango)$/);
     expect(chooseFruitLabel([...FRUIT_LABELS])).toBe("fruit-1");
-  });
-
-  it("creates confirmed wallets without writing secrets into wallets.json", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    process.env.OPENCROWD_WALLET_SECRET_STORE = "file";
-
-    const draft = await createWalletDraft("dragonfruit");
-    const wallet = await confirmWalletDraft(draft);
-    const exported = await exportWalletSecret("dragonfruit");
-    const walletFile = await readFile(join(root, "config", "wallets.json"), "utf8");
-
-    expect(wallet.label).toBe("dragonfruit");
-    expect(exported.mnemonic).toBe(draft.mnemonic);
-    expect(walletFile).not.toContain(draft.mnemonic);
-    expect(await walletAddress()).toMatchObject({ account: "dragonfruit", address: draft.address });
   });
 
   it("lists and funds active test wallets", async () => {

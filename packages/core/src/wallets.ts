@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { bytesToHex } from "viem";
-import { english, generateMnemonic, mnemonicToAccount } from "viem/accounts";
+import { mnemonicToAccount } from "viem/accounts";
 import { walletSecretsPath, walletsPath } from "./config.js";
 
 const execFileAsync = promisify(execFile);
@@ -36,16 +36,6 @@ export interface WalletRegistry {
   /** True when the user explicitly chose a legacy wallet over the AgentCash default. */
   explicit_selection?: boolean;
   wallets: StoredWallet[];
-}
-
-export interface WalletDraft {
-  id: string;
-  label: string;
-  address: string;
-  network: string;
-  asset: string;
-  kind: "local-evm";
-  mnemonic: string;
 }
 
 export interface WalletListEntry extends StoredWallet {
@@ -119,42 +109,6 @@ export async function saveWalletRegistry(registry: WalletRegistry): Promise<void
   await mkdir(dirname(walletsPath()), { recursive: true });
   await writeFile(walletsPath(), `${JSON.stringify(normalizeRegistry(registry), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   await chmod(walletsPath(), 0o600).catch(() => undefined);
-}
-
-export async function createWalletDraft(label?: string): Promise<WalletDraft> {
-  const registry = await loadWalletRegistry();
-  const resolvedLabel = resolveNewLabel(registry, label);
-  const mnemonic = generateMnemonic(english, 128);
-  const account = mnemonicToAccount(mnemonic);
-  return {
-    id: randomUUID(),
-    label: resolvedLabel,
-    address: account.address,
-    network: "base",
-    asset: "USDC",
-    kind: "local-evm",
-    mnemonic
-  };
-}
-
-export async function confirmWalletDraft(draft: WalletDraft): Promise<StoredWallet> {
-  const registry = await loadWalletRegistry();
-  assertUniqueLabel(registry, draft.label);
-  const wallet: StoredWallet = {
-    id: draft.id,
-    label: draft.label,
-    address: draft.address,
-    network: draft.network,
-    asset: draft.asset,
-    kind: draft.kind,
-    created_at: new Date().toISOString()
-  };
-  await storeWalletSecret(wallet.id, { mnemonic: draft.mnemonic });
-  registry.wallets.push(wallet);
-  registry.active_wallet_id = wallet.id;
-  registry.explicit_selection = true;
-  await saveWalletRegistry(registry);
-  return wallet;
 }
 
 export async function createTestWallet(label?: string, initialBalanceCents = 0): Promise<StoredWallet> {
@@ -414,21 +368,6 @@ async function walletBalanceForEntry(wallet: StoredWallet): Promise<Pick<WalletL
 
 interface WalletSecret {
   mnemonic: string;
-}
-
-async function storeWalletSecret(walletId: string, secret: WalletSecret): Promise<void> {
-  const value = JSON.stringify(secret);
-  if (useFileSecretStore()) {
-    const secrets = await readFileSecrets();
-    secrets[walletId] = value;
-    await writeFileSecrets(secrets);
-    return;
-  }
-  if (process.platform === "darwin") {
-    await execFileAsync("security", ["add-generic-password", "-a", walletId, "-s", KEYCHAIN_SERVICE, "-w", value, "-U"]);
-    return;
-  }
-  throw new Error("No supported OS credential store found for wallet secrets. OpenCrowd will not write wallet private keys to plain config.");
 }
 
 async function readWalletSecret(walletId: string): Promise<WalletSecret> {
