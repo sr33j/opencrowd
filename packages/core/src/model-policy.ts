@@ -19,8 +19,8 @@ export interface ResolvedModelPolicy {
 
 export const DEFAULT_MODEL_POLICY: ModelPolicy = {
   mode: "manual",
-  main: "auto",
-  subagent: "auto"
+  main: "qwen/qwen3.8-max",
+  subagent: "openai/gpt-5.6-luna"
 };
 
 /** Minimum context window a subagent model must offer before price wins. */

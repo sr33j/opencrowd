@@ -93,14 +93,14 @@ describe("x402 LLM provider", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await updateConfig({
       x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "zai-org-glm-4.7-flash",
+      x402LlmModel: "qwen/qwen3.8-max",
       x402LlmMaxCostCents: 1
     });
     const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
     const provider = new X402LlmProvider(session, {
       fetchImpl: async () => jsonResponse({ data: [{ id: "available" }] })
     });
-    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `zai-org-glm-4.7-flash` is not available");
+    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `qwen/qwen3.8-max` is not available");
   });
 
   it("uses explicit model override instead of the stored preferred model", async () => {

@@ -378,8 +378,29 @@ async function baseUsdcBalance(address: string): Promise<{ display: string; cent
   };
 }
 
+const TRANSPORT_RETRY_DELAYS_MS = [500, 1500];
+
+/**
+ * Retries network-level failures (connection resets, cold-start drops). Safe
+ * even when an X-PAYMENT header is attached: the EIP-3009 authorization nonce
+ * is single-use on-chain, so re-sending the same header can never settle twice.
+ */
+async function fetchWithTransportRetry(url: string, init: RequestInit): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(url, init);
+    } catch (error) {
+      const name = (error as Error).name;
+      if (name === "AbortError" || name === "TimeoutError" || attempt >= TRANSPORT_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, TRANSPORT_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+}
+
 async function genericX402Fetch(privateKey: string, url: string, init: RequestInit): Promise<Response> {
-  const first = await fetch(url, init);
+  const first = await fetchWithTransportRetry(url, init);
   if (first.status !== 402) {
     return first;
   }
@@ -389,7 +410,7 @@ async function genericX402Fetch(privateKey: string, url: string, init: RequestIn
     const headers = new Headers(init.headers);
     headers.set("SIGN-IN-WITH-X", siwxHeader);
     headers.set("X-Sign-In-With-X", siwxHeader);
-    const authenticated = await fetch(url, { ...init, headers });
+    const authenticated = await fetchWithTransportRetry(url, { ...init, headers });
     if (authenticated.status !== 402) {
       return authenticated;
     }
@@ -420,7 +441,7 @@ async function genericX402Fetch(privateKey: string, url: string, init: RequestIn
     headers.set("X-PAYMENT", header);
     headers.set("PAYMENT-SIGNATURE", header);
     headers.set("Access-Control-Expose-Headers", "X-PAYMENT-RESPONSE");
-    paid = await fetch(url, { ...init, headers });
+    paid = await fetchWithTransportRetry(url, { ...init, headers });
     if (paid.status !== 402) {
       return paid;
     }

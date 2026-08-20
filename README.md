@@ -48,8 +48,8 @@ First launch is two steps — there is no wallet setup:
 ```
 
 The LLM itself is paid the same way: OpenCrowd uses an x402-metered,
-OpenAI-compatible route (Venice by default) funded from the same wallet — no
-API keys, no subscriptions.
+OpenAI-compatible route funded from the same wallet — no API keys, no
+subscriptions.
 
 ## Safety model
 
@@ -104,7 +104,7 @@ Inside the interactive UI (`/help` shows this live):
 | --- | --- |
 | `/budget <usd>` | Set the local session spend cap |
 | `/mode ask_first\|yolo\|blocked` | Set permission mode (shift+tab toggles) |
-| `/wallet new\|list\|balance\|use\|export` | Manage payment wallets |
+| `/wallet list\|balance\|use\|fund\|export` | Manage the shared payment wallet |
 | `/models list\|set <model>` | Pick the x402 LLM model |
 | `/search "<query>"` | Search the x402 service bazaar |
 | `/permissions list\|allow\|block <url>` | Manage allowed/blocked services |
@@ -123,9 +123,10 @@ opencrowd wallet send 0x... 5.00 --network base          # send USDC anywhere (c
 opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
 ```
 
-`wallet send` moves USDC through AgentCash's `transfer` tool (AgentCash owns
-the key; OpenCrowd never signs). It requires an interactive confirmation and
-is never retried automatically. `evals gaia` runs the GAIA validation split
+`wallet send` signs a plain ERC-20 USDC transfer with the shared wallet key
+(the wallet needs a one-time ~$0.20 ETH deposit for gas; x402 payments stay
+gasless). It requires an interactive confirmation and is never retried
+automatically. `evals gaia` runs the GAIA validation split
 against OpenCrowd — and optionally Claude Code and Codex with the same prompt
 template and scorer — reporting accuracy and cost per question (OpenCrowd's
 cost is measured on-chain spend; comparators are estimates).
@@ -145,18 +146,17 @@ outgrow the model's context window (archives kept under `sessions/<id>/context/`
 
 ## Configuration notes
 
-- **Model**: starts as `zai-org-glm-4.7-flash` (fast/cheap) on the Venice x402
-  route. If your provider doesn't offer it, or you want a stronger model,
-  `opencrowd models list` then `models set <model>`.
+- **Model**: defaults to `qwen/qwen3.8-max` on an x402-metered OpenRouter
+  route (`x402LlmBaseUrl` points at any OpenAI-compatible x402 endpoint).
+  `opencrowd models list` then `models set <model>` to change it.
 - **Model policy / subagents**: `modelPolicy` in config (`{"mode": "auto"|"manual",
-  "main": "<model>|auto", "subagent": "<model>|auto"}`) fuses a frontier main
-  loop with a cheap fast subagent model, both paid over the same x402 route.
-  The main loop gets a `spawn_subagent` tool (local tools only, one level
-  deep); resolution is recorded per session for reproducibility. Auto mode
-  refuses to run if the catalog has no frontier-tier model.
-- **Venice credit top-ups**: when the linked x402 credit drops below $5.00,
-  OpenCrowd tops it back up to $7.50 from the wallet (configurable; recorded
-  as `wallet_top_up` ledger rows).
+  "main": "<model>|auto", "subagent": "<model>|auto"}`) pairs the main loop
+  with a subagent model, both paid over the same x402 route. Defaults:
+  `qwen/qwen3.8-max` main, `openai/gpt-5.6-luna` subagents. The main loop
+  gets `spawn_subagent`/`check_subagents` tools (local tools only, one level
+  deep, parallel with background mode); resolution is recorded per session
+  for reproducibility. Auto mode refuses to run if the catalog has no
+  frontier-tier model.
 - **Connectors**: paid capability comes from vendor MCP servers (AgentCash
   for wallet/payments, CrowdCode for reputation), configured under
   `mcpServers` in config with pinned versions. Their tools are ingested

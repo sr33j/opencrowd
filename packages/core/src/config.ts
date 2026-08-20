@@ -29,7 +29,7 @@ export interface OpenCrowdConfig {
 const COINBASE_BAZAAR_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
 const AGENTIC_MARKET_DEFAULT_URL = "https://api.agentic.market/v1/services";
 
-export const DEFAULT_LLM_MODEL = "zai-org-glm-4.7-flash";
+export const DEFAULT_LLM_MODEL = "qwen/qwen3.8-max";
 
 const DEFAULT_CONFIG: OpenCrowdConfig = {
   bazaarUrl: COINBASE_BAZAAR_URL,
@@ -37,9 +37,9 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
   },
-  x402LlmBaseUrl: "https://api.venice.ai/api/v1",
+  x402LlmBaseUrl: "https://x402-tokens.fly.dev/v1",
   x402LlmModel: DEFAULT_LLM_MODEL,
-  x402LlmMaxCostCents: 25,
+  x402LlmMaxCostCents: 100,
   x402LlmTimeoutMs: 600_000,
   modelPolicy: DEFAULT_MODEL_POLICY,
   x402PaymentAsset: "USDC",
