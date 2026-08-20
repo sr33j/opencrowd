@@ -57,15 +57,25 @@ function normalizeModel(record: unknown): LlmModel | null {
   if (!id) {
     return null;
   }
+  const pricing = objectValue(item.pricing);
   return {
     id,
     name: stringValue(item.name ?? item.display_name ?? item.displayName ?? objectValue(item.model_spec)?.name),
     max_cost_cents: numberValue(item.max_cost_cents ?? item.maxCostCents ?? item.upto_cost_cents ?? item.price_cents),
-    context_window_tokens: numberValue(item.context_window_tokens ?? item.contextWindowTokens ?? item.context_window ?? item.contextWindow),
-    input_cost_cents_per_1k: numberValue(item.input_cost_cents_per_1k ?? item.inputCostCentsPer1k),
-    output_cost_cents_per_1k: numberValue(item.output_cost_cents_per_1k ?? item.outputCostCentsPer1k),
+    context_window_tokens: numberValue(item.context_window_tokens ?? item.contextWindowTokens ?? item.context_window ?? item.contextWindow ?? item.context_length),
+    input_cost_cents_per_1k: numberValue(item.input_cost_cents_per_1k ?? item.inputCostCentsPer1k) ?? usdPerTokenToCentsPer1k(pricing?.prompt),
+    output_cost_cents_per_1k: numberValue(item.output_cost_cents_per_1k ?? item.outputCostCentsPer1k) ?? usdPerTokenToCentsPer1k(pricing?.completion),
     raw: record
   };
+}
+
+/** OpenRouter-style pricing: USD per token -> cents per 1k tokens (fractional). */
+function usdPerTokenToCentsPer1k(value: unknown): number | undefined {
+  const parsed = typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : undefined;
+  if (parsed === undefined || !Number.isFinite(parsed)) {
+    return undefined;
+  }
+  return parsed * 1_000 * 100;
 }
 
 export function fallbackContextWindowTokens(modelId: string | undefined): number {

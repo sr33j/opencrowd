@@ -99,6 +99,7 @@ async function preparePersistentRun(
   return {
     model: mainModel,
     maxTurns: options.maxTurns,
+    contextWindowTokens,
     onProgress: options.onProgress,
     onPermissionRequest: options.onPermissionRequest,
     provider: options.testMode ? options.mockProvider ?? new MockLlmProvider({ seed: options.testSeed }) : undefined,

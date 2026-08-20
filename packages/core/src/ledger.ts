@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { LedgerEntry } from "./types.js";
 
@@ -38,8 +38,9 @@ export async function ensureLedger(path: string): Promise<void> {
 export async function appendLedgerEntry(path: string, entry: LedgerEntry): Promise<void> {
   await ensureLedger(path);
   const row = LEDGER_COLUMNS.map((column) => csvCell(String(entry[column] ?? (column === "timestamp" ? new Date().toISOString() : "")))).join(",");
-  const current = await readFile(path, "utf8");
-  await writeFile(path, `${current}${row}\n`, "utf8");
+  // True append: concurrent writers (parallel subagents) must never
+  // read-modify-write the whole file or rows get silently dropped.
+  await appendFile(path, `${row}\n`, "utf8");
 }
 
 export async function readLedger(path: string): Promise<Record<string, string>[]> {

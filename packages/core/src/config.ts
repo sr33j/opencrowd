@@ -24,6 +24,8 @@ export interface OpenCrowdConfig {
   x402LlmBaseUrl: string;
   x402LlmModel: string;
   x402LlmMaxCostCents: number;
+  /** Per-request LLM timeout; reasoning models can think for minutes. */
+  x402LlmTimeoutMs: number;
   modelPolicy: ModelPolicy;
   veniceAutoTopUpEnabled: boolean;
   veniceAutoTopUpThresholdCents: number;
@@ -55,6 +57,7 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   x402LlmBaseUrl: "https://api.venice.ai/api/v1",
   x402LlmModel: DEFAULT_LLM_MODEL,
   x402LlmMaxCostCents: 25,
+  x402LlmTimeoutMs: 600_000,
   modelPolicy: DEFAULT_MODEL_POLICY,
   veniceAutoTopUpEnabled: true,
   veniceAutoTopUpThresholdCents: 500,

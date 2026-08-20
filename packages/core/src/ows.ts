@@ -204,21 +204,27 @@ export async function createAgenticWalletPaidHttpClient(): Promise<AgenticWallet
 export class VeniceWalletPaidHttpClient implements PaymentWallet {
   readonly kind = "local-evm" as const;
   private readonly client: VeniceClient;
+  private readonly timeoutMs: number;
 
-  constructor(privateKey: string, options: { apiUrl?: string } = {}) {
-    this.client = new VeniceClient(privateKey, options);
+  constructor(privateKey: string, options: { apiUrl?: string; timeoutMs?: number } = {}) {
+    this.timeoutMs = options.timeoutMs ?? 600_000;
+    this.client = new VeniceClient(privateKey, { ...options, timeoutMs: this.timeoutMs });
     this.privateKey = privateKey;
   }
 
   private readonly privateKey: string;
 
   async request(request: PaidHttpRequest): Promise<PaidHttpResponse> {
-    const startedBalance = await this.balanceUsd().catch(() => undefined);
+    // Balance prechecks are a Venice-credit mechanism only; generic x402
+    // endpoints settle per request and need no extra round trip.
+    const isVenice = this.isVeniceApiUrl(request.url);
+    const startedBalance = isVenice ? await this.balanceUsd().catch(() => undefined) : undefined;
     const response = await this.rawRequest(request);
     const bodyText = await response.text();
     const headers = Object.fromEntries(response.headers.entries());
     const chargedCostCents = chargedFromBalance(startedBalance, response.headers.get("x-balance-remaining") ?? undefined)
-      ?? (response.ok ? Math.min(request.maxCostCents, 1) : 0);
+      ?? settledCostFromHeaders(response.headers)
+      ?? (response.ok && isVenice ? Math.min(request.maxCostCents, 1) : undefined);
     return {
       status: response.status,
       ok: response.ok,
@@ -261,7 +267,8 @@ export class VeniceWalletPaidHttpClient implements PaymentWallet {
     const init: RequestInit = {
       method: request.method,
       headers: request.headers,
-      body: hasRequestBody ? requestBody(request.body) : undefined
+      body: hasRequestBody ? requestBody(request.body) : undefined,
+      signal: AbortSignal.timeout(this.timeoutMs)
     };
     if (url.origin === baseUrl.origin) {
       return this.client.requestRaw(`${url.pathname}${url.search}`, init);
@@ -390,7 +397,8 @@ export async function activePaymentWallet(): Promise<PaymentWallet> {
   if (wallet.kind === "test") {
     throw new Error("Active wallet is a test wallet. Test wallets can only be used with --test-mode mock LLM and mock x402 services.");
   }
-  return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet));
+  const config = await loadConfig();
+  return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet), { timeoutMs: config.x402LlmTimeoutMs });
 }
 
 export async function walletInit(): Promise<Record<string, unknown>> {
@@ -942,6 +950,32 @@ function unquoteEnvValue(value: string): string {
 
 function isPrivateKey(value: unknown): value is string {
   return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
+}
+
+/**
+ * Actual settled cost reported by generic x402 services that reconcile a
+ * ceiling to real usage (e.g. an `upto` payment). Fractional cents are kept
+ * so micro-priced calls aren't rounded up per call.
+ */
+function settledCostFromHeaders(headers: Headers): number | undefined {
+  for (const name of ["x-billed-usd", "x-charged-usd", "x-settled-usd"]) {
+    const value = headers.get(name);
+    if (value !== null && Number.isFinite(Number(value))) {
+      return Number(value) * 100;
+    }
+  }
+  const paymentResponse = headers.get("x-payment-response");
+  if (paymentResponse) {
+    const parsed = parseBase64Json(paymentResponse);
+    if (parsed && typeof parsed === "object") {
+      const record = parsed as Record<string, unknown>;
+      const usd = numberValue(record.billedUsd ?? record.amountUsd ?? record.settledUsd);
+      if (usd !== undefined) {
+        return usd * 100;
+      }
+    }
+  }
+  return undefined;
 }
 
 function chargedFromBalance(startedBalance: number | undefined, remainingBalance: string | undefined): number | undefined {

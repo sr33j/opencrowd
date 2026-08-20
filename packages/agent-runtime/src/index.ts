@@ -534,9 +534,13 @@ export class X402LlmProvider implements LlmProvider {
     }
 
     const endpoint = endpointUrl(config.x402LlmBaseUrl, "chat/completions").toString();
+    const mapped = messages.map(toOpenAiMessage);
     const body = {
       model: model.id,
-      messages: messages.map(toOpenAiMessage),
+      // Anthropic-family models need explicit cache breakpoints; OpenAI-style
+      // backends cache stable prefixes automatically (our history is
+      // append-only within a session, so prefixes stay stable).
+      messages: /claude/i.test(model.id) ? withCacheControl(mapped) : mapped,
       tools: toolDefinitions(this.options.tools, this.options.extraTools),
       tool_choice: "auto"
     };
@@ -548,11 +552,14 @@ export class X402LlmProvider implements LlmProvider {
     try {
       const response = await this.paidLlmRequest(endpoint, body, maxCostCents, config);
       const parsedBody = response.body;
-      const charged = response.chargedCostCents ?? (response.ok ? maxCostCents : 0);
+      const usage = tokenUsage(parsedBody);
+      const charged = response.chargedCostCents !== undefined
+        ? Math.round(response.chargedCostCents)
+        : response.ok
+          ? usageCostCents(usage, model) ?? maxCostCents
+          : 0;
       await finalizeReservation(this.session, reservation, charged);
       finalized = true;
-
-      const usage = tokenUsage(parsedBody);
       await appendLedgerEntry(this.session.ledgerPath, {
         session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
@@ -709,6 +716,11 @@ export interface AgentRunOptions {
   dynamicTools?: DynamicToolsOption;
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
   promptSections?: string[];
+  /**
+   * When set, the in-memory context is compacted mid-run once it exceeds
+   * ~70% of this window. The persisted trajectory keeps full fidelity.
+   */
+  contextWindowTokens?: number;
 }
 
 /** Legacy economic surface retired from the model when connector tools are active. */
@@ -794,6 +806,15 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   let serviceCallFailures = 0;
   let subagentCount = 0;
   for (let turn = 0; turn < maxTurns; turn += 1) {
+    if (options.contextWindowTokens) {
+      const compacted = compactMessagesInPlace(messages, options.contextWindowTokens);
+      if (compacted) {
+        options.onProgress?.({
+          type: "complete",
+          message: `Compacted ${compacted.droppedMessages} earlier messages mid-run (~${compacted.tokensBefore} tokens; trajectory keeps full history)`
+        });
+      }
+    }
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     const response = provider instanceof MockLlmProvider
       ? await completeMockLlmCall(session, provider, messages, turn + 1)
@@ -1058,6 +1079,60 @@ async function runGatedTool(
     }
   }
   return toolExecutor(call.name, call.arguments, { session, onProgress: options.onProgress });
+}
+
+/**
+ * Mid-run in-memory compaction: keep the system prompt and the most recent
+ * messages under ~30% of the window, replace the dropped middle with a
+ * short summary message. The persisted trajectory is untouched, so graders
+ * keep full fidelity. Costs one cache miss per compaction.
+ */
+function compactMessagesInPlace(
+  messages: LlmMessage[],
+  contextWindowTokens: number
+): { droppedMessages: number; tokensBefore: number } | undefined {
+  const estimate = (items: LlmMessage[]) => items.reduce((total, message) => {
+    const toolCalls = message.toolCalls ? JSON.stringify(message.toolCalls) : "";
+    return total + Math.ceil((message.role.length + message.content.length + toolCalls.length) / 4);
+  }, 0);
+  const tokensBefore = estimate(messages);
+  if (tokensBefore <= contextWindowTokens * 0.7 || messages.length < 8) {
+    return undefined;
+  }
+  const system = messages[0];
+  const keepBudget = Math.floor(contextWindowTokens * 0.3);
+  const recent: LlmMessage[] = [];
+  let recentTokens = 0;
+  for (let index = messages.length - 1; index > 0; index -= 1) {
+    const tokens = estimate([messages[index]]);
+    if (recent.length > 0 && recentTokens + tokens > keepBudget) {
+      break;
+    }
+    recent.unshift(messages[index]);
+    recentTokens += tokens;
+  }
+  // Never let the kept window start with an orphaned tool result.
+  while (recent[0]?.role === "tool") {
+    recent.shift();
+  }
+  const dropped = messages.length - 1 - recent.length;
+  if (dropped <= 0) {
+    return undefined;
+  }
+  const droppedSlice = messages.slice(1, 1 + dropped);
+  const firstUser = droppedSlice.find((message) => message.role === "user")?.content.trim();
+  const lastAssistant = [...droppedSlice].reverse().find((message) => message.role === "assistant" && message.content.trim())?.content.trim();
+  const summary: LlmMessage = {
+    role: "user",
+    content: [
+      `Earlier context was compacted mid-run to stay within the model window (${dropped} messages, ~${tokensBefore} tokens before).`,
+      firstUser ? `Original task: ${firstUser.slice(0, 800)}` : undefined,
+      lastAssistant ? `Most recent progress before compaction: ${lastAssistant.slice(0, 1200)}` : undefined,
+      "Continue from the retained recent messages below."
+    ].filter(Boolean).join("\n")
+  };
+  messages.splice(0, messages.length, system, summary, ...recent);
+  return { droppedMessages: dropped, tokensBefore };
 }
 
 function assistantMessageFromResponse(response: LlmResponse): LlmMessage {
@@ -1638,6 +1713,33 @@ function paymentId(response: Response, fallback: string | undefined): string | u
 
 function txHash(response: Response, fallback: string | undefined): string | undefined {
   return response.headers.get("x402-tx-hash") ?? response.headers.get("x-transaction-hash") ?? fallback;
+}
+
+/** Cache breakpoints on the system prompt and the latest message; the prefix between them hits cache. */
+function withCacheControl(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): unknown[] {
+  return messages.map((message, index) => {
+    const isBreakpoint = index === 0 || index === messages.length - 1;
+    if (!isBreakpoint || typeof message.content !== "string" || message.content.length === 0) {
+      return message;
+    }
+    return {
+      ...message,
+      content: [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }]
+    };
+  });
+}
+
+/** Actual cost from token usage and catalog pricing when the route doesn't report settled cost. */
+function usageCostCents(usage: { inputTokens?: number; outputTokens?: number }, model: LlmModel): number | undefined {
+  if (model.input_cost_cents_per_1k === undefined && model.output_cost_cents_per_1k === undefined) {
+    return undefined;
+  }
+  if (usage.inputTokens === undefined && usage.outputTokens === undefined) {
+    return undefined;
+  }
+  const cents = ((usage.inputTokens ?? 0) / 1_000) * (model.input_cost_cents_per_1k ?? 0)
+    + ((usage.outputTokens ?? 0) / 1_000) * (model.output_cost_cents_per_1k ?? 0);
+  return Math.round(cents);
 }
 
 function tokenUsage(body: unknown): { inputTokens?: number; outputTokens?: number } {
