@@ -57,6 +57,11 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
           optionalString(args.cwd, "cwd") ?? context.session.workspaceRoot,
           optionalInteger(args.timeout_ms, "timeout_ms") ?? 10_000
         ));
+      case "spawn_subagent":
+        return {
+          ok: false,
+          error: "spawn_subagent is only available inside the agent runtime main loop; it cannot be called through this surface"
+        };
       case "complete_session":
         return ok(await completeSession(context.session, requiredString(args.final_message, "final_message")));
     }

@@ -116,9 +116,19 @@ One-shot and scripting forms:
 ```sh
 opencrowd run --budget 1.00 "Find a service and summarize options"
 opencrowd run --session <session-id> "Follow up on the previous result"
+opencrowd run --headless --prompt "..." --output json   # programmatic run contract
 opencrowd search --json "stock price"
 opencrowd wallet balance
+opencrowd wallet send 0x... 5.00 --network base          # send USDC anywhere (confirmed interactively)
+opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
 ```
+
+`wallet send` moves USDC through AgentCash's `transfer` tool (AgentCash owns
+the key; OpenCrowd never signs). It requires an interactive confirmation and
+is never retried automatically. `evals gaia` runs the GAIA validation split
+against OpenCrowd — and optionally Claude Code and Codex with the same prompt
+template and scorer — reporting accuracy and cost per question (OpenCrowd's
+cost is measured on-chain spend; comparators are estimates).
 
 ## Local state
 
@@ -138,11 +148,23 @@ outgrow the model's context window (archives kept under `sessions/<id>/context/`
 - **Model**: starts as `zai-org-glm-4.7-flash` (fast/cheap) on the Venice x402
   route. If your provider doesn't offer it, or you want a stronger model,
   `opencrowd models list` then `models set <model>`.
+- **Model policy / subagents**: `modelPolicy` in config (`{"mode": "auto"|"manual",
+  "main": "<model>|auto", "subagent": "<model>|auto"}`) fuses a frontier main
+  loop with a cheap fast subagent model, both paid over the same x402 route.
+  The main loop gets a `spawn_subagent` tool (local tools only, one level
+  deep); resolution is recorded per session for reproducibility. Auto mode
+  refuses to run if the catalog has no frontier-tier model.
 - **Venice credit top-ups**: when the linked x402 credit drops below $5.00,
   OpenCrowd tops it back up to $7.50 from the wallet (configurable; recorded
   as `wallet_top_up` ledger rows).
-- **Discovery**: Coinbase CDP Bazaar by default; custom bazaar URLs supported
-  in config.
+- **Connectors**: paid capability comes from vendor MCP servers (AgentCash
+  for wallet/payments, CrowdCode for reputation), configured under
+  `mcpServers` in config with pinned versions. Their tools are ingested
+  verbatim (`agentcash_fetch`, `crowdcode_get_service_score`, ...) and their
+  own instructions become prompt context. When connectors are unreachable the
+  runtime falls back to the legacy Bazaar path.
+- **Discovery (legacy fallback)**: Coinbase CDP Bazaar; custom bazaar URLs
+  supported in config.
 - **Env overrides**: `OPENCROWD_BUDGET_CENTS`, `OPENCROWD_PERMISSION_MODE`,
   `OPENCROWD_SHELL_ENABLED`, `OPENCROWD_CONFIG_DIR`, `OPENCROWD_TEST_MODE`.
 
@@ -155,7 +177,8 @@ npm test
 ```
 
 Monorepo layout: `packages/core` (wallets, x402, sessions, budgets, ledger),
-`packages/agent-runtime` (LLM loop + tools), `packages/mcp`,
-`packages/local-api`, `apps/cli` (the `opencrowd` binary and TUI).
+`packages/agent-runtime` (LLM loop + tools + subagents), `packages/evals`
+(GAIA benchmark runner), `packages/mcp`, `packages/local-api`, `apps/cli`
+(the `opencrowd` binary and TUI).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed [MIT](LICENSE).

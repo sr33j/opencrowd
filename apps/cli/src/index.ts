@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-import { join } from "node:path";
+import { appendFile, copyFile, mkdir } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
   addAllowedService,
+  appendLedgerEntry,
+  configDir,
   blockService,
   budgetStatus,
   clearConversation,
@@ -32,6 +35,7 @@ import {
   walletInit,
   walletList,
   walletStatus,
+  type LedgerStatus,
   type PermissionMode,
   type ProgressEvent,
   type ServiceCandidate,
@@ -66,7 +70,8 @@ import {
   style,
   terminalWidth
 } from "./shared.js";
-import { ensureMockRuntime, runPersistentAgentTask, type ReplState } from "./agent-task.js";
+import { sharedConnectorManager } from "@opencrowd/connectors";
+import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, type ReplState } from "./agent-task.js";
 import { startTui } from "./tui/app.js";
 
 async function main(argv: string[]): Promise<void> {
@@ -110,6 +115,9 @@ async function main(argv: string[]): Promise<void> {
       return;
     case "models":
       await modelsCommand(rest);
+      return;
+    case "evals":
+      await evalsCommand(rest);
       return;
     case "mcp":
       await startMcpServer({ workspaceRoot: process.cwd() });
@@ -357,7 +365,7 @@ async function renderReplIntro(session: SessionState, state: ReplState): Promise
       "/budget <usd>",
       state.testMode
         ? "/wallet new|list|status|address|balance|use|fund"
-        : "/wallet new|list|status|address|balance|use|export",
+        : "/wallet new|list|status|address|balance|use|send|export",
       "/models list|set <model>",
       "/model <model>",
       "/test-mode on|off",
@@ -374,6 +382,10 @@ async function renderReplIntro(session: SessionState, state: ReplState): Promise
 }
 
 async function runCommand(args: string[]): Promise<void> {
+  if (args.includes("--headless")) {
+    await headlessRunCommand(args);
+    return;
+  }
   const budgetArg = readOption(args, "--budget");
   const model = readOption(args, "--model");
   const verbose = args.includes("--verbose");
@@ -426,6 +438,89 @@ async function runCommand(args: string[]): Promise<void> {
     onProgress: progressLogger({ style: output.isTTY ? "pretty" : "compact", color: shouldUseColor(), width: terminalWidth() })
   });
   console.log(outputText);
+}
+
+/**
+ * Programmatic run contract: non-interactive, exits when the session
+ * completes or blocks, and emits the structured completion object plus
+ * spend split, turn count, and model policy. The eval runner and any
+ * external wrapper share this same interface.
+ */
+async function headlessRunCommand(args: string[]): Promise<void> {
+  const prompt = readOption(args, "--prompt");
+  if (!prompt) {
+    throw new Error("run --headless requires --prompt <text>");
+  }
+  const outputFormat = readOption(args, "--output") ?? "json";
+  if (!["json", "text"].includes(outputFormat)) {
+    throw new Error("--output must be json or text");
+  }
+  const attach = readOption(args, "--attach");
+  const verbose = args.includes("--verbose");
+  const testMode = args.includes("--test-mode") || envFlag("OPENCROWD_TEST_MODE");
+  const testSeed = readOption(args, "--test-seed") ?? process.env.OPENCROWD_TEST_SEED;
+  const budgetArg = readOption(args, "--budget");
+  const maxTurnsArg = readOption(args, "--max-turns");
+  const workspaceRoot = readOption(args, "--workspace") ?? process.cwd();
+  if (testMode) {
+    await ensureDefaultTestWallet();
+  }
+  const session = await createOpenCrowdSession({
+    workspaceRoot,
+    budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
+    permissionMode: "yolo",
+    shellEnabled: !args.includes("--disable-shell"),
+    surface: "cli",
+    useWalletBalanceBudget: true
+  });
+  let task = prompt;
+  if (attach) {
+    const attachmentName = basename(attach);
+    await mkdir(session.artifactsDir, { recursive: true });
+    await copyFile(attach, join(session.artifactsDir, attachmentName));
+    task = `${prompt}\n\nAn input file is available at the session artifact path \`${attachmentName}\` (use read_file, or run_shell against ${join(session.artifactsDir, attachmentName)}).`;
+  }
+  const result = await runPersistentAgentTaskDetailed(session, task, {
+    model: readOption(args, "--model"),
+    subagentModel: readOption(args, "--subagent-model"),
+    forceAutoPolicy: args.includes("--auto"),
+    testMode,
+    testSeed,
+    maxTurns: maxTurnsArg === undefined ? undefined : Number(maxTurnsArg),
+    compactOutput: true,
+    onProgress: verbose
+      ? (event) => {
+        const message = renderProgress(event, { style: "compact" });
+        if (message) {
+          console.error(message);
+        }
+      }
+      : undefined
+  });
+  const budget = asRecord(result.summary.budget);
+  const payload = {
+    outcome: result.outcome,
+    final_message: result.summary.final_message ?? null,
+    session_id: session.sessionId,
+    session_dir: session.sessionDir,
+    trajectory_path: join(session.sessionDir, "messages.jsonl"),
+    turns: result.turns,
+    model_policy: session.modelPolicy ?? null,
+    usdc_spent_cents: {
+      llm: Number(budget.llm_spend_cents ?? 0),
+      services: Number(budget.external_service_spend_cents ?? 0),
+      wallet_top_ups: Number(budget.wallet_top_up_spend_cents ?? 0),
+      total: Number(budget.total_spent_cents ?? budget.spent_cents ?? 0)
+    },
+    budget,
+    artifacts: result.summary.artifacts ?? [],
+    service_calls: result.summary.service_calls ?? []
+  };
+  if (outputFormat === "json") {
+    console.log(JSON.stringify(payload, null, 2));
+  } else {
+    console.log(String(result.summary.final_message ?? "Session complete."));
+  }
 }
 
 async function searchCommand(args: string[]): Promise<void> {
@@ -643,9 +738,135 @@ async function walletCommand(args: string[], options: { testMode?: boolean; sess
     });
     return;
   }
+  if (action === "send") {
+    await walletSendCommand(args.slice(1), { testMode, session: options.session });
+    return;
+  }
   throw new Error(testMode
     ? "wallet supports new [label], list, status, address, balance, use <label|address>, fund <usd>"
-    : "wallet supports new [label], list, status, address, balance, use <label|address>, export <label|address>");
+    : "wallet supports new [label], list, status, address, balance, use <label|address>, send <address> <usd> [--network base|tempo], export <label|address>");
+}
+
+/**
+ * Send USDC to any address through AgentCash's `transfer` tool. This is a
+ * financial action, not a paid service: no CrowdCode check, no receipt, no
+ * review, and never an automatic replay after a transport failure. The
+ * model has no send tool; sends are human-initiated and human-confirmed.
+ */
+async function walletSendCommand(args: string[], options: { testMode?: boolean; session?: SessionState }): Promise<void> {
+  if (options.testMode) {
+    throw new Error("wallet send moves real USDC and is not available in --test-mode");
+  }
+  const network = readOption(args, "--network") ?? "base";
+  if (!["base", "tempo"].includes(network)) {
+    throw new Error("network must be base or tempo (Solana sends stay disabled until review parity)");
+  }
+  const positional = args.filter((arg, index) => !isConsumedOption(args, index, ["--network"]));
+  const [to, amountArg] = positional;
+  if (!to || !amountArg) {
+    throw new Error("wallet send requires an address and a USD amount: opencrowd wallet send <address> <usd> [--network base|tempo]");
+  }
+  const amountCents = parseUsd(amountArg);
+  if (amountCents <= 0) {
+    throw new Error("amount must be greater than zero");
+  }
+  if (!input.isTTY) {
+    throw new Error("wallet send requires an interactive terminal to confirm the transfer");
+  }
+  const amountUsdc = amountCents / 100;
+  const connectors = await sharedConnectorManager();
+  if (!connectors.hasTool("agentcash_transfer")) {
+    throw new Error([
+      "the installed agentcash package does not expose a `transfer` tool yet.",
+      "Update the agentcash pin in ~/.config/opencrowd/config.json once a version with transfer support ships."
+    ].join(" "));
+  }
+  let balancesLine: string | undefined;
+  const balanceResult = await connectors.execute("agentcash_get_balance", {});
+  if (balanceResult.ok) {
+    balancesLine = typeof balanceResult.data === "string" ? balanceResult.data : JSON.stringify(balanceResult.data);
+  }
+  console.log([
+    style("Confirm USDC transfer", "bold"),
+    renderKeyValues({
+      to,
+      amount: `$${amountUsdc.toFixed(2)} USDC`,
+      network,
+      current_balances: balancesLine ?? "unavailable"
+    }),
+    "AgentCash signs this transfer with your local wallet. It cannot be reversed."
+  ].join("\n"));
+  const rl = createInterface({ input, output });
+  try {
+    const answer = (await rl.question("Type SEND to confirm: ")).trim();
+    if (answer !== "SEND") {
+      throw new Error("transfer cancelled");
+    }
+  } finally {
+    rl.close();
+  }
+  const result = await connectors.callServerTool("agentcash", "transfer", { to, amount: amountUsdc, network });
+  if (!result.ok) {
+    await recordTransfer({
+      to,
+      amountCents,
+      network,
+      status: result.transportError ? "unknown" : "failed",
+      notes: result.error,
+      session: options.session
+    });
+    throw new Error(result.transportError
+      ? `transfer outcome is unknown: ${result.error} Verify the balance and on-chain activity before retrying; transfers are never replayed automatically.`
+      : `AgentCash rejected the transfer: ${result.error}`);
+  }
+  const record = asRecord(result.data);
+  const txHash = typeof record.tx_hash === "string" ? record.tx_hash : typeof record.txHash === "string" ? record.txHash : undefined;
+  await recordTransfer({ to, amountCents, network, txHash, status: "charged", session: options.session });
+  printValue("Transfer", result.data, {
+    pretty: renderKeyValues({
+      to,
+      amount: `$${amountUsdc.toFixed(2)} USDC`,
+      network,
+      tx_hash: txHash,
+      result: typeof result.data === "string" ? result.data : JSON.stringify(result.data)
+    })
+  });
+}
+
+async function recordTransfer(entry: {
+  to: string;
+  amountCents: number;
+  network: string;
+  txHash?: string;
+  status: LedgerStatus;
+  notes?: string;
+  session?: SessionState;
+}): Promise<void> {
+  const record = {
+    timestamp: new Date().toISOString(),
+    type: "transfer",
+    to: entry.to,
+    amount_cents: entry.amountCents,
+    network: entry.network,
+    tx_hash: entry.txHash,
+    status: entry.status,
+    notes: entry.notes
+  };
+  await mkdir(configDir(), { recursive: true });
+  await appendFile(join(configDir(), "transfers.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
+  if (entry.session) {
+    await appendLedgerEntry(entry.session.ledgerPath, {
+      session_id: entry.session.sessionId,
+      type: "transfer",
+      method: entry.network,
+      quoted_cost_cents: entry.amountCents,
+      charged_cost_cents: entry.status === "charged" ? entry.amountCents : 0,
+      status: entry.status,
+      permission_mode: entry.session.permissionMode,
+      tx_hash: entry.txHash,
+      notes: entry.notes ?? `USDC transfer to ${entry.to}`
+    });
+  }
 }
 
 async function syncSessionBudgetToActiveWallet(session: SessionState): Promise<void> {
@@ -681,6 +902,47 @@ async function modelsCommand(args: string[]): Promise<void> {
     return;
   }
   throw new Error("models supports list, set <model>");
+}
+
+async function evalsCommand(args: string[]): Promise<void> {
+  const [dataset, ...rest] = args;
+  if (dataset !== "gaia") {
+    throw new Error("evals supports: gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--model <model>] [--yes]");
+  }
+  const { runGaiaBenchmark, renderGaiaReport, GAIA_TIERS } = await import("@opencrowd/evals");
+  const tier = readOption(rest, "--tier") ?? "smoke";
+  if (!(tier in GAIA_TIERS)) {
+    throw new Error(`--tier must be one of: ${Object.keys(GAIA_TIERS).join(", ")}`);
+  }
+  const harnesses = (readOption(rest, "--harness") ?? "opencrowd").split(",").map((name) => name.trim()).filter(Boolean);
+  const yes = rest.includes("--yes");
+  const report = await runGaiaBenchmark({
+    tier: tier as keyof typeof GAIA_TIERS,
+    harnesses,
+    hfToken: readOption(rest, "--hf-token") ?? process.env.HF_TOKEN,
+    workspaceRoot: process.cwd(),
+    model: readOption(rest, "--model"),
+    auto: rest.includes("--auto"),
+    limit: readOption(rest, "--limit") === undefined ? undefined : Number(readOption(rest, "--limit")),
+    testMode: rest.includes("--test-mode"),
+    log: (message) => console.error(message),
+    confirm: async (message) => {
+      if (yes) {
+        return true;
+      }
+      if (!input.isTTY) {
+        throw new Error(`${message}\nRe-run with --yes to accept the estimated cost ceiling in a non-interactive shell.`);
+      }
+      console.log(message);
+      const rl = createInterface({ input, output });
+      try {
+        return (await rl.question("Proceed? (yes/no): ")).trim().toLowerCase() === "yes";
+      } finally {
+        rl.close();
+      }
+    }
+  });
+  console.log(renderGaiaReport(report));
 }
 
 async function confirmSeedPhraseBackup(mnemonic: string): Promise<void> {
@@ -735,12 +997,14 @@ function printHelp(): void {
   opencrowd --demo                try the full loop with a mock wallet, mock services, and no real money
   opencrowd [--test-mode [--test-seed <seed>]]
   opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--mode ask_first|yolo|blocked] [--test-mode] [--test-seed <seed>] [--disable-shell] [--verbose] "<task>"
+  opencrowd run --headless --prompt "<text>" [--attach <file>] [--output json|text] [--auto] [--model <model>] [--subagent-model <model>] [--budget <usd>] [--max-turns <n>] [--workspace <dir>] [--verbose]
   opencrowd search [--json] "<query>"
   opencrowd permissions [--json] list|allow|remove|block
   opencrowd ledger [--json] show [--session <id>]
-  opencrowd wallet [--json] new [label]|list|status|address|balance|use <label|address>|export <label|address>
+  opencrowd wallet [--json] new [label]|list|status|address|balance|use <label|address>|send <address> <usd> [--network base|tempo]|export <label|address>
   opencrowd wallet --test-mode [--json] new [label]|list|status|address|balance|use <label|address>|fund <usd>
   opencrowd models [--json] list|set <model>
+  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--yes]
   opencrowd mcp
   opencrowd api --port <port>`);
 }

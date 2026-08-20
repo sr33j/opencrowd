@@ -1,17 +1,30 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import { DEFAULT_MODEL_POLICY, type ModelPolicy } from "./model-policy.js";
+
+export interface McpServerConfig {
+  command: string;
+  args: string[];
+  /** Optional tool allowlist; empty/absent means every vendor tool is exposed. */
+  allow?: string[];
+}
 
 export interface OpenCrowdConfig {
   bazaarUrl: string;
   paymentWallet: "auto" | "local-evm" | "agentic-wallet";
   agenticWalletCommand: string;
   agenticWalletArgs: string[];
+  agentCashCommand: string;
+  agentCashArgs: string[];
+  /** Connector MCP servers; tools are ingested verbatim with a name prefix. Pin versions. */
+  mcpServers: Record<string, McpServerConfig>;
   owsCommand: string;
   owsAccount?: string;
   x402LlmBaseUrl: string;
   x402LlmModel: string;
   x402LlmMaxCostCents: number;
+  modelPolicy: ModelPolicy;
   veniceAutoTopUpEnabled: boolean;
   veniceAutoTopUpThresholdCents: number;
   veniceAutoTopUpTargetCents: number;
@@ -32,10 +45,17 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   paymentWallet: "auto",
   agenticWalletCommand: "npx",
   agenticWalletArgs: ["--yes", "awal"],
+  agentCashCommand: "npx",
+  agentCashArgs: ["--yes", "agentcash"],
+  mcpServers: {
+    agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
+    crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
+  },
   owsCommand: "ows",
   x402LlmBaseUrl: "https://api.venice.ai/api/v1",
   x402LlmModel: DEFAULT_LLM_MODEL,
   x402LlmMaxCostCents: 25,
+  modelPolicy: DEFAULT_MODEL_POLICY,
   veniceAutoTopUpEnabled: true,
   veniceAutoTopUpThresholdCents: 500,
   veniceAutoTopUpTargetCents: 750,

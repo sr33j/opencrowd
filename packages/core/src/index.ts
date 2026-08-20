@@ -5,6 +5,7 @@ export * from "./config.js";
 export * from "./conversation.js";
 export * from "./ledger.js";
 export * from "./llm-models.js";
+export * from "./model-policy.js";
 export * from "./ows.js";
 export * from "./permissions.js";
 export * from "./session.js";

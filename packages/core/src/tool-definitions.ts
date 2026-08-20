@@ -11,6 +11,7 @@ export type ToolName =
   | "read_file"
   | "list_files"
   | "run_shell"
+  | "spawn_subagent"
   | "complete_session";
 
 export const TOOL_NAMES: ToolName[] = [
@@ -22,6 +23,16 @@ export const TOOL_NAMES: ToolName[] = [
   "block_service",
   "request_service_permission",
   "call_service",
+  "save_file",
+  "read_file",
+  "list_files",
+  "run_shell",
+  "spawn_subagent",
+  "complete_session"
+];
+
+/** Tools a spawned subagent may use: local capabilities only, one level deep. */
+export const SUBAGENT_TOOL_NAMES: ToolName[] = [
   "save_file",
   "read_file",
   "list_files",
@@ -85,6 +96,8 @@ function toolDescription(name: ToolName): string {
       return "List session artifacts.";
     case "run_shell":
       return "Run a gated local shell command only when shell access is enabled for the session.";
+    case "spawn_subagent":
+      return "Delegate a bounded, parallelizable, low-judgment subtask (search a file tree, summarize, extract, mechanical edits) to a cheap fast subagent with local tools only. Keep planning, paid-service decisions, and final answers in the main loop. Subagents cannot spawn subagents or spend on paid services.";
     case "complete_session":
       return "Finish the agent run and present a concise final answer.";
   }
@@ -141,6 +154,12 @@ function toolParameters(name: ToolName): JsonSchema {
         cwd: stringSchema("Working directory inside the workspace."),
         timeout_ms: integerSchema("Timeout in milliseconds.")
       }, ["command"]);
+    case "spawn_subagent":
+      return objectSchema({
+        task: stringSchema("Self-contained task description for the subagent."),
+        context: stringSchema("Explicit context the subagent needs: relevant file paths, constraints, and prior findings. Subagents see none of this conversation."),
+        expected_output: stringSchema("What the subagent should return in its final message, for example `a bullet list of matching files`.")
+      }, ["task"]);
     case "complete_session":
       return objectSchema({
         final_message: stringSchema("Concise final message to show the user.")

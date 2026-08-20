@@ -6,6 +6,7 @@ export type LedgerType =
   | "service_call"
   | "llm_call"
   | "wallet_top_up"
+  | "transfer"
   | "artifact"
   | "shell"
   | "session";
@@ -17,7 +18,8 @@ export type LedgerStatus =
   | "blocked"
   | "rejected"
   | "failed"
-  | "refunded";
+  | "refunded"
+  | "unknown";
 
 export interface SessionOptions {
   workspaceRoot?: string;
@@ -38,6 +40,13 @@ export interface SessionState {
   spentCents: number;
   permissionMode: PermissionMode;
   shellEnabled: boolean;
+  /** Model policy resolution recorded at session start so evals are reproducible. */
+  modelPolicy?: {
+    mode: "auto" | "manual";
+    main: string;
+    subagent: string;
+    resolvedAt: string;
+  };
   createdAt: string;
   updatedAt: string;
 }

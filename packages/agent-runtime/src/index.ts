@@ -1,3 +1,5 @@
+import { appendFile, mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import OpenAI from "openai";
 import {
   appendLedgerEntry,
@@ -16,6 +18,7 @@ import {
   releaseReservation,
   reserveBudget,
   OPEN_CROWD_TOOLS,
+  SUBAGENT_TOOL_NAMES,
   TOOL_NAMES,
   VeniceWalletPaidHttpClient,
   type LlmModel,
@@ -40,8 +43,20 @@ export interface LlmMessage {
 
 export interface LlmToolCall {
   id: string;
-  name: ToolName;
+  /** A built-in ToolName or a connector-ingested vendor tool name. */
+  name: string;
   arguments: Record<string, unknown>;
+}
+
+export interface DynamicToolDefinition {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export interface DynamicToolsOption {
+  definitions: DynamicToolDefinition[];
+  execute: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
 }
 
 export interface LlmResponse {
@@ -62,17 +77,21 @@ export type ToolExecutor = (
 export class OpenAiProvider implements LlmProvider {
   private readonly client: OpenAI;
   private readonly model: string;
+  private readonly tools?: ToolName[];
+  private readonly extraTools?: DynamicToolDefinition[];
 
-  constructor(options: { apiKey?: string; model?: string } = {}) {
+  constructor(options: { apiKey?: string; model?: string; tools?: ToolName[]; extraTools?: DynamicToolDefinition[] } = {}) {
     this.client = new OpenAI({ apiKey: options.apiKey ?? process.env.OPENAI_API_KEY });
     this.model = options.model ?? process.env.OPENCROWD_OPENAI_MODEL ?? "gpt-4o-mini";
+    this.tools = options.tools;
+    this.extraTools = options.extraTools;
   }
 
   async complete(messages: LlmMessage[]): Promise<LlmResponse> {
     const response = await this.client.chat.completions.create({
       model: this.model,
       messages: messages.map(toOpenAiMessage),
-      tools: toolDefinitions(),
+      tools: toolDefinitions(this.tools, this.extraTools),
       tool_choice: "auto"
     });
     const message = response.choices[0]?.message;
@@ -80,7 +99,7 @@ export class OpenAiProvider implements LlmProvider {
       content: message?.content ?? "",
       toolCalls: (message?.tool_calls ?? []).map((toolCall) => ({
         id: toolCall.id,
-        name: toolCall.function.name as ToolName,
+        name: toolCall.function.name,
         arguments: parseArguments(toolCall.function.arguments)
       }))
     };
@@ -91,8 +110,12 @@ export class AnthropicProvider implements LlmProvider {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly baseUrl: string;
+  private readonly tools?: ToolName[];
+  private readonly extraTools?: DynamicToolDefinition[];
 
-  constructor(options: { apiKey?: string; model?: string; baseUrl?: string } = {}) {
+  constructor(options: { apiKey?: string; model?: string; baseUrl?: string; tools?: ToolName[]; extraTools?: DynamicToolDefinition[] } = {}) {
+    this.tools = options.tools;
+    this.extraTools = options.extraTools;
     const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
     if (!apiKey) {
       throw new Error("ANTHROPIC_API_KEY is required when OPENCROWD_LLM_PROVIDER=anthropic.");
@@ -116,18 +139,25 @@ export class AnthropicProvider implements LlmProvider {
         max_tokens: 4096,
         system,
         messages: messages.filter((message) => message.role !== "system").map(toAnthropicMessage),
-        tools: OPEN_CROWD_TOOLS.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          input_schema: tool.parameters
-        }))
+        tools: [
+          ...OPEN_CROWD_TOOLS.filter((tool) => !this.tools || this.tools.includes(tool.name)).map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.parameters
+          })),
+          ...(this.extraTools ?? []).map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.parameters
+          }))
+        ]
       })
     });
     const body = parseBody(await response.text());
     if (!response.ok) {
       throw new Error(`Anthropic LLM call failed: ${response.status} ${response.statusText} ${responseError(response, body)}`);
     }
-    return parseAnthropicMessage(body);
+    return parseAnthropicMessage(body, validToolNames(this.tools, this.extraTools));
   }
 }
 
@@ -149,7 +179,7 @@ export class MockLlmProvider implements LlmProvider {
     this.random = new SeededRandom(options.seed ?? "opencrowd-test-mode");
     this.endProbability = options.endProbability ?? 0.35;
     this.maxToolTurns = options.maxToolTurns ?? 8;
-    this.tools = options.tools?.length ? options.tools : TOOL_NAMES;
+    this.tools = options.tools?.length ? options.tools : TOOL_NAMES.filter((name) => name !== "spawn_subagent");
   }
 
   async complete(messages: LlmMessage[]): Promise<LlmResponse> {
@@ -321,6 +351,15 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
             stdout: "mock shell stdout\n",
             stderr: ""
           });
+        case "spawn_subagent":
+          return ok({
+            subagent_id: `${context.session.sessionId}#sub-mock`,
+            model: "mock-test-mode",
+            outcome: "completed",
+            final_message: `Mock subagent completed task: ${stringValue(args.task) ?? "mock subtask"}`,
+            turns: 1,
+            trajectory_path: `${context.session.sessionDir}/subagents/mock/messages.jsonl`
+          });
         case "complete_session":
           return ok(await completeSession(context.session, stringValue(args.final_message) ?? "Mock test mode session completed."));
       }
@@ -392,6 +431,8 @@ function mockToolArguments(
       return {};
     case "run_shell":
       return { command: "echo mock test mode", cwd: ".", timeout_ms: 1000 };
+    case "spawn_subagent":
+      return { task: `Mock subtask for: ${task.slice(0, 80)}` };
     case "complete_session":
       return { final_message: `Mock test mode completed task: ${task.slice(0, 120)}` };
   }
@@ -464,6 +505,12 @@ export interface X402LlmProviderOptions {
   paymentAdapter?: PaymentAdapter;
   paidHttpClient?: PaidHttpClient;
   fetchImpl?: typeof fetch;
+  /** Restrict the tools advertised to the model (defaults to all tools). */
+  tools?: ToolName[];
+  /** Connector-ingested vendor tool definitions to advertise alongside built-ins. */
+  extraTools?: DynamicToolDefinition[];
+  /** Ledger session_id override so subagent spend stays tagged in the shared ledger. */
+  ledgerSessionId?: string;
 }
 
 export class X402LlmProvider implements LlmProvider {
@@ -490,7 +537,7 @@ export class X402LlmProvider implements LlmProvider {
     const body = {
       model: model.id,
       messages: messages.map(toOpenAiMessage),
-      tools: toolDefinitions(),
+      tools: toolDefinitions(this.options.tools, this.options.extraTools),
       tool_choice: "auto"
     };
     const maxCostCents = this.options.maxCostCents ?? model.max_cost_cents ?? config.x402LlmMaxCostCents;
@@ -507,7 +554,7 @@ export class X402LlmProvider implements LlmProvider {
 
       const usage = tokenUsage(parsedBody);
       await appendLedgerEntry(this.session.ledgerPath, {
-        session_id: this.session.sessionId,
+        session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
         endpoint,
         model: model.id,
@@ -527,12 +574,12 @@ export class X402LlmProvider implements LlmProvider {
       if (!response.ok) {
         throw new Error(`x402 LLM call failed: ${response.status} ${response.statusText}`);
       }
-      return parseChatCompletion(parsedBody);
+      return parseChatCompletion(parsedBody, validToolNames(this.options.tools, this.options.extraTools));
     } catch (error) {
       if (!finalized) {
         await releaseReservation(this.session, reservation);
         await appendLedgerEntry(this.session.ledgerPath, {
-          session_id: this.session.sessionId,
+          session_id: this.options.ledgerSessionId ?? this.session.sessionId,
           type: "llm_call",
           endpoint,
           model: model.id,
@@ -650,26 +697,93 @@ export interface AgentRunOptions {
   toolExecutor?: ToolExecutor;
   compactOutput?: boolean;
   maxTurns?: number;
+  /** Restrict the tools advertised to the model. Defaults to every tool except spawn_subagent unless `subagent` is set. */
+  tools?: ToolName[];
+  /** Enable spawn_subagent delegation to a cheap fast model with local tools only. */
+  subagent?: SubagentOptions;
+  /**
+   * Connector-ingested vendor tools (integration spec). When present, the
+   * legacy marketplace/permission tools are dropped from the model surface
+   * and `promptSections` replaces the legacy economy prompt.
+   */
+  dynamicTools?: DynamicToolsOption;
+  /** Live-fact prompt sections (balances, vendor instructions, house rules). */
+  promptSections?: string[];
+}
+
+/** Legacy economic surface retired from the model when connector tools are active. */
+export const LEGACY_ECONOMY_TOOLS: ToolName[] = [
+  "search_services",
+  "call_service",
+  "list_allowed_services",
+  "add_allowed_service",
+  "remove_allowed_service",
+  "block_service",
+  "request_service_permission"
+];
+
+export interface SubagentOptions {
+  model: string;
+  maxTurns?: number;
+  /** Human-readable price hint (for the delegation prompt), e.g. "$0.01 max per call". */
+  costHint?: string;
+  /** Explicit subagent provider (tests and custom wiring). */
+  provider?: LlmProvider;
+}
+
+export type AgentTaskOutcome = "completed" | "stopped" | "max_turns";
+
+export interface AgentTaskResult {
+  outcome: AgentTaskOutcome;
+  summary: Record<string, unknown>;
+  turns: number;
 }
 
 export async function runAgentTask(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<string> {
-  const provider = options.provider ?? defaultProvider(session, options.model);
+  const result = await runAgentTaskDetailed(session, task, options);
+  return renderAgentSummary(result.summary, options);
+}
+
+export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
+  let enabledTools = options.tools
+    ?? (options.subagent ? TOOL_NAMES : TOOL_NAMES.filter((name) => name !== "spawn_subagent"));
+  if (options.dynamicTools) {
+    enabledTools = enabledTools.filter((name) => !LEGACY_ECONOMY_TOOLS.includes(name));
+  }
+  const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
+  const provider = options.provider ?? defaultProvider(session, options.model, enabledTools, dynamicDefinitions);
   const toolExecutor = options.toolExecutor ?? executeTool;
+  const systemPromptParts = [
+    "You are the local OpenCrowd agent running as a CLI or MCP-backed tool on the user's personal machine.",
+    "You have a Base USDC wallet attached to this session, local file tools, and a gated bash tool.",
+    "Try to solve the user's task completely. Use local files and bash when they are sufficient, but remember they are bounded by the user's installed tools, credentials, network, open ports, and process lifetime.",
+    "Before repeatedly fighting the local environment, decide whether the task needs external capability such as hosting, persistent infrastructure, remote compute, specialized APIs, live data, or access the user's device does not have."
+  ];
+  if (options.dynamicTools) {
+    systemPromptParts.push(
+      "When the local computer is not the right environment, or after one clear local capability failure, use the paid connector tools; discovering and paying bespoke services is your superpower.",
+      "Each tool result includes the budget before and after that tool call.",
+      ...(options.promptSections ?? [])
+    );
+  } else {
+    systemPromptParts.push(
+      "When the local or hosted computer is not the right environment, or after one clear local capability failure, use search_services; discovering bespoke x402 services is your superpower.",
+      "After selecting a service, spend Base USDC with call_service as needed.",
+      "You may need to try multiple services or use several services in sequence. Each tool result includes the budget before and after that tool call.",
+      "Budgeting and permissioning are local policy gates; yolo mode means services are allowed unless blocked. Never ask for wallet private keys or secrets."
+    );
+  }
+  systemPromptParts.push("End by calling complete_session with a concise final message.");
+  if (options.subagent) {
+    systemPromptParts.push(
+      `Delegation: spawn_subagent runs a cheaper, faster model (${options.subagent.model}${options.subagent.costHint ? `, ${options.subagent.costHint}` : ""}) with local file and shell tools only.`,
+      "Delegate bounded, parallelizable, low-judgment work such as searching files, summarizing, extracting, or mechanical edits.",
+      "Keep planning, paid-service decisions, and final answers in this main loop.",
+      "Subagents see none of this conversation, so pass explicit context (file paths, constraints) in the task."
+    );
+  }
   const messages: LlmMessage[] = [
-    {
-      role: "system",
-      content: [
-        "You are the local OpenCrowd agent running as a CLI or MCP-backed tool on the user's personal machine.",
-        "You have a Base USDC wallet attached to this session, local file tools, and a gated bash tool.",
-        "Try to solve the user's task completely. Use local files and bash when they are sufficient, but remember they are bounded by the user's installed tools, credentials, network, open ports, and process lifetime.",
-        "Before repeatedly fighting the local environment, decide whether the task needs external capability such as hosting, persistent infrastructure, remote compute, specialized APIs, live data, or access the user's device does not have.",
-        "When the local or hosted computer is not the right environment, or after one clear local capability failure, use search_services; discovering bespoke x402 services is your superpower.",
-        "After selecting a service, spend Base USDC with call_service as needed.",
-        "You may need to try multiple services or use several services in sequence. Each tool result includes the budget before and after that tool call.",
-        "Budgeting and permissioning are local policy gates; yolo mode means services are allowed unless blocked. Never ask for wallet private keys or secrets.",
-        "End by calling complete_session with a concise final message."
-      ].join(" ")
-    },
+    { role: "system", content: systemPromptParts.join(" ") },
     ...(options.history ?? []),
     { role: "user", content: task }
   ];
@@ -678,6 +792,7 @@ export async function runAgentTask(session: SessionState, task: string, options:
   const maxTurns = options.maxTurns ?? 100;
   const repeatedFailures = new Map<string, number>();
   let serviceCallFailures = 0;
+  let subagentCount = 0;
   for (let turn = 0; turn < maxTurns; turn += 1) {
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     const response = provider instanceof MockLlmProvider
@@ -690,7 +805,7 @@ export async function runAgentTask(session: SessionState, task: string, options:
     }
     if (response.toolCalls.length === 0) {
       const summary = await completeSession(session, response.content || "Session completed.");
-      return renderAgentSummary(summary, options);
+      return { outcome: "completed", summary, turns: turn + 1 };
     }
     for (const call of response.toolCalls) {
       options.onProgress?.({
@@ -699,7 +814,21 @@ export async function runAgentTask(session: SessionState, task: string, options:
         data: { tool: call.name, arguments: call.arguments }
       });
       const budgetBeforeToolCall = budgetStatus(session);
-      const result = await runGatedTool(toolExecutor, call, session, options);
+      let result: ToolResult;
+      if (call.name === "spawn_subagent") {
+        if (!options.subagent) {
+          result = { ok: false, error: "subagents are not enabled for this session" };
+        } else {
+          subagentCount += 1;
+          result = await runSubagentTask(session, call.arguments, options.subagent, subagentCount, options);
+        }
+      } else if (TOOL_NAMES.includes(call.name as ToolName)) {
+        result = await runGatedTool(toolExecutor, call as LlmToolCall & { name: ToolName }, session, options);
+      } else if (options.dynamicTools) {
+        result = await options.dynamicTools.execute(call.name, call.arguments);
+      } else {
+        result = { ok: false, error: `unknown tool: ${call.name}` };
+      }
       const budgetAfterToolCall = budgetStatus(session);
       options.onProgress?.({
         type: "tool_result",
@@ -722,7 +851,7 @@ export async function runAgentTask(session: SessionState, task: string, options:
           serviceCallFailures += 1;
           if (serviceCallFailures >= 3) {
             const summary = await completeSession(session, `Stopped after ${serviceCallFailures} service call failures. Last error: ${result.error}`);
-            return renderAgentSummary(summary, options);
+            return { outcome: "stopped", summary, turns: turn + 1 };
           }
         }
         const key = `${call.name}:${JSON.stringify(call.arguments)}:${result.error}`;
@@ -730,25 +859,182 @@ export async function runAgentTask(session: SessionState, task: string, options:
         repeatedFailures.set(key, count);
         if (count >= 2) {
           const summary = await completeSession(session, `Stopped because ${call.name} failed repeatedly: ${result.error}`);
-          return renderAgentSummary(summary, options);
+          return { outcome: "stopped", summary, turns: turn + 1 };
         }
       }
       if (call.name === "complete_session") {
         if (result.ok && result.data && typeof result.data === "object") {
-          return renderAgentSummary(result.data as Record<string, unknown>, options);
+          return { outcome: "completed", summary: result.data as Record<string, unknown>, turns: turn + 1 };
         }
         const summary = await completeSession(session, response.content || result.error || "Session completed.");
-        return renderAgentSummary(summary, options);
+        return { outcome: "completed", summary, turns: turn + 1 };
       }
     }
   }
   const summary = await completeSession(session, "Stopped after reaching the maximum tool loop turns.");
-  return renderAgentSummary(summary, options);
+  return { outcome: "max_turns", summary, turns: maxTurns };
+}
+
+interface SubagentCompletion {
+  subagent_id: string;
+  model: string;
+  outcome: "completed" | "stopped" | "max_turns";
+  final_message: string;
+  turns: number;
+  trajectory_path: string;
+}
+
+/**
+ * Run one bounded subagent: local tools only, one level deep, sequential.
+ * The subagent shares the parent session's budget, ledger, and artifacts;
+ * its LLM spend is tagged in the shared ledger by subagent session id and
+ * its trajectory persists under sessions/<id>/subagents/<n>/.
+ */
+async function runSubagentTask(
+  session: SessionState,
+  args: Record<string, unknown>,
+  subagent: SubagentOptions,
+  index: number,
+  parentOptions: AgentRunOptions
+): Promise<ToolResult> {
+  const task = typeof args.task === "string" ? args.task : "";
+  if (!task) {
+    return { ok: false, error: "spawn_subagent requires a task" };
+  }
+  const subagentId = `${session.sessionId}#sub${index}`;
+  const trajectoryDir = join(session.sessionDir, "subagents", String(index));
+  const trajectoryPath = join(trajectoryDir, "messages.jsonl");
+  await mkdir(trajectoryDir, { recursive: true });
+  const record = async (message: LlmMessage) => {
+    await appendFile(trajectoryPath, `${JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message })}\n`, "utf8");
+  };
+  const provider = subagentProvider(session, subagent, subagentId, parentOptions);
+  const toolExecutor = parentOptions.toolExecutor ?? executeTool;
+  const maxTurns = subagent.maxTurns ?? 24;
+  const forwardProgress = (event: ProgressEvent) => {
+    parentOptions.onProgress?.({ ...event, message: `[subagent ${index}] ${event.message}` });
+  };
+  const messages: LlmMessage[] = [
+    {
+      role: "system",
+      content: [
+        "You are an OpenCrowd subagent handling one bounded subtask for the main agent.",
+        "You have local file tools and a gated bash tool only: no paid services, no wallet actions, no further subagents.",
+        "Work only from the task and context provided; you cannot see the main conversation.",
+        "Finish by calling complete_session with a final message containing exactly what the main agent asked for."
+      ].join(" ")
+    },
+    {
+      role: "user",
+      content: [
+        `Task: ${task}`,
+        typeof args.context === "string" && args.context ? `Context: ${args.context}` : undefined,
+        typeof args.expected_output === "string" && args.expected_output ? `Expected output: ${args.expected_output}` : undefined
+      ].filter(Boolean).join("\n\n")
+    }
+  ];
+  for (const message of messages) {
+    await record(message);
+  }
+
+  const repeatedFailures = new Map<string, number>();
+  const finish = async (outcome: SubagentCompletion["outcome"], finalMessage: string, turns: number): Promise<ToolResult> => {
+    const completion: SubagentCompletion = {
+      subagent_id: subagentId,
+      model: subagent.model,
+      outcome,
+      final_message: finalMessage,
+      turns,
+      trajectory_path: trajectoryPath
+    };
+    return { ok: true, data: completion };
+  };
+
+  try {
+    for (let turn = 0; turn < maxTurns; turn += 1) {
+      forwardProgress({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
+      const response = provider instanceof MockLlmProvider
+        ? await completeMockLlmCall(session, provider, messages, turn + 1)
+        : await provider.complete(messages);
+      if (response.content || response.toolCalls.length > 0) {
+        const assistantMessage = assistantMessageFromResponse(response);
+        messages.push(assistantMessage);
+        await record(assistantMessage);
+      }
+      if (response.toolCalls.length === 0) {
+        return finish("completed", response.content || "Subagent finished.", turn + 1);
+      }
+      for (const call of response.toolCalls) {
+        if (call.name === "complete_session") {
+          const finalMessage = typeof call.arguments.final_message === "string" && call.arguments.final_message
+            ? call.arguments.final_message
+            : response.content || "Subagent finished.";
+          return finish("completed", finalMessage, turn + 1);
+        }
+        forwardProgress({
+          type: "calling_tool",
+          message: `Tool call: ${summarizeToolCall(call)}`,
+          data: { tool: call.name, arguments: call.arguments }
+        });
+        const result = SUBAGENT_TOOL_NAMES.includes(call.name as ToolName)
+          ? await toolExecutor(call.name as ToolName, call.arguments, { session, onProgress: forwardProgress })
+          : { ok: false, error: `${call.name} is not available to subagents; local tools only` };
+        forwardProgress({
+          type: "tool_result",
+          message: `Tool result: ${summarizeToolResult(call.name, result)}`,
+          data: { tool: call.name, ok: result.ok, error: result.error, result: result.data as Record<string, unknown> | undefined }
+        });
+        const toolMessage = {
+          role: "tool",
+          toolCallId: call.id,
+          content: JSON.stringify(toolMessagePayload({ result }))
+        } as LlmMessage;
+        messages.push(toolMessage);
+        await record(toolMessage);
+        if (!result.ok) {
+          const key = `${call.name}:${JSON.stringify(call.arguments)}:${result.error}`;
+          const count = (repeatedFailures.get(key) ?? 0) + 1;
+          repeatedFailures.set(key, count);
+          if (count >= 2) {
+            return finish("stopped", `Subagent stopped because ${call.name} failed repeatedly: ${result.error}`, turn + 1);
+          }
+        }
+      }
+    }
+    return finish("max_turns", "Subagent stopped after reaching its maximum turns.", maxTurns);
+  } catch (error) {
+    return { ok: false, error: `subagent ${index} failed: ${(error as Error).message}` };
+  }
+}
+
+function subagentProvider(
+  session: SessionState,
+  subagent: SubagentOptions,
+  subagentId: string,
+  parentOptions: AgentRunOptions
+): LlmProvider {
+  if (subagent.provider) {
+    return subagent.provider;
+  }
+  if (parentOptions.provider instanceof MockLlmProvider) {
+    return new MockLlmProvider({ seed: subagentId, tools: SUBAGENT_TOOL_NAMES });
+  }
+  if (process.env.OPENCROWD_LLM_PROVIDER === "openai") {
+    return new OpenAiProvider({ model: subagent.model, tools: SUBAGENT_TOOL_NAMES });
+  }
+  if (process.env.OPENCROWD_LLM_PROVIDER === "anthropic") {
+    return new AnthropicProvider({ model: subagent.model, tools: SUBAGENT_TOOL_NAMES });
+  }
+  return new X402LlmProvider(session, {
+    model: subagent.model,
+    tools: SUBAGENT_TOOL_NAMES,
+    ledgerSessionId: subagentId
+  });
 }
 
 async function runGatedTool(
   toolExecutor: ToolExecutor,
-  call: LlmToolCall,
+  call: LlmToolCall & { name: ToolName },
   session: SessionState,
   options: AgentRunOptions
 ): Promise<ToolResult> {
@@ -775,9 +1061,11 @@ async function runGatedTool(
 }
 
 function assistantMessageFromResponse(response: LlmResponse): LlmMessage {
+  // Keep assistant text even when the response also carries tool calls, so
+  // trajectories preserve the model's stated reasoning (HARNESS_IMPROVEMENT).
   return {
     role: "assistant",
-    content: response.toolCalls.length > 0 ? "" : response.content,
+    content: response.content,
     toolCalls: response.toolCalls
   };
 }
@@ -886,14 +1174,19 @@ function truncateForModel(value: unknown, maxChars: number): unknown {
   }));
 }
 
-function defaultProvider(session: SessionState, model: string | undefined): LlmProvider {
+function defaultProvider(
+  session: SessionState,
+  model: string | undefined,
+  tools?: ToolName[],
+  extraTools?: DynamicToolDefinition[]
+): LlmProvider {
   if (process.env.OPENCROWD_LLM_PROVIDER === "openai") {
-    return new OpenAiProvider({ model });
+    return new OpenAiProvider({ model, tools, extraTools });
   }
   if (process.env.OPENCROWD_LLM_PROVIDER === "anthropic") {
-    return new AnthropicProvider({ model });
+    return new AnthropicProvider({ model, tools, extraTools });
   }
-  return new X402LlmProvider(session, { model });
+  return new X402LlmProvider(session, { model, tools, extraTools });
 }
 
 export async function buildSessionSummary(
@@ -1079,15 +1372,32 @@ function renderPurchaseSummary(summary: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-function toolDefinitions(): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  return OPEN_CROWD_TOOLS.map((tool) => ({
-    type: "function",
-    function: {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters as Record<string, unknown>
-    }
-  }));
+function toolDefinitions(names?: ToolName[], extraTools?: DynamicToolDefinition[]): OpenAI.Chat.Completions.ChatCompletionTool[] {
+  return [
+    ...OPEN_CROWD_TOOLS.filter((tool) => !names || names.includes(tool.name)).map((tool) => ({
+      type: "function" as const,
+      function: {
+        name: tool.name as string,
+        description: tool.description,
+        parameters: tool.parameters as Record<string, unknown>
+      }
+    })),
+    ...(extraTools ?? []).map((tool) => ({
+      type: "function" as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters
+      }
+    }))
+  ];
+}
+
+function validToolNames(names?: ToolName[], extraTools?: DynamicToolDefinition[]): Set<string> {
+  return new Set<string>([
+    ...(names ?? TOOL_NAMES),
+    ...(extraTools ?? []).map((tool) => tool.name)
+  ]);
 }
 
 function summarizeToolCall(call: LlmToolCall): string {
@@ -1105,7 +1415,7 @@ function summarizeToolCall(call: LlmToolCall): string {
   }
 }
 
-function summarizeToolResult(name: ToolName, result: ToolResult): string {
+function summarizeToolResult(name: string, result: ToolResult): string {
   if (!result.ok) {
     return `${name} failed: ${result.error}`;
   }
@@ -1233,7 +1543,7 @@ function parseBody(text: string): unknown {
   }
 }
 
-function parseChatCompletion(body: unknown): LlmResponse {
+function parseChatCompletion(body: unknown, validNames: Set<string> = new Set(TOOL_NAMES)): LlmResponse {
   const firstChoice = Array.isArray((body as { choices?: unknown[] })?.choices)
     ? (body as { choices: unknown[] }).choices[0]
     : undefined;
@@ -1244,12 +1554,12 @@ function parseChatCompletion(body: unknown): LlmResponse {
   return {
     content: messageContent(objectMessage.content),
     toolCalls: Array.isArray(objectMessage.tool_calls)
-      ? objectMessage.tool_calls.map(toToolCall).filter((toolCall): toolCall is LlmToolCall => toolCall !== null)
+      ? objectMessage.tool_calls.map((value) => toToolCall(value, validNames)).filter((toolCall): toolCall is LlmToolCall => toolCall !== null)
       : []
   };
 }
 
-function parseAnthropicMessage(body: unknown): LlmResponse {
+function parseAnthropicMessage(body: unknown, validNames: Set<string> = new Set(TOOL_NAMES)): LlmResponse {
   const content = Array.isArray((body as { content?: unknown[] })?.content)
     ? (body as { content: unknown[] }).content
     : [];
@@ -1265,12 +1575,12 @@ function parseAnthropicMessage(body: unknown): LlmResponse {
     }
     const object = block as Record<string, unknown>;
     const name = typeof object.name === "string" ? object.name : undefined;
-    if (!name || !TOOL_NAMES.includes(name as ToolName)) {
+    if (!name || !validNames.has(name)) {
       return null;
     }
     return {
       id: typeof object.id === "string" ? object.id : `call-${Date.now()}`,
-      name: name as ToolName,
+      name,
       arguments: object.input && typeof object.input === "object" && !Array.isArray(object.input)
         ? object.input as Record<string, unknown>
         : {}
@@ -1279,19 +1589,19 @@ function parseAnthropicMessage(body: unknown): LlmResponse {
   return { content: text, toolCalls };
 }
 
-function toToolCall(value: unknown): LlmToolCall | null {
+function toToolCall(value: unknown, validNames: Set<string>): LlmToolCall | null {
   if (!value || typeof value !== "object") {
     return null;
   }
   const object = value as Record<string, unknown>;
   const fn = object.function && typeof object.function === "object" ? object.function as Record<string, unknown> : {};
   const name = typeof fn.name === "string" ? fn.name : undefined;
-  if (!name || !TOOL_NAMES.includes(name as ToolName)) {
+  if (!name || !validNames.has(name)) {
     return null;
   }
   return {
     id: typeof object.id === "string" ? object.id : `call-${Date.now()}`,
-    name: name as ToolName,
+    name,
     arguments: typeof fn.arguments === "string" ? parseArguments(fn.arguments) : {}
   };
 }

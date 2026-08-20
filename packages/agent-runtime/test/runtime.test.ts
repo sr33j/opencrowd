@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -10,6 +10,7 @@ import {
   renderCompactPurchaseSummary,
   renderProgress,
   runAgentTask,
+  runAgentTaskDetailed,
   X402LlmProvider,
   type LlmMessage,
   type LlmProvider,
@@ -503,6 +504,155 @@ describe("human-in-the-loop permission gate", () => {
     });
 
     expect(executorCalls).toBe(1);
+  });
+});
+
+describe("connector dynamic tools", () => {
+  it("advertises connector tools, dispatches to their executor, and retires the legacy surface", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const executed: Array<{ name: string; args: Record<string, unknown> }> = [];
+    let systemPrompt = "";
+    const provider: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        systemPrompt = messages.find((message) => message.role === "system")?.content ?? "";
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return { content: "", toolCalls: [{ id: "call_1", name: "agentcash_fetch", arguments: { url: "https://api.paid.dev/x" } }] };
+        }
+        const parsed = JSON.parse(toolResult.content) as { result: { ok: boolean; data: Record<string, unknown> } };
+        expect(parsed.result.ok).toBe(true);
+        expect(parsed.result.data).toMatchObject({ body: "vendor data" });
+        return { content: "", toolCalls: [{ id: "call_2", name: "complete_session", arguments: { final_message: "done" } }] };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "use the vendor tool", {
+      provider,
+      dynamicTools: {
+        definitions: [{ name: "agentcash_fetch", description: "Fetch a paid endpoint", parameters: { type: "object", properties: {} } }],
+        execute: async (name, args) => {
+          executed.push({ name, args });
+          return { ok: true, data: { body: "vendor data" } };
+        }
+      },
+      promptSections: ["HOUSE RULES MARKER"]
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(executed).toEqual([{ name: "agentcash_fetch", args: { url: "https://api.paid.dev/x" } }]);
+    expect(systemPrompt).toContain("HOUSE RULES MARKER");
+    expect(systemPrompt).not.toContain("search_services");
+  });
+});
+
+describe("subagent delegation", () => {
+  it("runs spawn_subagent locally, persists the trajectory, and preserves assistant text with tool calls", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const persisted: LlmMessage[] = [];
+    let mainSystemPrompt = "";
+    let subagentSystemPrompt = "";
+    const subagentScript: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        subagentSystemPrompt = messages.find((message) => message.role === "system")?.content ?? "";
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return { content: "", toolCalls: [{ id: "sub_1", name: "list_files", arguments: {} }] };
+        }
+        return {
+          content: "",
+          toolCalls: [{ id: "sub_2", name: "complete_session", arguments: { final_message: "subagent report: 0 files" } }]
+        };
+      }
+    };
+    const mainScript: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        mainSystemPrompt = messages.find((message) => message.role === "system")?.content ?? "";
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return {
+            content: "Delegating the file inventory.",
+            toolCalls: [{ id: "call_1", name: "spawn_subagent", arguments: { task: "list workspace files", expected_output: "a count" } }]
+          };
+        }
+        const parsed = JSON.parse(toolResult.content) as { result: { ok: boolean; data: Record<string, unknown> } };
+        expect(parsed.result.ok).toBe(true);
+        expect(parsed.result.data.outcome).toBe("completed");
+        expect(parsed.result.data.final_message).toBe("subagent report: 0 files");
+        return {
+          content: "",
+          toolCalls: [{ id: "call_2", name: "complete_session", arguments: { final_message: "done via subagent" } }]
+        };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "inventory files", {
+      provider: mainScript,
+      subagent: { model: "cheap-model", provider: subagentScript },
+      onMessage: (message) => {
+        persisted.push(message);
+      }
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("done via subagent");
+    expect(mainSystemPrompt).toContain("spawn_subagent runs a cheaper, faster model (cheap-model");
+    expect(subagentSystemPrompt).toContain("no paid services");
+    const assistant = persisted.find((message) => message.role === "assistant");
+    expect(assistant?.content).toBe("Delegating the file inventory.");
+    expect(assistant?.toolCalls?.[0]?.name).toBe("spawn_subagent");
+    const trajectory = await readFile(join(session.sessionDir, "subagents", "1", "messages.jsonl"), "utf8");
+    expect(trajectory).toContain("list workspace files");
+    expect(trajectory).toContain("subagent report: 0 files");
+  });
+
+  it("rejects spawn_subagent when subagents are not enabled and paid tools inside subagents", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const mainScript: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return { content: "", toolCalls: [{ id: "call_1", name: "spawn_subagent", arguments: { task: "anything" } }] };
+        }
+        const parsed = JSON.parse(toolResult.content) as { result: { ok: boolean; error?: string } };
+        expect(parsed.result.ok).toBe(false);
+        expect(parsed.result.error).toContain("not enabled");
+        return { content: "stopping", toolCalls: [] };
+      }
+    };
+    await runAgentTaskDetailed(session, "try to delegate", { provider: mainScript });
+
+    const subagentScript: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return { content: "", toolCalls: [{ id: "sub_1", name: "search_services", arguments: { query: "anything" } }] };
+        }
+        const parsed = JSON.parse(toolResult.content) as { result: { ok: boolean; error?: string } };
+        expect(parsed.result.ok).toBe(false);
+        expect(parsed.result.error).toContain("local tools only");
+        return { content: "", toolCalls: [{ id: "sub_2", name: "complete_session", arguments: { final_message: "blocked as expected" } }] };
+      }
+    };
+    const mainWithSubagent: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        const toolResult = messages.find((message) => message.role === "tool");
+        if (!toolResult) {
+          return { content: "", toolCalls: [{ id: "call_1", name: "spawn_subagent", arguments: { task: "search for services" } }] };
+        }
+        const parsed = JSON.parse(toolResult.content) as { result: { ok: boolean; data: Record<string, unknown> } };
+        expect(parsed.result.data.final_message).toBe("blocked as expected");
+        return { content: "", toolCalls: [{ id: "call_2", name: "complete_session", arguments: { final_message: "done" } }] };
+      }
+    };
+    const session2 = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const result = await runAgentTaskDetailed(session2, "delegate a search", {
+      provider: mainWithSubagent,
+      subagent: { model: "cheap-model", provider: subagentScript }
+    });
+    expect(result.outcome).toBe("completed");
   });
 });
 

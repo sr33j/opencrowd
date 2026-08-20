@@ -7,10 +7,27 @@
     "jsx": "react-jsx"
   },
   "references": [
-    { "path": "../../packages/core" },
-    { "path": "../../packages/agent-runtime" },
-    { "path": "../../packages/mcp" },
-    { "path": "../../packages/local-api" }
+    {
+      "path": "../../packages/core"
+    },
+    {
+      "path": "../../packages/connectors"
+    },
+    {
+      "path": "../../packages/agent-runtime"
+    },
+    {
+      "path": "../../packages/evals"
+    },
+    {
+      "path": "../../packages/mcp"
+    },
+    {
+      "path": "../../packages/local-api"
+    }
   ],
-  "include": ["src/**/*.ts", "src/**/*.tsx"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ]
 }

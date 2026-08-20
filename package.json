@@ -19,10 +19,10 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "tsc -b packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli && chmod +x apps/cli/dist/index.js",
+    "build": "tsc -b packages/core packages/connectors packages/agent-runtime packages/evals packages/mcp packages/local-api apps/cli && chmod +x apps/cli/dist/index.js",
     "test": "vitest run",
-    "typecheck": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli",
-    "lint": "tsc -b --pretty false packages/core packages/agent-runtime packages/mcp packages/local-api apps/cli"
+    "typecheck": "tsc -b --pretty false packages/core packages/connectors packages/agent-runtime packages/evals packages/mcp packages/local-api apps/cli",
+    "lint": "tsc -b --pretty false packages/core packages/connectors packages/agent-runtime packages/evals packages/mcp packages/local-api apps/cli"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
