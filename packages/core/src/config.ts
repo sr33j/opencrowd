@@ -12,25 +12,14 @@ export interface McpServerConfig {
 
 export interface OpenCrowdConfig {
   bazaarUrl: string;
-  paymentWallet: "auto" | "local-evm" | "agentic-wallet";
-  agenticWalletCommand: string;
-  agenticWalletArgs: string[];
-  agentCashCommand: string;
-  agentCashArgs: string[];
   /** Connector MCP servers; tools are ingested verbatim with a name prefix. Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
-  owsCommand: string;
-  owsAccount?: string;
   x402LlmBaseUrl: string;
   x402LlmModel: string;
   x402LlmMaxCostCents: number;
   /** Per-request LLM timeout; reasoning models can think for minutes. */
   x402LlmTimeoutMs: number;
   modelPolicy: ModelPolicy;
-  veniceAutoTopUpEnabled: boolean;
-  veniceAutoTopUpThresholdCents: number;
-  veniceAutoTopUpTargetCents: number;
-  veniceAutoTopUpMinimumCents: number;
   x402PaymentAsset: string;
   x402PaymentNetwork: string;
   mcpShellEnabled: boolean;
@@ -44,25 +33,15 @@ export const DEFAULT_LLM_MODEL = "zai-org-glm-4.7-flash";
 
 const DEFAULT_CONFIG: OpenCrowdConfig = {
   bazaarUrl: COINBASE_BAZAAR_URL,
-  paymentWallet: "auto",
-  agenticWalletCommand: "npx",
-  agenticWalletArgs: ["--yes", "awal"],
-  agentCashCommand: "npx",
-  agentCashArgs: ["--yes", "agentcash"],
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
   },
-  owsCommand: "ows",
   x402LlmBaseUrl: "https://api.venice.ai/api/v1",
   x402LlmModel: DEFAULT_LLM_MODEL,
   x402LlmMaxCostCents: 25,
   x402LlmTimeoutMs: 600_000,
   modelPolicy: DEFAULT_MODEL_POLICY,
-  veniceAutoTopUpEnabled: true,
-  veniceAutoTopUpThresholdCents: 500,
-  veniceAutoTopUpTargetCents: 750,
-  veniceAutoTopUpMinimumCents: 500,
   x402PaymentAsset: "USDC",
   x402PaymentNetwork: "base",
   mcpShellEnabled: false,
@@ -116,20 +95,8 @@ export async function updateConfig(patch: Partial<OpenCrowdConfig>): Promise<Ope
 }
 
 function normalizeConfig(config: OpenCrowdConfig): OpenCrowdConfig {
-  let next = { ...config };
-  if (next.bazaarUrl === AGENTIC_MARKET_DEFAULT_URL) {
-    next = { ...next, bazaarUrl: COINBASE_BAZAAR_URL };
+  if (config.bazaarUrl === AGENTIC_MARKET_DEFAULT_URL) {
+    return { ...config, bazaarUrl: COINBASE_BAZAAR_URL };
   }
-  if (
-    next.veniceAutoTopUpThresholdCents === 200
-    && next.veniceAutoTopUpTargetCents === 500
-    && next.veniceAutoTopUpMinimumCents === 500
-  ) {
-    next = {
-      ...next,
-      veniceAutoTopUpThresholdCents: DEFAULT_CONFIG.veniceAutoTopUpThresholdCents,
-      veniceAutoTopUpTargetCents: DEFAULT_CONFIG.veniceAutoTopUpTargetCents
-    };
-  }
-  return next;
+  return config;
 }

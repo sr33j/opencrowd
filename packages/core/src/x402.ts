@@ -2,7 +2,7 @@ import { appendLedgerEntry } from "./ledger.js";
 import { assertServiceAllowed } from "./permissions.js";
 import { reserveBudget, finalizeReservation, releaseReservation } from "./budget.js";
 import { saveArtifact } from "./artifacts.js";
-import { createDefaultPaidHttpClient, createOwsPaymentAdapter, type PaidHttpClient, type PaymentAdapter } from "./ows.js";
+import { createDefaultPaidHttpClient, type PaidHttpClient, type PaymentAdapter } from "./ows.js";
 import type { CallServiceInput, PaidCallResult, ProgressEvent, SessionState } from "./types.js";
 
 export interface X402Options {
@@ -72,8 +72,11 @@ export async function callPaidService(
       };
     }
 
-    options.onProgress?.({ type: "signing_with_ows", message: "Signing payment with OWS" });
-    const signer = options.paymentAdapter ?? (await createOwsPaymentAdapter());
+    const signer = options.paymentAdapter;
+    if (!signer) {
+      throw new Error("a paymentAdapter is required when fetchImpl is supplied");
+    }
+    options.onProgress?.({ type: "signing_with_ows", message: "Authorizing x402 service payment" });
     const signed = await signer.sign({
       resourceUrl: input.resource_url,
       method: input.method,

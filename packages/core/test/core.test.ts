@@ -18,19 +18,16 @@ import {
   createWalletDraft,
   createOpenCrowdSession,
   createSession,
-  ensureVeniceCreditTopUp,
   exportWalletSecret,
   FRUIT_LABELS,
   fundActiveTestWallet,
   listArtifacts,
   listStoredWallets,
   normalizeLlmModels,
-  AgenticWalletPaidHttpClient,
   appendLedgerEntry,
   compatiblePaymentHeader,
   VeniceWalletPaidHttpClient,
   normalizeBazaarResponse,
-  OwsPaymentAdapter,
   openCrowdToolDefinition,
   readLedger,
   removeAllowedService,
@@ -55,6 +52,9 @@ async function tempRoot(): Promise<string> {
   tmpRoots.push(root);
   return root;
 }
+
+// Keep the developer's real shared AgentCash wallet out of test runs.
+process.env.AGENTCASH_WALLET_PATH = "/nonexistent/agentcash-wallet.json";
 
 afterEach(async () => {
   delete process.env.OPENCROWD_CONFIG_DIR;
@@ -515,49 +515,6 @@ describe("OWS wallet helpers", () => {
     });
   });
 
-  it("auto tops up Venice credit below the configured threshold and records budget", async () => {
-    const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 1_000, permissionMode: "yolo" });
-    let balanceUsd = 1.5;
-    let topUpCents = 0;
-    const wallet = {
-      async walletAddress() {
-        return "0xabc";
-      },
-      async walletBalance() {
-        return { balanceUsd, canConsume: true, suggestedTopUpUsd: 3.5 };
-      },
-      async topUpVeniceCredit(amountCents: number) {
-        topUpCents += amountCents;
-        balanceUsd += amountCents / 100;
-      }
-    };
-    const config = {
-      veniceAutoTopUpEnabled: true,
-      veniceAutoTopUpThresholdCents: 500,
-      veniceAutoTopUpTargetCents: 750,
-      veniceAutoTopUpMinimumCents: 500,
-      x402LlmBaseUrl: "https://api.venice.ai/api/v1"
-    } as OpenCrowdConfig;
-
-    await expect(ensureVeniceCreditTopUp(session, wallet, config)).resolves.toMatchObject({
-      top_up_required: true,
-      before_balance_cents: 150,
-      top_up_cents: 600,
-      after_balance_cents: 750
-    });
-    expect(topUpCents).toBe(600);
-    expect(session.spentCents).toBe(600);
-    expect(session.reservedCents).toBe(0);
-    const rows = await readLedger(session.ledgerPath);
-    expect(rows).toContainEqual(expect.objectContaining({
-      type: "wallet_top_up",
-      status: "charged",
-      quoted_cost_cents: "600",
-      charged_cost_cents: "600"
-    }));
-  });
-
   it("wraps legacy signed payments in the Coinbase x402 v2 envelope", () => {
     const flatHeader = Buffer.from(JSON.stringify({
       x402Version: 2,
@@ -603,75 +560,6 @@ describe("OWS wallet helpers", () => {
         authorization: expect.objectContaining({ value: "1000" })
       })
     });
-  });
-
-  it("fails clearly when no wallet exists and constructs upto signing requests", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await expect(walletAddress()).rejects.toThrow("No active wallet");
-
-    const argsPath = join(root, "args.txt");
-    const script = join(root, "ows-sign.sh");
-    await writeFile(script, [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" > "${argsPath}"`,
-      "echo '{\"headers\":{\"x-payment\":\"signed\"},\"payment_id\":\"pay_1\",\"tx_hash\":\"0xtx\"}'"
-    ].join("\n"), "utf8");
-    await chmod(script, 0o755);
-
-    const signer = new OwsPaymentAdapter(script, "agent");
-    await expect(signer.sign({
-      resourceUrl: "https://llm.example/v1/chat/completions",
-      method: "POST",
-      quotedCostCents: 25,
-      paymentKind: "upto",
-      body: { prompt: "hi" }
-    })).resolves.toMatchObject({ paymentId: "pay_1", txHash: "0xtx" });
-    await expect(readFile(argsPath, "utf8")).resolves.toContain("--upto-cost-cents 25");
-  });
-
-  it("uses Agentic Wallet x402 pay for paid HTTP requests", async () => {
-    const root = await tempRoot();
-    const argsPath = join(root, "awal-args.txt");
-    const script = join(root, "awal-pay.sh");
-    await writeFile(script, [
-      "#!/bin/sh",
-      `printf '%s\\n' "$*" > "${argsPath}"`,
-      "echo '{\"status\":200,\"body\":{\"ok\":true},\"charged_cost_cents\":3,\"payment_id\":\"pay_1\",\"tx_hash\":\"0xtx\"}'"
-    ].join("\n"), "utf8");
-    await chmod(script, 0o755);
-
-    const client = new AgenticWalletPaidHttpClient({
-      bazaarUrl: "https://bazaar.example",
-      agenticWalletCommand: script,
-      agenticWalletArgs: [],
-      owsCommand: "ows",
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "openai-gpt-55",
-      x402LlmMaxCostCents: 25,
-      x402PaymentAsset: "USDC",
-      x402PaymentNetwork: "base",
-      mcpShellEnabled: false,
-      localApiShellEnabled: false
-    });
-
-    await expect(client.request({
-      url: "https://llm.example/v1/chat/completions",
-      method: "POST",
-      maxCostCents: 25,
-      body: { model: "openai-gpt-55" }
-    })).resolves.toMatchObject({
-      status: 200,
-      ok: true,
-      chargedCostCents: 3,
-      paymentId: "pay_1",
-      txHash: "0xtx",
-      body: { ok: true }
-    });
-    const args = await readFile(argsPath, "utf8");
-    expect(args).toContain("x402 pay https://llm.example/v1/chat/completions");
-    expect(args).toContain("--method POST");
-    expect(args).toContain("--max-amount 250000");
   });
 
   it("pays x402 challenges carried only in the Payment-Required header", async () => {

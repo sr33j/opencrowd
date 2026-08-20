@@ -2,7 +2,8 @@ import { randomInt, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
+import { homedir } from "node:os";
 import { bytesToHex } from "viem";
 import { english, generateMnemonic, mnemonicToAccount } from "viem/accounts";
 import { walletSecretsPath, walletsPath } from "./config.js";
@@ -10,7 +11,14 @@ import { walletSecretsPath, walletsPath } from "./config.js";
 const execFileAsync = promisify(execFile);
 const KEYCHAIN_SERVICE = "opencrowd-wallet";
 
-export type StoredWalletKind = "local-evm" | "test";
+/**
+ * One-wallet convergence (integration spec): when `~/.agentcash/wallet.json`
+ * exists, OpenCrowd pays from the same wallet AgentCash and CrowdCode use.
+ * The key stays in AgentCash's file — read at signing time, never copied.
+ */
+export const AGENTCASH_WALLET_ID = "agentcash";
+
+export type StoredWalletKind = "local-evm" | "test" | "agentcash";
 
 export interface StoredWallet {
   id: string;
@@ -25,6 +33,8 @@ export interface StoredWallet {
 
 export interface WalletRegistry {
   active_wallet_id?: string;
+  /** True when the user explicitly chose a legacy wallet over the AgentCash default. */
+  explicit_selection?: boolean;
   wallets: StoredWallet[];
 }
 
@@ -58,6 +68,40 @@ export const FRUIT_LABELS = [
   "pulasan", "quenepa", "sapodilla", "sapote", "santol", "sudachi", "surinamcherry", "tamarillo", "tamarind", "whitecurrant",
   "wineberry", "youngberry", "ziziphus", "melonpear", "roseapple", "sugarapple", "velvetapple", "woodapple", "yangmei", "zabergau"
 ];
+
+export function agentCashWalletPath(): string {
+  return process.env.AGENTCASH_WALLET_PATH ?? join(homedir(), ".agentcash", "wallet.json");
+}
+
+async function readAgentCashWalletFile(): Promise<{ address: string; privateKey: string } | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(agentCashWalletPath(), "utf8")) as Record<string, unknown>;
+    const address = typeof parsed.address === "string" ? parsed.address : undefined;
+    const privateKey = typeof parsed.privateKey === "string" && /^0x[0-9a-fA-F]{64}$/.test(parsed.privateKey)
+      ? parsed.privateKey
+      : undefined;
+    return address && privateKey ? { address, privateKey } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The shared AgentCash wallet as a virtual registry entry, when present. */
+export async function agentCashStoredWallet(): Promise<StoredWallet | undefined> {
+  const file = await readAgentCashWalletFile();
+  if (!file) {
+    return undefined;
+  }
+  return {
+    id: AGENTCASH_WALLET_ID,
+    label: AGENTCASH_WALLET_ID,
+    address: file.address,
+    network: "base",
+    asset: "USDC",
+    kind: "agentcash",
+    created_at: ""
+  };
+}
 
 export async function loadWalletRegistry(): Promise<WalletRegistry> {
   try {
@@ -108,6 +152,7 @@ export async function confirmWalletDraft(draft: WalletDraft): Promise<StoredWall
   await storeWalletSecret(wallet.id, { mnemonic: draft.mnemonic });
   registry.wallets.push(wallet);
   registry.active_wallet_id = wallet.id;
+  registry.explicit_selection = true;
   await saveWalletRegistry(registry);
   return wallet;
 }
@@ -127,6 +172,7 @@ export async function createTestWallet(label?: string, initialBalanceCents = 0):
   };
   registry.wallets.push(wallet);
   registry.active_wallet_id = wallet.id;
+  registry.explicit_selection = true;
   await saveWalletRegistry(registry);
   return wallet;
 }
@@ -136,12 +182,13 @@ const DEFAULT_TEST_WALLET_BALANCE_CENTS = 2500;
 export async function ensureDefaultTestWallet(): Promise<StoredWallet> {
   const registry = await loadWalletRegistry();
   const active = activeWalletFromRegistry(registry);
-  if (active?.kind === "test") {
+  if (active?.kind === "test" && registry.explicit_selection && registry.active_wallet_id === active.id) {
     return active;
   }
   const existing = registry.wallets.find((wallet) => wallet.kind === "test");
   if (existing) {
     registry.active_wallet_id = existing.id;
+    registry.explicit_selection = true;
     await saveWalletRegistry(registry);
     return existing;
   }
@@ -150,13 +197,16 @@ export async function ensureDefaultTestWallet(): Promise<StoredWallet> {
 
 export async function listStoredWallets(options: { includeBalances?: boolean } = {}): Promise<WalletListEntry[]> {
   const registry = await loadWalletRegistry();
-  return Promise.all(registry.wallets.map(async (wallet) => {
+  const agentCash = await agentCashStoredWallet();
+  const activeId = await resolveActiveWalletId(registry, agentCash);
+  const entries = [...(agentCash ? [agentCash] : []), ...registry.wallets];
+  return Promise.all(entries.map(async (wallet) => {
     const balance = options.includeBalances ? await walletBalanceForEntry(wallet).catch((error) => ({
       spendable_balance: `error: ${(error as Error).message}`
     })) : {};
     return {
       ...wallet,
-      active: wallet.id === registry.active_wallet_id,
+      active: wallet.id === activeId,
       ...balance
     };
   }));
@@ -164,17 +214,50 @@ export async function listStoredWallets(options: { includeBalances?: boolean } =
 
 export async function activeStoredWallet(): Promise<StoredWallet> {
   const registry = await loadWalletRegistry();
-  const wallet = activeWalletFromRegistry(registry);
+  const agentCash = await agentCashStoredWallet();
+  const activeId = await resolveActiveWalletId(registry, agentCash);
+  if (activeId === AGENTCASH_WALLET_ID && agentCash) {
+    return agentCash;
+  }
+  const wallet = registry.wallets.find((entry) => entry.id === activeId) ?? activeWalletFromRegistry(registry);
   if (!wallet) {
-    throw new Error("No active wallet. Run `opencrowd wallet new` first.");
+    throw new Error("No active wallet. Install agentcash (its wallet is auto-created) or run `opencrowd wallet new`.");
   }
   return wallet;
 }
 
+/**
+ * The shared AgentCash wallet is the default whenever it exists; a legacy
+ * wallet stays active only when the user explicitly selected it.
+ */
+async function resolveActiveWalletId(registry: WalletRegistry, agentCash: StoredWallet | undefined): Promise<string | undefined> {
+  if (registry.active_wallet_id === AGENTCASH_WALLET_ID) {
+    return agentCash ? AGENTCASH_WALLET_ID : registry.wallets[0]?.id;
+  }
+  if (registry.explicit_selection && registry.active_wallet_id) {
+    return registry.active_wallet_id;
+  }
+  if (agentCash) {
+    return AGENTCASH_WALLET_ID;
+  }
+  return registry.active_wallet_id ?? registry.wallets[0]?.id;
+}
+
 export async function setActiveStoredWallet(labelOrAddress: string): Promise<StoredWallet> {
   const registry = await loadWalletRegistry();
+  if (labelOrAddress.trim().toLowerCase() === AGENTCASH_WALLET_ID) {
+    const agentCash = await agentCashStoredWallet();
+    if (!agentCash) {
+      throw new Error(`no AgentCash wallet found at ${agentCashWalletPath()}`);
+    }
+    registry.active_wallet_id = AGENTCASH_WALLET_ID;
+    registry.explicit_selection = false;
+    await saveWalletRegistry(registry);
+    return agentCash;
+  }
   const wallet = resolveWallet(registry, labelOrAddress);
   registry.active_wallet_id = wallet.id;
+  registry.explicit_selection = true;
   await saveWalletRegistry(registry);
   return wallet;
 }
@@ -225,6 +308,13 @@ export async function exportWalletSecret(labelOrAddress: string): Promise<{ wall
 }
 
 export async function privateKeyForStoredWallet(wallet: StoredWallet): Promise<`0x${string}`> {
+  if (wallet.kind === "agentcash") {
+    const file = await readAgentCashWalletFile();
+    if (!file) {
+      throw new Error(`the AgentCash wallet at ${agentCashWalletPath()} is missing or unreadable`);
+    }
+    return file.privateKey as `0x${string}`;
+  }
   if (wallet.kind !== "local-evm") {
     throw new Error("test wallets cannot sign real x402 payments");
   }
@@ -255,10 +345,12 @@ function normalizeRegistry(raw: unknown): WalletRegistry {
   const wallets = Array.isArray(record.wallets)
     ? record.wallets.filter(isStoredWallet).map((wallet) => ({ ...wallet, mock_balance_cents: wallet.mock_balance_cents ?? 0 }))
     : [];
-  const active = typeof record.active_wallet_id === "string" && wallets.some((wallet) => wallet.id === record.active_wallet_id)
-    ? record.active_wallet_id
-    : wallets[0]?.id;
-  return { active_wallet_id: active, wallets };
+  const active = record.active_wallet_id === AGENTCASH_WALLET_ID
+    ? AGENTCASH_WALLET_ID
+    : typeof record.active_wallet_id === "string" && wallets.some((wallet) => wallet.id === record.active_wallet_id)
+      ? record.active_wallet_id
+      : wallets[0]?.id;
+  return { active_wallet_id: active, explicit_selection: record.explicit_selection === true, wallets };
 }
 
 function isStoredWallet(value: unknown): value is StoredWallet {

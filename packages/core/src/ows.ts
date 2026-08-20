@@ -1,18 +1,11 @@
-import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { VeniceClient } from "venice-x402-client";
 import { SiweMessage } from "siwe";
-import { createPublicClient, erc20Abi, formatUnits, http } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, formatUnits, http, parseUnits } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { createPaymentHeader } from "x402/client";
 import { createSigner } from "x402/types";
-import { reserveBudget, finalizeReservation, releaseReservation } from "./budget.js";
-import { loadConfig, updateConfig, type OpenCrowdConfig } from "./config.js";
-import { appendLedgerEntry } from "./ledger.js";
-import type { SessionState } from "./types.js";
+import { loadConfig } from "./config.js";
 import {
   activeStoredWallet,
   listStoredWallets,
@@ -71,134 +64,8 @@ export interface VeniceCreditBalance {
   suggestedTopUpUsd: number;
 }
 
-export interface VeniceCreditWallet {
-  walletAddress(): Promise<string>;
-  walletBalance(): Promise<VeniceCreditBalance>;
-  topUpVeniceCredit(amountCents: number): Promise<void>;
-}
-
-export interface VeniceCreditTopUpResult {
-  top_up_required: boolean;
-  threshold_cents: number;
-  target_cents: number;
-  minimum_top_up_cents: number;
-  before_balance_cents: number;
-  top_up_cents: number;
-  after_balance_cents?: number;
-}
-
 export interface PaymentAdapter {
   sign(request: PaymentRequest): Promise<SignedPayment>;
-}
-
-export class OwsPaymentAdapter implements PaymentAdapter {
-  constructor(
-    private readonly command: string,
-    private readonly account?: string
-  ) {}
-
-  async sign(request: PaymentRequest): Promise<SignedPayment> {
-    if (!this.account) {
-      throw new Error("OWS account is not configured. Run `opencrowd wallet account set <account>` first.");
-    }
-    const args = [
-      "x402",
-      "sign",
-      "--account",
-      this.account,
-      "--resource-url",
-      request.resourceUrl,
-      "--method",
-      request.method,
-      request.paymentKind === "upto" ? "--upto-cost-cents" : "--cost-cents",
-      String(request.quotedCostCents),
-      "--body-sha256",
-      sha256(JSON.stringify(request.body ?? null))
-    ];
-    const result = await runJsonCommand(this.command, args);
-    const headers = result.headers;
-    if (!headers || typeof headers !== "object") {
-      throw new Error("OWS did not return payment headers");
-    }
-    return {
-      headers: Object.fromEntries(Object.entries(headers).map(([key, value]) => [key, String(value)])),
-      paymentId: stringValue(result.payment_id ?? result.paymentId ?? result.id),
-      txHash: stringValue(result.tx_hash ?? result.txHash)
-    };
-  }
-}
-
-export async function createOwsPaymentAdapter(): Promise<OwsPaymentAdapter> {
-  const config = await loadConfig();
-  return new OwsPaymentAdapter(config.owsCommand, config.owsAccount);
-}
-
-export class AgenticWalletPaidHttpClient implements PaymentWallet {
-  readonly kind = "agentic-wallet" as const;
-
-  constructor(private readonly config: OpenCrowdConfig) {}
-
-  async request(request: PaidHttpRequest): Promise<PaidHttpResponse> {
-    const args = [
-      "x402",
-      "pay",
-      request.url,
-      "--method",
-      request.method,
-      "--max-amount",
-      String(centsToAtomicUsdc(request.maxCostCents)),
-      "--json"
-    ];
-    if (request.body !== undefined) {
-      args.push("--data", JSON.stringify(request.body));
-    }
-    if (request.headers && Object.keys(request.headers).length > 0) {
-      args.push("--headers", JSON.stringify(request.headers));
-    }
-    const raw = await runAgenticWalletJson(this.config, args);
-    return normalizePaidHttpResponse(raw);
-  }
-
-  async address(): Promise<WalletAddress> {
-    const result = await runAgenticWalletJson(this.config, ["address", "--chain", this.config.x402PaymentNetwork, "--json"]);
-    const address = stringValue(result.address ?? result.evm ?? result.evmAddress ?? result.account_address ?? result.wallet_address);
-    if (!address) {
-      throw new Error("Agentic Wallet did not return a wallet address. Run `opencrowd wallet init` and complete sign-in first.");
-    }
-    return {
-      account: "agentic-wallet",
-      address,
-      network: stringValue(result.network ?? result.chain ?? result.chain_id) ?? this.config.x402PaymentNetwork,
-      asset: stringValue(result.asset ?? result.token ?? result.currency) ?? this.config.x402PaymentAsset
-    };
-  }
-
-  async balance(): Promise<WalletBalance> {
-    const result = await runAgenticWalletJson(this.config, [
-      "balance",
-      "--asset",
-      this.config.x402PaymentAsset.toLowerCase(),
-      "--chain",
-      this.config.x402PaymentNetwork,
-      "--json"
-    ]);
-    const spendable = result.spendable_balance ?? result.available ?? result.balance ?? result.amount;
-    if (spendable === undefined || spendable === null) {
-      throw new Error("Agentic Wallet did not return a spendable wallet balance. Run `opencrowd wallet init` and complete sign-in first.");
-    }
-    return {
-      account: "agentic-wallet",
-      address: stringValue(result.address ?? result.account_address ?? result.wallet_address),
-      network: stringValue(result.network ?? result.chain ?? result.chain_id) ?? this.config.x402PaymentNetwork,
-      asset: stringValue(result.asset ?? result.token ?? result.currency) ?? this.config.x402PaymentAsset,
-      spendable_balance: String(spendable),
-      spendable_balance_cents: centsValue(result.spendable_balance_cents ?? result.available_cents ?? result.balance_cents)
-    };
-  }
-}
-
-export async function createAgenticWalletPaidHttpClient(): Promise<AgenticWalletPaidHttpClient> {
-  return new AgenticWalletPaidHttpClient(await loadConfig());
 }
 
 export class VeniceWalletPaidHttpClient implements PaymentWallet {
@@ -243,13 +110,6 @@ export class VeniceWalletPaidHttpClient implements PaymentWallet {
 
   async walletBalance(): Promise<VeniceCreditBalance> {
     return this.client.getBalance();
-  }
-
-  async topUpVeniceCredit(amountCents: number): Promise<void> {
-    if (!Number.isInteger(amountCents) || amountCents <= 0) {
-      throw new Error("Venice credit top-up amount must be a positive integer number of cents");
-    }
-    await this.client.topUp(amountCents / 100);
   }
 
   isVeniceApiUrl(url: string): boolean {
@@ -302,89 +162,6 @@ export class VeniceWalletPaidHttpClient implements PaymentWallet {
       x402_credit_balance: x402Credit?.balanceUsd.toFixed(2),
       x402_credit_balance_cents: x402Credit ? Math.round(x402Credit.balanceUsd * 100) : undefined
     };
-  }
-}
-
-export async function ensureVeniceCreditTopUp(
-  session: SessionState,
-  wallet: VeniceCreditWallet,
-  config: OpenCrowdConfig
-): Promise<VeniceCreditTopUpResult | undefined> {
-  if (!config.veniceAutoTopUpEnabled) {
-    return undefined;
-  }
-  const thresholdCents = config.veniceAutoTopUpThresholdCents;
-  const targetCents = config.veniceAutoTopUpTargetCents;
-  const minimumTopUpCents = Math.max(0, config.veniceAutoTopUpMinimumCents);
-  if (
-    !Number.isInteger(thresholdCents)
-    || !Number.isInteger(targetCents)
-    || !Number.isInteger(minimumTopUpCents)
-    || thresholdCents < 0
-    || targetCents <= thresholdCents
-  ) {
-    throw new Error("Venice auto top-up requires a non-negative threshold and minimum, and a target above the threshold");
-  }
-
-  const before = await wallet.walletBalance();
-  const beforeBalanceCents = Math.max(0, Math.round(before.balanceUsd * 100));
-  if (beforeBalanceCents >= thresholdCents) {
-    return {
-      top_up_required: false,
-      threshold_cents: thresholdCents,
-      target_cents: targetCents,
-      minimum_top_up_cents: minimumTopUpCents,
-      before_balance_cents: beforeBalanceCents,
-      top_up_cents: 0,
-      after_balance_cents: beforeBalanceCents
-    };
-  }
-
-  const topUpCents = Math.max(targetCents - beforeBalanceCents, minimumTopUpCents);
-  const reservation = await reserveBudget(session, topUpCents);
-  const started = Date.now();
-  const endpoint = new URL("/api/v1/x402/top-up", config.x402LlmBaseUrl).toString();
-  try {
-    await wallet.topUpVeniceCredit(topUpCents);
-    const after = await wallet.walletBalance().catch(() => undefined);
-    const afterBalanceCents = after ? Math.max(0, Math.round(after.balanceUsd * 100)) : undefined;
-    await finalizeReservation(session, reservation, topUpCents);
-    await appendLedgerEntry(session.ledgerPath, {
-      session_id: session.sessionId,
-      type: "wallet_top_up",
-      endpoint,
-      method: "POST",
-      quoted_cost_cents: topUpCents,
-      charged_cost_cents: topUpCents,
-      status: "charged",
-      permission_mode: session.permissionMode,
-      latency_ms: Date.now() - started,
-      notes: `Venice x402 credit auto top-up from ${formatCents(beforeBalanceCents)} to target ${formatCents(targetCents)}`
-    });
-    return {
-      top_up_required: true,
-      threshold_cents: thresholdCents,
-      target_cents: targetCents,
-      minimum_top_up_cents: minimumTopUpCents,
-      before_balance_cents: beforeBalanceCents,
-      top_up_cents: topUpCents,
-      after_balance_cents: afterBalanceCents
-    };
-  } catch (error) {
-    await releaseReservation(session, reservation);
-    await appendLedgerEntry(session.ledgerPath, {
-      session_id: session.sessionId,
-      type: "wallet_top_up",
-      endpoint,
-      method: "POST",
-      quoted_cost_cents: topUpCents,
-      charged_cost_cents: 0,
-      status: "failed",
-      permission_mode: session.permissionMode,
-      latency_ms: Date.now() - started,
-      notes: (error as Error).message
-    });
-    throw error;
   }
 }
 
@@ -464,9 +241,57 @@ export async function walletList(): Promise<WalletListEntry[]> {
   })));
 }
 
-export async function setWalletAccount(account: string): Promise<{ account: string }> {
-  await updateConfig({ owsAccount: account });
-  return { account };
+export interface UsdcSendResult {
+  tx_hash: string;
+  from: string;
+  to: string;
+  amount_usdc: number;
+  network: "base";
+}
+
+/**
+ * Send USDC from the active wallet by signing a plain ERC-20 transfer with
+ * the shared key. Requires a little Base ETH for gas at the wallet address
+ * (x402 payments are gasless via EIP-3009, but direct transfers are not).
+ */
+export async function sendUsdc(to: string, amountUsdc: number): Promise<UsdcSendResult> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
+    throw new Error("recipient must be a 0x-prefixed EVM address");
+  }
+  if (!Number.isFinite(amountUsdc) || amountUsdc <= 0) {
+    throw new Error("amount must be greater than zero");
+  }
+  const wallet = await activeStoredWallet();
+  if (wallet.kind === "test") {
+    throw new Error("test wallets cannot send real USDC");
+  }
+  const account = privateKeyToAccount(await privateKeyForStoredWallet(wallet));
+  const transport = http(process.env.OPENCROWD_BASE_RPC_URL ?? "https://mainnet.base.org");
+  const publicClient = createPublicClient({ chain: base, transport });
+  const amountAtomic = parseUnits(amountUsdc.toFixed(6), 6);
+  const [ethBalance, usdcBalance] = await Promise.all([
+    publicClient.getBalance({ address: account.address }),
+    publicClient.readContract({ address: BASE_USDC_ADDRESS, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })
+  ]);
+  if (usdcBalance < amountAtomic) {
+    throw new Error(`insufficient USDC: have ${formatUnits(usdcBalance, 6)}, sending ${amountUsdc.toFixed(6)}`);
+  }
+  if (ethBalance === 0n) {
+    throw new Error([
+      `the wallet has no Base ETH for gas.`,
+      `Deposit ~$0.20 of ETH on Base to ${account.address} once, and sends will work from then on.`,
+      "(x402 payments stay gasless and are unaffected.)"
+    ].join(" "));
+  }
+  const walletClient = createWalletClient({ account, chain: base, transport });
+  const txHash = await walletClient.writeContract({
+    address: BASE_USDC_ADDRESS,
+    abi: erc20Abi,
+    functionName: "transfer",
+    args: [to as `0x${string}`, amountAtomic]
+  });
+  await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
+  return { tx_hash: txHash, from: account.address, to, amount_usdc: amountUsdc, network: "base" };
 }
 
 export async function setActivePaymentWallet(wallet: string): Promise<{ wallet: string; address: string }> {
@@ -498,30 +323,6 @@ async function walletBalanceFromStored(wallet: StoredWallet): Promise<WalletBala
   return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet)).balance();
 }
 
-async function runAgenticWalletJson(config: OpenCrowdConfig, args: string[]): Promise<Record<string, unknown>> {
-  try {
-    const text = await runTextCommand(config.agenticWalletCommand, [...config.agenticWalletArgs, ...args]);
-    return parseJsonObject(text, `${config.agenticWalletCommand} ${[...config.agenticWalletArgs, ...args].join(" ")}`);
-  } catch (error) {
-    throw normalizeAgenticWalletError(error, config, args);
-  }
-}
-
-async function runAgenticWalletJsonOrLocal(config: OpenCrowdConfig, args: string[]): Promise<Record<string, unknown>> {
-  try {
-    return await runAgenticWalletJson(config, args);
-  } catch (error) {
-    if (!/Authentication required/i.test(error instanceof Error ? error.message : String(error))) {
-      throw error;
-    }
-    const localWallet = await localVeniceWalletSummary();
-    if (!localWallet) {
-      throw error;
-    }
-    return { __localVeniceWallet: true, ...localWallet };
-  }
-}
-
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
@@ -546,16 +347,8 @@ function numberValue(value: unknown): number | undefined {
   return undefined;
 }
 
-function centsToAtomicUsdc(cents: number): number {
-  return Math.round((cents / 100) * 1_000_000);
-}
-
 function trimDecimal(value: string): string {
   return value.replace(/(\.\d*?)0+$/, "$1").replace(/\.$/, "");
-}
-
-function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
 }
 
 function requestBody(body: unknown): RequestInit["body"] {
@@ -582,23 +375,6 @@ async function baseUsdcBalance(address: string): Promise<{ display: string; cent
   return {
     display,
     cents: Math.floor(Number(formatUnits(balance, 6)) * 100)
-  };
-}
-
-function normalizePaidHttpResponse(raw: Record<string, unknown>): PaidHttpResponse {
-  const status = centsValue(raw.status ?? raw.statusCode ?? raw.response_status) ?? 200;
-  const body = parseMaybeJson(raw.body ?? raw.data ?? raw.response ?? raw.result ?? raw);
-  const headers = objectRecord(raw.headers ?? raw.responseHeaders);
-  const charged = centsValue(raw.charged_cost_cents ?? raw.chargedCostCents ?? raw.cost_cents);
-  return {
-    status,
-    ok: status >= 200 && status < 300,
-    statusText: stringValue(raw.statusText ?? raw.status_text) ?? "",
-    headers,
-    body,
-    chargedCostCents: charged,
-    paymentId: stringValue(raw.payment_id ?? raw.paymentId ?? raw.id),
-    txHash: stringValue(raw.tx_hash ?? raw.txHash ?? raw.transactionHash)
   };
 }
 
@@ -871,24 +647,6 @@ function paymentChallengeSummary(challenge: unknown): string | undefined {
   return `x402 retry returned HTTP 402; challenge version ${parsed.x402Version}; accepts ${parsed.accepts.length}`;
 }
 
-async function localVeniceWalletSummary(): Promise<Record<string, unknown> | undefined> {
-  const privateKey = await loadWalletPrivateKey();
-  if (!privateKey) {
-    return undefined;
-  }
-  const client = new VeniceWalletPaidHttpClient(privateKey);
-  const [wallet, x402Credit] = await Promise.all([
-    client.balance(),
-    client.walletBalance().catch(() => undefined)
-  ]);
-  return {
-    ...(await client.address()),
-    ...wallet,
-    canConsume: x402Credit?.canConsume,
-    suggestedTopUpUsd: x402Credit?.suggestedTopUpUsd
-  };
-}
-
 async function activeWalletSummary(): Promise<Record<string, unknown>> {
   const wallet = await activePaymentWallet();
   return {
@@ -896,60 +654,6 @@ async function activeWalletSummary(): Promise<Record<string, unknown>> {
     address: await wallet.address(),
     balance: await wallet.balance()
   };
-}
-
-async function loadWalletPrivateKey(): Promise<string | undefined> {
-  const direct = process.env.OPENCROWD_WALLET_PRIVATE_KEY ?? process.env.WALLET_PRIVATE_KEY;
-  if (isPrivateKey(direct)) {
-    return direct;
-  }
-  for (const path of walletEnvPaths()) {
-    const parsed = await readEnvFile(path).catch(() => undefined);
-    const value = parsed?.OPENCROWD_WALLET_PRIVATE_KEY ?? parsed?.WALLET_PRIVATE_KEY;
-    if (isPrivateKey(value)) {
-      return value;
-    }
-  }
-  return undefined;
-}
-
-function walletEnvPaths(): string[] {
-  if (process.env.OPENCROWD_WALLET_ENV_PATH) {
-    return [process.env.OPENCROWD_WALLET_ENV_PATH];
-  }
-  if (process.env.OPENCROWD_CONFIG_DIR) {
-    return [];
-  }
-  return [join(process.cwd(), ".env"), join(process.cwd(), "scratch", ".env")];
-}
-
-async function readEnvFile(path: string): Promise<Record<string, string>> {
-  const text = await readFile(path, "utf8");
-  const entries = text.split(/\r?\n/).flatMap((line) => {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) {
-      return [];
-    }
-    const index = trimmed.indexOf("=");
-    if (index < 1) {
-      return [];
-    }
-    const key = trimmed.slice(0, index);
-    const rawValue = trimmed.slice(index + 1).trim();
-    return [[key, unquoteEnvValue(rawValue)]];
-  });
-  return Object.fromEntries(entries);
-}
-
-function unquoteEnvValue(value: string): string {
-  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-  return value;
-}
-
-function isPrivateKey(value: unknown): value is string {
-  return typeof value === "string" && /^0x[0-9a-fA-F]{64}$/.test(value);
 }
 
 /**
@@ -1014,77 +718,3 @@ function parseMaybeJson(value: unknown): unknown {
   }
 }
 
-function sha256(input: string): string {
-  return createHash("sha256").update(input).digest("hex");
-}
-
-async function runJsonCommand(command: string, args: string[]): Promise<Record<string, unknown>> {
-  const text = await runTextCommand(command, args);
-  return parseJsonObject(text, `${command} ${args.join(" ")}`);
-}
-
-function parseJsonObject(text: string, commandText: string): Record<string, unknown> {
-  try {
-    return JSON.parse(text) as Record<string, unknown>;
-  } catch {
-    const jsonStart = text.indexOf("{");
-    const jsonEnd = text.lastIndexOf("}");
-    if (jsonStart >= 0 && jsonEnd > jsonStart) {
-      try {
-        return JSON.parse(text.slice(jsonStart, jsonEnd + 1)) as Record<string, unknown>;
-      } catch {
-        // Fall through to the clear error below.
-      }
-    }
-    throw new Error(`Command returned non-JSON output for ${commandText}`);
-  }
-}
-
-function runTextCommand(command: string, args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: minimalEnv()
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
-    });
-    child.on("error", (error) => {
-      reject(new Error(`Required command could not be started: ${command}: ${error.message}`));
-    });
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(stdout.trim());
-      } else {
-        reject(new Error(`Command failed (${code}): ${command} ${args.join(" ")}: ${stderr.trim() || stdout.trim()}`));
-      }
-    });
-  });
-}
-
-function normalizeAgenticWalletError(error: unknown, config: OpenCrowdConfig, args: string[]): Error {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/Authentication required|not authenticated|auth login/i.test(message)) {
-    return new Error([
-      "Authentication required for Agentic Wallet.",
-      "Run `opencrowd wallet init`, then complete the `npx awal auth login <email>` and `npx awal auth verify <flow-id> <code>` steps."
-    ].join(" "));
-  }
-  if (/Command returned non-JSON output/i.test(message)) {
-    return new Error(`Agentic Wallet returned an unexpected response for ${[config.agenticWalletCommand, ...config.agenticWalletArgs, ...args].join(" ")}.`);
-  }
-  return error instanceof Error ? error : new Error(message);
-}
-
-function minimalEnv(): NodeJS.ProcessEnv {
-  return {
-    HOME: process.env.HOME,
-    PATH: process.env.PATH,
-    USER: process.env.USER
-  };
-}

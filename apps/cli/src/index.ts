@@ -28,9 +28,9 @@ import {
   setActivePaymentWallet,
   setPermissionMode,
   setPreferredLlmModel,
-  setWalletAccount,
   setSessionBudget,
   walletAddress,
+  sendUsdc,
   walletBalance,
   walletInit,
   walletList,
@@ -70,7 +70,7 @@ import {
   style,
   terminalWidth
 } from "./shared.js";
-import { closeSharedConnectorManager, sharedConnectorManager } from "@opencrowd/connectors";
+import { closeSharedConnectorManager } from "@opencrowd/connectors";
 import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, type ReplState } from "./agent-task.js";
 import { startTui } from "./tui/app.js";
 
@@ -633,6 +633,8 @@ async function walletCommand(args: string[], options: { testMode?: boolean; sess
       printValue("Wallet", wallet, { json, pretty: renderKeyValues(asRecord(wallet)) });
       return;
     }
+    console.log(style("Note: OpenCrowd now uses the shared AgentCash wallet by default (one wallet for LLM spend, paid services, and reviews).", "muted"));
+    console.log(style("Creating a separate legacy wallet is deprecated; switch back anytime with `opencrowd wallet use agentcash`.", "muted"));
     const draft = await createWalletDraft(label);
     if (json) {
       throw new Error("wallet new cannot use --json because seed phrase backup requires an interactive confirmation");
@@ -748,23 +750,23 @@ async function walletCommand(args: string[], options: { testMode?: boolean; sess
 }
 
 /**
- * Send USDC to any address through AgentCash's `transfer` tool. This is a
- * financial action, not a paid service: no CrowdCode check, no receipt, no
- * review, and never an automatic replay after a transport failure. The
- * model has no send tool; sends are human-initiated and human-confirmed.
+ * Send USDC to any address by signing a plain ERC-20 transfer with the
+ * shared wallet key. This is a financial action, not a paid service: no
+ * CrowdCode check, no receipt, no review, and never an automatic replay.
+ * The model has no send tool; sends are human-initiated and human-confirmed.
  */
 async function walletSendCommand(args: string[], options: { testMode?: boolean; session?: SessionState }): Promise<void> {
   if (options.testMode) {
     throw new Error("wallet send moves real USDC and is not available in --test-mode");
   }
   const network = readOption(args, "--network") ?? "base";
-  if (!["base", "tempo"].includes(network)) {
-    throw new Error("network must be base or tempo (Solana sends stay disabled until review parity)");
+  if (network !== "base") {
+    throw new Error("wallet send currently supports base only");
   }
   const positional = args.filter((arg, index) => !isConsumedOption(args, index, ["--network"]));
   const [to, amountArg] = positional;
   if (!to || !amountArg) {
-    throw new Error("wallet send requires an address and a USD amount: opencrowd wallet send <address> <usd> [--network base|tempo]");
+    throw new Error("wallet send requires an address and a USD amount: opencrowd wallet send <address> <usd>");
   }
   const amountCents = parseUsd(amountArg);
   if (amountCents <= 0) {
@@ -774,27 +776,17 @@ async function walletSendCommand(args: string[], options: { testMode?: boolean; 
     throw new Error("wallet send requires an interactive terminal to confirm the transfer");
   }
   const amountUsdc = amountCents / 100;
-  const connectors = await sharedConnectorManager();
-  if (!connectors.hasTool("agentcash_transfer")) {
-    throw new Error([
-      "the installed agentcash package does not expose a `transfer` tool yet.",
-      "Update the agentcash pin in ~/.config/opencrowd/config.json once a version with transfer support ships."
-    ].join(" "));
-  }
-  let balancesLine: string | undefined;
-  const balanceResult = await connectors.execute("agentcash_get_balance", {});
-  if (balanceResult.ok) {
-    balancesLine = typeof balanceResult.data === "string" ? balanceResult.data : JSON.stringify(balanceResult.data);
-  }
+  const balance = await walletBalance().catch(() => undefined);
   console.log([
     style("Confirm USDC transfer", "bold"),
     renderKeyValues({
+      from: balance?.address,
       to,
       amount: `$${amountUsdc.toFixed(2)} USDC`,
       network,
-      current_balances: balancesLine ?? "unavailable"
+      current_balance: balance?.spendable_balance ?? "unavailable"
     }),
-    "AgentCash signs this transfer with your local wallet. It cannot be reversed."
+    "This signs an on-chain transfer with your wallet key. It cannot be reversed."
   ].join("\n"));
   const rl = createInterface({ input, output });
   try {
@@ -805,32 +797,34 @@ async function walletSendCommand(args: string[], options: { testMode?: boolean; 
   } finally {
     rl.close();
   }
-  const result = await connectors.callServerTool("agentcash", "transfer", { to, amount: amountUsdc, network });
-  if (!result.ok) {
+  try {
+    const result = await sendUsdc(to, amountUsdc);
+    await recordTransfer({ to, amountCents, network, txHash: result.tx_hash, status: "charged", session: options.session });
+    printValue("Transfer", result, {
+      pretty: renderKeyValues({
+        from: result.from,
+        to: result.to,
+        amount: `$${result.amount_usdc.toFixed(2)} USDC`,
+        network: result.network,
+        tx_hash: result.tx_hash
+      })
+    });
+  } catch (error) {
+    const message = (error as Error).message;
+    // A thrown wait-for-receipt is ambiguous; everything else failed before broadcast.
+    const ambiguous = /waitForTransactionReceipt|timed out/i.test(message);
     await recordTransfer({
       to,
       amountCents,
       network,
-      status: result.transportError ? "unknown" : "failed",
-      notes: result.error,
+      status: ambiguous ? "unknown" : "failed",
+      notes: message,
       session: options.session
     });
-    throw new Error(result.transportError
-      ? `transfer outcome is unknown: ${result.error} Verify the balance and on-chain activity before retrying; transfers are never replayed automatically.`
-      : `AgentCash rejected the transfer: ${result.error}`);
+    throw ambiguous
+      ? new Error(`transfer outcome is unknown: ${message}. Verify on-chain activity before retrying; transfers are never replayed automatically.`)
+      : error;
   }
-  const record = asRecord(result.data);
-  const txHash = typeof record.tx_hash === "string" ? record.tx_hash : typeof record.txHash === "string" ? record.txHash : undefined;
-  await recordTransfer({ to, amountCents, network, txHash, status: "charged", session: options.session });
-  printValue("Transfer", result.data, {
-    pretty: renderKeyValues({
-      to,
-      amount: `$${amountUsdc.toFixed(2)} USDC`,
-      network,
-      tx_hash: txHash,
-      result: typeof result.data === "string" ? result.data : JSON.stringify(result.data)
-    })
-  });
 }
 
 async function recordTransfer(entry: {
@@ -1001,7 +995,7 @@ function printHelp(): void {
   opencrowd search [--json] "<query>"
   opencrowd permissions [--json] list|allow|remove|block
   opencrowd ledger [--json] show [--session <id>]
-  opencrowd wallet [--json] new [label]|list|status|address|balance|use <label|address>|send <address> <usd> [--network base|tempo]|export <label|address>
+  opencrowd wallet [--json] list|status|address|balance|use <label|agentcash>|send <address> <usd>|export <label|address>
   opencrowd wallet --test-mode [--json] new [label]|list|status|address|balance|use <label|address>|fund <usd>
   opencrowd models [--json] list|set <model>
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--yes]

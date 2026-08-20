@@ -7,11 +7,9 @@ import {
   chargeActiveTestWallet,
   completeSession,
   createDefaultPaidHttpClient,
-  createOwsPaymentAdapter,
   executeTool,
   DEFAULT_LLM_MODEL,
   finalizeReservation,
-  ensureVeniceCreditTopUp,
   listLlmModels,
   loadConfig,
   readLedger,
@@ -617,9 +615,6 @@ export class X402LlmProvider implements LlmProvider {
 
   private async paidLlmRequest(endpoint: string, body: unknown, maxCostCents: number, config: OpenCrowdConfig): Promise<PaidLlmResponse> {
     if (this.options.paidHttpClient) {
-      if (this.options.paidHttpClient instanceof VeniceWalletPaidHttpClient && this.options.paidHttpClient.isVeniceApiUrl(endpoint)) {
-        await ensureVeniceCreditTopUp(this.session, this.options.paidHttpClient, config);
-      }
       return this.options.paidHttpClient.request({
         url: endpoint,
         method: "POST",
@@ -629,7 +624,10 @@ export class X402LlmProvider implements LlmProvider {
       });
     }
     if (this.options.paymentAdapter || this.options.fetchImpl) {
-      const signer = this.options.paymentAdapter ?? (await createOwsPaymentAdapter());
+      const signer = this.options.paymentAdapter;
+      if (!signer) {
+        throw new Error("a paymentAdapter is required when fetchImpl is supplied");
+      }
       let signed;
       try {
         signed = await signer.sign({
@@ -663,9 +661,6 @@ export class X402LlmProvider implements LlmProvider {
       };
     }
     const client = await createDefaultPaidHttpClient();
-    if (client instanceof VeniceWalletPaidHttpClient && client.isVeniceApiUrl(endpoint)) {
-      await ensureVeniceCreditTopUp(this.session, client, config);
-    }
     return client.request({
       url: endpoint,
       method: "POST",
