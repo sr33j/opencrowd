@@ -146,13 +146,13 @@ outgrow the model's context window (archives kept under `sessions/<id>/context/`
 
 ## Configuration notes
 
-- **Model**: defaults to `qwen/qwen3.8-max` on an x402-metered OpenRouter
+- **Model**: defaults to `openai/gpt-5.6-terra` on an x402-metered OpenRouter
   route (`x402LlmBaseUrl` points at any OpenAI-compatible x402 endpoint).
   `opencrowd models list` then `models set <model>` to change it.
 - **Model policy / subagents**: `modelPolicy` in config (`{"mode": "auto"|"manual",
   "main": "<model>|auto", "subagent": "<model>|auto"}`) pairs the main loop
   with a subagent model, both paid over the same x402 route. Defaults:
-  `qwen/qwen3.8-max` main, `openai/gpt-5.6-luna` subagents. The main loop
+  `openai/gpt-5.6-terra` main, `openai/gpt-5.6-luna` subagents. The main loop
   gets `spawn_subagent`/`check_subagents` tools (local tools only, one level
   deep, parallel with background mode); resolution is recorded per session
   for reproducibility. Auto mode refuses to run if the catalog has no

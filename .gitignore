@@ -6,4 +6,4 @@ dist/
 sessions/
 coverage/
 scratch/
-evals/
+/evals/

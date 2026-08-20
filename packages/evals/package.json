@@ -1,0 +1,42 @@
+{
+  "name": "@opencrowd/evals",
+  "version": "0.1.0",
+  "description": "OpenCrowd benchmark runner: GAIA dataset adapter, official scorer, and apples-to-apples comparison with Claude Code and Codex",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/evals"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencrowd/agent-runtime": "0.1.0",
+    "@opencrowd/connectors": "0.1.0",
+    "@opencrowd/core": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  }
+}

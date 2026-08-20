@@ -902,6 +902,7 @@ async function evalsCommand(args: string[]): Promise<void> {
     model: readOption(rest, "--model"),
     auto: rest.includes("--auto"),
     limit: readOption(rest, "--limit") === undefined ? undefined : Number(readOption(rest, "--limit")),
+    parallel: readOption(rest, "--parallel") === undefined ? undefined : Number(readOption(rest, "--parallel")),
     testMode: rest.includes("--test-mode"),
     log: (message) => console.error(message),
     confirm: async (message) => {
@@ -958,7 +959,7 @@ function printHelp(): void {
   opencrowd wallet [--json] list|status|address|balance|use <label|agentcash>|send <address> <usd>|export <label|address>
   opencrowd wallet --test-mode [--json] new [label]|list|status|address|balance|use <label|address>|fund <usd>
   opencrowd models [--json] list|set <model>
-  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--yes]
+  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]
   opencrowd mcp
   opencrowd api --port <port>`);
 }

@@ -399,8 +399,30 @@ async function fetchWithTransportRetry(url: string, init: RequestInit): Promise<
   }
 }
 
+const INITIAL_PROBE_TIMEOUT_MS = 30_000;
+
+/**
+ * The unpaid first request normally returns its 402 quote in under a second;
+ * a hung connection here otherwise waits out undici's 5-minute headers
+ * timeout. Nothing has been paid yet, so abort fast and retry uncapped —
+ * a genuinely slow free endpoint still succeeds on the uncapped retry.
+ */
+async function initialProbeFetch(url: string, init: RequestInit): Promise<Response> {
+  const probeSignal = init.signal
+    ? AbortSignal.any([init.signal, AbortSignal.timeout(INITIAL_PROBE_TIMEOUT_MS)])
+    : AbortSignal.timeout(INITIAL_PROBE_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: probeSignal });
+  } catch (error) {
+    if (init.signal?.aborted) {
+      throw error;
+    }
+    return fetchWithTransportRetry(url, init);
+  }
+}
+
 async function genericX402Fetch(privateKey: string, url: string, init: RequestInit): Promise<Response> {
-  const first = await fetchWithTransportRetry(url, init);
+  const first = await initialProbeFetch(url, init);
   if (first.status !== 402) {
     return first;
   }

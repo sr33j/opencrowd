@@ -29,7 +29,7 @@ export interface OpenCrowdConfig {
 const COINBASE_BAZAAR_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
 const AGENTIC_MARKET_DEFAULT_URL = "https://api.agentic.market/v1/services";
 
-export const DEFAULT_LLM_MODEL = "qwen/qwen3.8-max";
+export const DEFAULT_LLM_MODEL = "openai/gpt-5.6-terra";
 
 const DEFAULT_CONFIG: OpenCrowdConfig = {
   bazaarUrl: COINBASE_BAZAAR_URL,

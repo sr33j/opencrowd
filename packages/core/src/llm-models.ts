@@ -62,11 +62,19 @@ function normalizeModel(record: unknown): LlmModel | null {
     id,
     name: stringValue(item.name ?? item.display_name ?? item.displayName ?? objectValue(item.model_spec)?.name),
     max_cost_cents: numberValue(item.max_cost_cents ?? item.maxCostCents ?? item.upto_cost_cents ?? item.price_cents),
-    context_window_tokens: numberValue(item.context_window_tokens ?? item.contextWindowTokens ?? item.context_window ?? item.contextWindow ?? item.context_length),
+    context_window_tokens: plausibleContextWindow(numberValue(item.context_window_tokens ?? item.contextWindowTokens ?? item.context_window ?? item.contextWindow ?? item.context_length)),
     input_cost_cents_per_1k: numberValue(item.input_cost_cents_per_1k ?? item.inputCostCentsPer1k) ?? usdPerTokenToCentsPer1k(pricing?.prompt),
     output_cost_cents_per_1k: numberValue(item.output_cost_cents_per_1k ?? item.outputCostCentsPer1k) ?? usdPerTokenToCentsPer1k(pricing?.completion),
     raw: record
   };
+}
+
+/**
+ * Some proxies report absurd context lengths (128M tokens); trusting them
+ * disables compaction forever. Fall back to the per-family default instead.
+ */
+function plausibleContextWindow(value: number | undefined): number | undefined {
+  return value !== undefined && value > 4_000_000 ? undefined : value;
 }
 
 /** OpenRouter-style pricing: USD per token -> cents per 1k tokens (fractional). */

@@ -803,7 +803,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       "Multiple spawn_subagent calls in one reply run in parallel, so batch independent subtasks into a single reply; scale effort to the task (simple lookups need no subagents; broad sweeps merit 2-4).",
       "Give each subagent an objective, expected output format, and clear boundaries so parallel subagents cannot make conflicting decisions; they see none of this conversation, so pass explicit context (file paths, constraints).",
       "Each subagent's files land under artifacts/subagents/<n>/ and its completion lists what it wrote.",
-      "Delegate bounded, low-judgment work such as searching, summarizing, extracting, or mechanical edits; keep planning, paid-service decisions, and final answers in this main loop."
+      "Delegate bounded, low-judgment work such as searching, summarizing, extracting, mechanical edits, or fetching public web pages (subagents can curl free URLs via run_shell); keep planning, paid-service decisions, and final answers in this main loop.",
+      "Prefer delegating whenever a subtask does not need your judgment: the subagent model is an order of magnitude cheaper and faster, so offloading easy legwork cuts both cost and wall-clock time."
     );
   }
   const messages: LlmMessage[] = [
