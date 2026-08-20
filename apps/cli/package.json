@@ -23,26 +23,36 @@
     "base"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.3"
   },
   "bin": {
-    "opencrowd": "dist/index.js"
+    "opencrowd": "bundle/opencrowd.js"
   },
   "files": [
-    "dist"
+    "bundle"
   ],
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "ink": "^7.0.5",
+    "openai": "^4.103.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.7",
+    "siwe": "^2.3.2",
+    "venice-x402-client": "^0.2.0",
+    "viem": "^2.51.3",
+    "zod": "^3.25.17"
+  },
+  "devDependencies": {
     "@opencrowd/agent-runtime": "0.1.0",
     "@opencrowd/connectors": "0.1.0",
     "@opencrowd/core": "0.1.0",
     "@opencrowd/evals": "0.1.0",
     "@opencrowd/local-api": "0.1.0",
-    "@opencrowd/mcp": "0.1.0",
-    "ink": "^7.0.5",
-    "qrcode": "^1.5.4",
-    "react": "^19.2.7"
+    "@opencrowd/mcp": "0.1.0"
   },
   "scripts": {
-    "build": "tsc -b && chmod +x dist/index.js"
+    "build": "tsc -b && chmod +x dist/index.js",
+    "bundle": "node ../../scripts/bundle-cli.mjs",
+    "prepack": "npm run bundle"
   }
 }

@@ -7,3 +7,6 @@ sessions/
 coverage/
 scratch/
 /evals/
+apps/cli/bundle/
+apps/cli/README.md
+apps/cli/LICENSE
