@@ -22,6 +22,18 @@ export interface EconomyContext {
 let sharedManager: ConnectorManager | undefined;
 let sharedManagerPromise: Promise<ConnectorManager> | undefined;
 
+/**
+ * Close the shared manager's vendor processes. Call when a CLI command
+ * finishes: the stdio children otherwise keep the Node event loop alive and
+ * the process never exits.
+ */
+export async function closeSharedConnectorManager(): Promise<void> {
+  const manager = sharedManager;
+  sharedManager = undefined;
+  sharedManagerPromise = undefined;
+  await manager?.close();
+}
+
 /** One connector manager per process; vendors are spawned once and reused. */
 export async function sharedConnectorManager(log?: (message: string) => void): Promise<ConnectorManager> {
   if (sharedManager) {

@@ -70,7 +70,7 @@ import {
   style,
   terminalWidth
 } from "./shared.js";
-import { sharedConnectorManager } from "@opencrowd/connectors";
+import { closeSharedConnectorManager, sharedConnectorManager } from "@opencrowd/connectors";
 import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, type ReplState } from "./agent-task.js";
 import { startTui } from "./tui/app.js";
 
@@ -1017,7 +1017,9 @@ function printValue(label: string, value: unknown, options: { pretty?: string; j
   console.log(`${style(label, "muted")}\n${options.pretty}`);
 }
 
-main(process.argv.slice(2)).catch((error) => {
-  console.error(error instanceof Error ? error.message : String(error));
-  process.exitCode = 1;
-});
+main(process.argv.slice(2))
+  .catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  })
+  .finally(() => closeSharedConnectorManager().catch(() => undefined));
