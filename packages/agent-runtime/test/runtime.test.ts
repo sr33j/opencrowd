@@ -93,14 +93,14 @@ describe("x402 LLM provider", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await updateConfig({
       x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "openai/gpt-5.6-terra",
+      x402LlmModel: "openai/gpt-5.6-sol",
       x402LlmMaxCostCents: 1
     });
     const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
     const provider = new X402LlmProvider(session, {
       fetchImpl: async () => jsonResponse({ data: [{ id: "available" }] })
     });
-    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `openai/gpt-5.6-terra` is not available");
+    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `openai/gpt-5.6-sol` is not available");
   });
 
   it("uses explicit model override instead of the stored preferred model", async () => {

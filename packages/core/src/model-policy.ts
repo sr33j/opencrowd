@@ -19,7 +19,7 @@ export interface ResolvedModelPolicy {
 
 export const DEFAULT_MODEL_POLICY: ModelPolicy = {
   mode: "manual",
-  main: "openai/gpt-5.6-terra",
+  main: "openai/gpt-5.6-sol",
   subagent: "openai/gpt-5.6-luna"
 };
 
