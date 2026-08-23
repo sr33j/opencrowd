@@ -162,7 +162,7 @@ export async function createDefaultPaidHttpClient(): Promise<PaymentWallet> {
 export async function activePaymentWallet(): Promise<PaymentWallet> {
   const wallet = await requireAgentCashWallet();
   const config = await loadConfig();
-  return new VeniceWalletPaidHttpClient(wallet.privateKey, { timeoutMs: config.x402LlmTimeoutMs });
+  return new VeniceWalletPaidHttpClient(wallet.privateKey, { timeoutMs: config.llmTimeoutMs });
 }
 
 export interface WalletAddress {

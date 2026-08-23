@@ -1,7 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
-import { DEFAULT_MODEL_POLICY, type ModelPolicy } from "./model-policy.js";
 
 export interface McpServerConfig {
   command: string;
@@ -10,18 +9,26 @@ export interface McpServerConfig {
   allow?: string[];
 }
 
+/** Per-provider default model preferences: exact ID, "auto", or "off" (submodel only). */
+export interface ProviderModelDefaults {
+  model: string;
+  submodel: string;
+}
+
 export interface OpenCrowdConfig {
   bazaarUrl: string;
   /** Connector MCP servers; tools are ingested verbatim with a name prefix. Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
-  x402LlmBaseUrl: string;
-  x402LlmModel: string;
-  x402LlmMaxCostCents: number;
+  /** Default LLM provider for new sessions. */
+  provider: "venice" | "openrouter";
+  venice: ProviderModelDefaults;
+  openrouter: ProviderModelDefaults;
   /** Per-request LLM timeout; reasoning models can think for minutes. */
-  x402LlmTimeoutMs: number;
+  llmTimeoutMs: number;
+  /** Local budget reservation ceiling per LLM request, reconciled to actual cost. */
+  llmMaxCostCentsPerCall: number;
   /** Default cumulative session spend cap in cents; local policy, not funds. */
   defaultBudgetCents: number;
-  modelPolicy: ModelPolicy;
   x402PaymentAsset: string;
   x402PaymentNetwork: string;
 }
@@ -29,20 +36,20 @@ export interface OpenCrowdConfig {
 const COINBASE_BAZAAR_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
 const AGENTIC_MARKET_DEFAULT_URL = "https://api.agentic.market/v1/services";
 
-export const DEFAULT_LLM_MODEL = "openai/gpt-5.6-sol";
-
 const DEFAULT_CONFIG: OpenCrowdConfig = {
   bazaarUrl: COINBASE_BAZAAR_URL,
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
   },
-  x402LlmBaseUrl: "https://x402-tokens.fly.dev/v1",
-  x402LlmModel: DEFAULT_LLM_MODEL,
-  x402LlmMaxCostCents: 100,
-  x402LlmTimeoutMs: 600_000,
+  provider: "venice",
+  // Provider catalogs change; "auto" resolves from the live catalog at
+  // session start and the resolved IDs are persisted for reproducibility.
+  venice: { model: "auto", submodel: "auto" },
+  openrouter: { model: "auto", submodel: "auto" },
+  llmTimeoutMs: 600_000,
+  llmMaxCostCentsPerCall: 100,
   defaultBudgetCents: 2000,
-  modelPolicy: DEFAULT_MODEL_POLICY,
   x402PaymentAsset: "USDC",
   x402PaymentNetwork: "base"
 };

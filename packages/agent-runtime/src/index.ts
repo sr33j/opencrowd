@@ -1,27 +1,17 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import OpenAI from "openai";
 import {
   appendLedgerEntry,
   budgetStatus,
   completeSession,
-  createDefaultPaidHttpClient,
   executeTool,
-  DEFAULT_LLM_MODEL,
   finalizeReservation,
-  listLlmModels,
-  loadConfig,
   readLedger,
   releaseReservation,
   reserveBudget,
   OPEN_CROWD_TOOLS,
   SUBAGENT_TOOL_NAMES,
   TOOL_NAMES,
-  VeniceWalletPaidHttpClient,
-  type LlmModel,
-  type OpenCrowdConfig,
-  type PaidHttpClient,
-  type PaymentAdapter,
   type ProgressEvent,
   type ServiceCaps,
   type SessionState,
@@ -30,6 +20,15 @@ import {
   type ToolResult,
   type ToolName
 } from "@opencrowd/core";
+import {
+  type LlmUsage,
+  type ProviderModel,
+  type TypedLlmProvider,
+  type WireToolDefinition
+} from "./providers.js";
+
+export * from "./providers.js";
+export * from "./llm-runtime.js";
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -70,93 +69,6 @@ export type ToolExecutor = (
   args: Record<string, unknown>,
   context: ToolContext
 ) => Promise<ToolResult>;
-
-export class OpenAiProvider implements LlmProvider {
-  private readonly client: OpenAI;
-  private readonly model: string;
-  private readonly tools?: ToolName[];
-  private readonly extraTools?: DynamicToolDefinition[];
-
-  constructor(options: { apiKey?: string; model?: string; tools?: ToolName[]; extraTools?: DynamicToolDefinition[] } = {}) {
-    this.client = new OpenAI({ apiKey: options.apiKey ?? process.env.OPENAI_API_KEY });
-    this.model = options.model ?? process.env.OPENCROWD_OPENAI_MODEL ?? "gpt-4o-mini";
-    this.tools = options.tools;
-    this.extraTools = options.extraTools;
-  }
-
-  async complete(messages: LlmMessage[]): Promise<LlmResponse> {
-    const response = await this.client.chat.completions.create({
-      model: this.model,
-      messages: messages.map(toOpenAiMessage),
-      tools: toolDefinitions(this.tools, this.extraTools),
-      tool_choice: "auto"
-    });
-    const message = response.choices[0]?.message;
-    return {
-      content: message?.content ?? "",
-      toolCalls: (message?.tool_calls ?? []).map((toolCall) => ({
-        id: toolCall.id,
-        name: toolCall.function.name,
-        arguments: parseArguments(toolCall.function.arguments)
-      }))
-    };
-  }
-}
-
-export class AnthropicProvider implements LlmProvider {
-  private readonly apiKey: string;
-  private readonly model: string;
-  private readonly baseUrl: string;
-  private readonly tools?: ToolName[];
-  private readonly extraTools?: DynamicToolDefinition[];
-
-  constructor(options: { apiKey?: string; model?: string; baseUrl?: string; tools?: ToolName[]; extraTools?: DynamicToolDefinition[] } = {}) {
-    this.tools = options.tools;
-    this.extraTools = options.extraTools;
-    const apiKey = options.apiKey ?? process.env.ANTHROPIC_API_KEY;
-    if (!apiKey) {
-      throw new Error("ANTHROPIC_API_KEY is required when OPENCROWD_LLM_PROVIDER=anthropic.");
-    }
-    this.apiKey = apiKey;
-    this.model = options.model ?? process.env.OPENCROWD_ANTHROPIC_MODEL ?? "claude-sonnet-4-5-20250929";
-    this.baseUrl = options.baseUrl ?? process.env.OPENCROWD_ANTHROPIC_BASE_URL ?? "https://api.anthropic.com";
-  }
-
-  async complete(messages: LlmMessage[]): Promise<LlmResponse> {
-    const system = messages.find((message) => message.role === "system")?.content;
-    const response = await fetch(new URL("/v1/messages", this.baseUrl), {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify({
-        model: this.model,
-        max_tokens: 4096,
-        system,
-        messages: messages.filter((message) => message.role !== "system").map(toAnthropicMessage),
-        tools: [
-          ...OPEN_CROWD_TOOLS.filter((tool) => !this.tools || this.tools.includes(tool.name)).map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.parameters
-          })),
-          ...(this.extraTools ?? []).map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.parameters
-          }))
-        ]
-      })
-    });
-    const body = parseBody(await response.text());
-    if (!response.ok) {
-      throw new Error(`Anthropic LLM call failed: ${response.status} ${response.statusText} ${responseError(response, body)}`);
-    }
-    return parseAnthropicMessage(body, validToolNames(this.tools, this.extraTools));
-  }
-}
 
 export interface MockLlmProviderOptions {
   seed?: string | number;
@@ -500,184 +412,131 @@ function slugUrl(url: string): string {
   return url.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 80) || "service";
 }
 
-export interface X402LlmProviderOptions {
-  model?: string;
-  maxCostCents?: number;
-  paymentAdapter?: PaymentAdapter;
-  paidHttpClient?: PaidHttpClient;
-  fetchImpl?: typeof fetch;
-  /** Restrict the tools advertised to the model (defaults to all tools). */
+export interface BudgetedLlmOptions {
+  /** Exact model ID resolved for this session/role. */
+  model: string;
+  /** Local reservation ceiling per request, reconciled to actual cost. */
+  maxCostCentsPerCall: number;
+  /** Restrict the built-in tools advertised to the model. */
   tools?: ToolName[];
-  /** Connector-ingested vendor tool definitions to advertise alongside built-ins. */
+  /** Connector/gateway tool definitions to advertise alongside built-ins. */
   extraTools?: DynamicToolDefinition[];
   /** Ledger session_id override so subagent spend stays tagged in the shared ledger. */
   ledgerSessionId?: string;
+  /** Stable per-session cache key forwarded to the provider. */
+  promptCacheKey?: string;
+  /** Catalog pricing for cost estimation when the provider reports none. */
+  catalog?: ProviderModel[];
+  /** Streaming text callback (time-to-first-token). */
+  onTextDelta?: (delta: string) => void;
 }
 
-export class X402LlmProvider implements LlmProvider {
-  private models?: LlmModel[];
-
+/**
+ * Adapts a typed provider to the loop-facing LlmProvider interface, adding
+ * the local budget lifecycle: reserve before the request, finalize with the
+ * actual cost, and append a normalized llm_call ledger row (including cache
+ * metrics). This is the only place LLM spend touches the budget.
+ */
+export class BudgetedLlmProvider implements LlmProvider {
   constructor(
     private readonly session: SessionState,
-    private readonly options: X402LlmProviderOptions = {}
+    private readonly provider: TypedLlmProvider,
+    private readonly options: BudgetedLlmOptions
   ) {}
 
   async complete(messages: LlmMessage[]): Promise<LlmResponse> {
-    const config = await loadConfig();
-    const modelId = this.options.model ?? config.x402LlmModel;
-    const models = await this.getModels(config.x402LlmBaseUrl);
-    const model = models.find((candidate) => candidate.id === modelId);
-    if (!model) {
-      const prefix = modelId === DEFAULT_LLM_MODEL
-        ? `Default model \`${DEFAULT_LLM_MODEL}\` is not available from the configured x402 LLM provider.`
-        : `Model \`${modelId}\` is not available from the configured x402 LLM provider.`;
-      throw new Error(`${prefix} Run \`opencrowd models list\` and choose an available model with \`opencrowd models set <model>\`, or pass \`opencrowd run --model <model>\`.`);
-    }
-
-    const endpoint = endpointUrl(config.x402LlmBaseUrl, "chat/completions").toString();
-    const mapped = messages.map(toOpenAiMessage);
-    const body = {
-      model: model.id,
-      // Anthropic-family models need explicit cache breakpoints; OpenAI-style
-      // backends cache stable prefixes automatically (our history is
-      // append-only within a session, so prefixes stay stable).
-      messages: /claude/i.test(model.id) ? withCacheControl(mapped) : mapped,
-      tools: toolDefinitions(this.options.tools, this.options.extraTools),
-      tool_choice: "auto"
-    };
-    const maxCostCents = this.options.maxCostCents ?? model.max_cost_cents ?? config.x402LlmMaxCostCents;
-
-    const reservation = await reserveBudget(this.session, maxCostCents);
+    const definitions = wireToolDefinitions(this.options.tools, this.options.extraTools);
+    const reservation = await reserveBudget(this.session, this.options.maxCostCentsPerCall);
     const started = Date.now();
-    let finalized = false;
     try {
-      const response = await this.paidLlmRequest(endpoint, body, maxCostCents, config);
-      const parsedBody = response.body;
-      const usage = tokenUsage(parsedBody);
-      const charged = response.chargedCostCents !== undefined
-        ? Math.round(response.chargedCostCents)
-        : response.ok
-          ? usageCostCents(usage, model) ?? maxCostCents
-          : 0;
+      const completion = await this.provider.complete({
+        model: this.options.model,
+        messages,
+        tools: definitions,
+        promptCacheKey: this.options.promptCacheKey,
+        onTextDelta: this.options.onTextDelta
+      });
+      const charged = chargedCostCents(completion.usage, this.options);
       await finalizeReservation(this.session, reservation, charged);
-      finalized = true;
       await appendLedgerEntry(this.session.ledgerPath, {
         session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
-        endpoint,
-        model: model.id,
+        endpoint: this.provider.id,
+        model: this.options.model,
         method: "POST",
-        quoted_cost_cents: maxCostCents,
+        quoted_cost_cents: this.options.maxCostCentsPerCall,
         charged_cost_cents: charged,
-        status: response.ok ? "charged" : "failed",
+        status: "charged",
         permission_mode: this.session.permissionMode,
-        payment_id: response.paymentId,
-        tx_hash: response.txHash,
         latency_ms: Date.now() - started,
-        input_tokens: usage.inputTokens,
-        output_tokens: usage.outputTokens,
-        notes: response.ok ? undefined : responseError(response, parsedBody)
+        input_tokens: completion.usage.inputTokens,
+        output_tokens: completion.usage.outputTokens,
+        notes: cacheMetricsNote(completion.usage)
       });
-
-      if (!response.ok) {
-        throw new Error(`x402 LLM call failed: ${response.status} ${response.statusText}`);
-      }
-      return parseChatCompletion(parsedBody, validToolNames(this.options.tools, this.options.extraTools));
+      const valid = validToolNames(this.options.tools, this.options.extraTools);
+      return {
+        content: completion.content,
+        toolCalls: completion.toolCalls.filter((toolCall) => valid.has(toolCall.name))
+      };
     } catch (error) {
-      if (!finalized) {
-        await releaseReservation(this.session, reservation);
-        await appendLedgerEntry(this.session.ledgerPath, {
-          session_id: this.options.ledgerSessionId ?? this.session.sessionId,
-          type: "llm_call",
-          endpoint,
-          model: model.id,
-          method: "POST",
-          quoted_cost_cents: maxCostCents,
-          charged_cost_cents: 0,
-          status: "failed",
-          permission_mode: this.session.permissionMode,
-          latency_ms: Date.now() - started,
-          notes: (error as Error).message
-        });
-      }
+      await releaseReservation(this.session, reservation);
+      await appendLedgerEntry(this.session.ledgerPath, {
+        session_id: this.options.ledgerSessionId ?? this.session.sessionId,
+        type: "llm_call",
+        endpoint: this.provider.id,
+        model: this.options.model,
+        method: "POST",
+        quoted_cost_cents: this.options.maxCostCentsPerCall,
+        charged_cost_cents: 0,
+        status: "failed",
+        permission_mode: this.session.permissionMode,
+        latency_ms: Date.now() - started,
+        notes: (error as Error).message
+      });
       throw error;
     }
   }
-
-  private async getModels(baseUrl: string): Promise<LlmModel[]> {
-    if (!this.models) {
-      this.models = await listLlmModels({ baseUrl, fetchImpl: this.options.fetchImpl });
-    }
-    return this.models;
-  }
-
-  private async paidLlmRequest(endpoint: string, body: unknown, maxCostCents: number, config: OpenCrowdConfig): Promise<PaidLlmResponse> {
-    if (this.options.paidHttpClient) {
-      return this.options.paidHttpClient.request({
-        url: endpoint,
-        method: "POST",
-        maxCostCents,
-        headers: { "content-type": "application/json" },
-        body
-      });
-    }
-    if (this.options.paymentAdapter || this.options.fetchImpl) {
-      const signer = this.options.paymentAdapter;
-      if (!signer) {
-        throw new Error("a paymentAdapter is required when fetchImpl is supplied");
-      }
-      let signed;
-      try {
-        signed = await signer.sign({
-          resourceUrl: endpoint,
-          method: "POST",
-          quotedCostCents: maxCostCents,
-          paymentKind: "upto",
-          body
-        });
-      } catch (error) {
-        throw new Error(`${(error as Error).message}. x402 LLM calls require upto payment authorization; exact-payment fallback is not enabled.`);
-      }
-      const response = await (this.options.fetchImpl ?? fetch)(endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...signed.headers
-        },
-        body: JSON.stringify(body)
-      });
-      const responseText = await response.text();
-      return {
-        status: response.status,
-        ok: response.ok,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers.entries()),
-        body: parseBody(responseText),
-        chargedCostCents: chargedCost(response, maxCostCents),
-        paymentId: paymentId(response, signed.paymentId),
-        txHash: txHash(response, signed.txHash)
-      };
-    }
-    const client = await createDefaultPaidHttpClient();
-    return client.request({
-      url: endpoint,
-      method: "POST",
-      maxCostCents,
-      headers: { "content-type": "application/json" },
-      body
-    });
-  }
 }
 
-interface PaidLlmResponse {
-  status: number;
-  ok: boolean;
-  statusText: string;
-  headers: Record<string, string>;
-  body: unknown;
-  chargedCostCents?: number;
-  paymentId?: string;
-  txHash?: string;
+/** Actual cost: provider-reported, else estimated from catalog pricing, else 0. */
+function chargedCostCents(usage: LlmUsage, options: BudgetedLlmOptions): number {
+  if (usage.costCents !== undefined) {
+    return Math.max(0, Math.round(usage.costCents));
+  }
+  const model = options.catalog?.find((candidate) => candidate.id === options.model);
+  if (model && (model.inputCostCentsPer1k !== undefined || model.outputCostCentsPer1k !== undefined)
+    && (usage.inputTokens !== undefined || usage.outputTokens !== undefined)) {
+    const cents = ((usage.inputTokens ?? 0) / 1_000) * (model.inputCostCentsPer1k ?? 0)
+      + ((usage.outputTokens ?? 0) / 1_000) * (model.outputCostCentsPer1k ?? 0);
+    return Math.max(0, Math.round(cents));
+  }
+  return 0;
+}
+
+/** Cache hit/write metrics recorded so repeated-turn hit rates can be verified. */
+function cacheMetricsNote(usage: LlmUsage): string | undefined {
+  if (usage.cachedInputTokens === undefined && usage.cacheWriteTokens === undefined) {
+    return undefined;
+  }
+  return JSON.stringify({
+    cached_input_tokens: usage.cachedInputTokens,
+    cache_write_tokens: usage.cacheWriteTokens
+  });
+}
+
+function wireToolDefinitions(names?: ToolName[], extraTools?: DynamicToolDefinition[]): WireToolDefinition[] {
+  return [
+    ...OPEN_CROWD_TOOLS.filter((tool) => !names || names.includes(tool.name)).map((tool) => ({
+      name: tool.name as string,
+      description: tool.description,
+      parameters: tool.parameters as Record<string, unknown>
+    })),
+    ...(extraTools ?? []).map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      parameters: tool.parameters
+    }))
+  ];
 }
 
 export interface PermissionRequest {
@@ -686,9 +545,21 @@ export interface PermissionRequest {
   caps?: ServiceCaps;
 }
 
+/** Typed provider + resolved model for one loop role (main or subagent). */
+export interface TypedLlmRuntime {
+  provider: TypedLlmProvider;
+  model: string;
+  maxCostCentsPerCall: number;
+  promptCacheKey?: string;
+  catalog?: ProviderModel[];
+  onTextDelta?: (delta: string) => void;
+}
+
 export interface AgentRunOptions {
+  /** Scripted/mock provider (tests, demo). Exactly one of provider/llm is required. */
   provider?: LlmProvider;
-  model?: string;
+  /** Typed provider runtime; the loop wraps it with local budget accounting. */
+  llm?: TypedLlmRuntime;
   history?: LlmMessage[];
   onMessage?: (message: LlmMessage) => Promise<void> | void;
   onProgress?: (event: ProgressEvent) => void;
@@ -739,6 +610,8 @@ export interface SubagentOptions {
   costHint?: string;
   /** Explicit subagent provider (tests and custom wiring). */
   provider?: LlmProvider;
+  /** Typed provider runtime for subagents; wrapped with shared budget accounting. */
+  llm?: TypedLlmRuntime;
   /** Concurrent subagents per batch (default 4). */
   maxParallel?: number;
 }
@@ -772,7 +645,20 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     enabledTools = enabledTools.filter((name) => !LEGACY_ECONOMY_TOOLS.includes(name));
   }
   const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
-  const provider = options.provider ?? defaultProvider(session, options.model, enabledTools, dynamicDefinitions);
+  const provider = options.provider ?? (options.llm
+    ? new BudgetedLlmProvider(session, options.llm.provider, {
+      model: options.llm.model,
+      maxCostCentsPerCall: options.llm.maxCostCentsPerCall,
+      tools: enabledTools,
+      extraTools: dynamicDefinitions,
+      promptCacheKey: options.llm.promptCacheKey,
+      catalog: options.llm.catalog,
+      onTextDelta: options.llm.onTextDelta
+    })
+    : undefined);
+  if (!provider) {
+    throw new Error("no LLM provider configured: pass an explicit provider (tests/demo) or a typed llm runtime");
+  }
   const toolExecutor = options.toolExecutor ?? executeTool;
   const systemPromptParts = [
     "You are the local OpenCrowd agent running as a CLI or MCP-backed tool on the user's personal machine.",
@@ -1158,17 +1044,17 @@ function subagentProvider(
   if (parentOptions.provider instanceof MockLlmProvider) {
     return new MockLlmProvider({ seed: subagentId, tools: SUBAGENT_TOOL_NAMES });
   }
-  if (process.env.OPENCROWD_LLM_PROVIDER === "openai") {
-    return new OpenAiProvider({ model: subagent.model, tools: SUBAGENT_TOOL_NAMES });
+  if (subagent.llm) {
+    return new BudgetedLlmProvider(session, subagent.llm.provider, {
+      model: subagent.llm.model,
+      maxCostCentsPerCall: subagent.llm.maxCostCentsPerCall,
+      tools: SUBAGENT_TOOL_NAMES,
+      promptCacheKey: subagent.llm.promptCacheKey,
+      catalog: subagent.llm.catalog,
+      ledgerSessionId: subagentId
+    });
   }
-  if (process.env.OPENCROWD_LLM_PROVIDER === "anthropic") {
-    return new AnthropicProvider({ model: subagent.model, tools: SUBAGENT_TOOL_NAMES });
-  }
-  return new X402LlmProvider(session, {
-    model: subagent.model,
-    tools: SUBAGENT_TOOL_NAMES,
-    ledgerSessionId: subagentId
-  });
+  throw new Error("subagent has no provider: pass subagent.provider (tests) or subagent.llm (typed runtime)");
 }
 
 async function runGatedTool(
@@ -1366,21 +1252,6 @@ function truncateForModel(value: unknown, maxChars: number): unknown {
   }));
 }
 
-function defaultProvider(
-  session: SessionState,
-  model: string | undefined,
-  tools?: ToolName[],
-  extraTools?: DynamicToolDefinition[]
-): LlmProvider {
-  if (process.env.OPENCROWD_LLM_PROVIDER === "openai") {
-    return new OpenAiProvider({ model, tools, extraTools });
-  }
-  if (process.env.OPENCROWD_LLM_PROVIDER === "anthropic") {
-    return new AnthropicProvider({ model, tools, extraTools });
-  }
-  return new X402LlmProvider(session, { model, tools, extraTools });
-}
-
 export async function buildSessionSummary(
   session: SessionState,
   finalMessage: string,
@@ -1564,27 +1435,6 @@ function renderPurchaseSummary(summary: Record<string, unknown>): string {
   return lines.join("\n");
 }
 
-function toolDefinitions(names?: ToolName[], extraTools?: DynamicToolDefinition[]): OpenAI.Chat.Completions.ChatCompletionTool[] {
-  return [
-    ...OPEN_CROWD_TOOLS.filter((tool) => !names || names.includes(tool.name)).map((tool) => ({
-      type: "function" as const,
-      function: {
-        name: tool.name as string,
-        description: tool.description,
-        parameters: tool.parameters as Record<string, unknown>
-      }
-    })),
-    ...(extraTools ?? []).map((tool) => ({
-      type: "function" as const,
-      function: {
-        name: tool.name,
-        description: tool.description,
-        parameters: tool.parameters
-      }
-    }))
-  ];
-}
-
 function validToolNames(names?: ToolName[], extraTools?: DynamicToolDefinition[]): Set<string> {
   return new Set<string>([
     ...(names ?? TOOL_NAMES),
@@ -1648,254 +1498,6 @@ function truncateMiddle(value: string, maxLength: number): string {
   const head = Math.ceil((maxLength - 1) / 2);
   const tail = Math.floor((maxLength - 1) / 2);
   return `${value.slice(0, head)}…${value.slice(value.length - tail)}`;
-}
-
-function toOpenAiMessage(message: LlmMessage): OpenAI.Chat.Completions.ChatCompletionMessageParam {
-  if (message.role === "tool") {
-    return {
-      role: "tool",
-      tool_call_id: message.toolCallId ?? "",
-      content: message.content
-    };
-  }
-  if (message.role === "assistant") {
-    const toolCalls = message.toolCalls?.map((toolCall) => ({
-      id: toolCall.id,
-      type: "function" as const,
-      function: {
-        name: toolCall.name,
-        arguments: JSON.stringify(toolCall.arguments)
-      }
-    }));
-    if (toolCalls?.length) {
-      return {
-        role: "assistant",
-        tool_calls: toolCalls
-      } as OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
-    }
-    return {
-      role: "assistant",
-      content: message.content
-    } as OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam;
-  }
-  return {
-    role: message.role,
-    content: message.content
-  };
-}
-
-function toAnthropicMessage(message: LlmMessage): Record<string, unknown> {
-  if (message.role === "tool") {
-    return {
-      role: "user",
-      content: [{
-        type: "tool_result",
-        tool_use_id: message.toolCallId ?? "",
-        content: message.content
-      }]
-    };
-  }
-  if (message.role === "assistant") {
-    const content: Record<string, unknown>[] = [];
-    if (message.content) {
-      content.push({ type: "text", text: message.content });
-    }
-    for (const toolCall of message.toolCalls ?? []) {
-      content.push({
-        type: "tool_use",
-        id: toolCall.id,
-        name: toolCall.name,
-        input: toolCall.arguments
-      });
-    }
-    return { role: "assistant", content };
-  }
-  return {
-    role: "user",
-    content: message.content
-  };
-}
-
-function parseArguments(value: string): Record<string, unknown> {
-  try {
-    return JSON.parse(value) as Record<string, unknown>;
-  } catch {
-    return {};
-  }
-}
-
-function parseBody(text: string): unknown {
-  if (!text) {
-    return null;
-  }
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return text;
-  }
-}
-
-function parseChatCompletion(body: unknown, validNames: Set<string> = new Set(TOOL_NAMES)): LlmResponse {
-  const firstChoice = Array.isArray((body as { choices?: unknown[] })?.choices)
-    ? (body as { choices: unknown[] }).choices[0]
-    : undefined;
-  const message = firstChoice && typeof firstChoice === "object"
-    ? (firstChoice as { message?: unknown }).message
-    : undefined;
-  const objectMessage = message && typeof message === "object" ? message as Record<string, unknown> : {};
-  return {
-    content: messageContent(objectMessage.content),
-    toolCalls: Array.isArray(objectMessage.tool_calls)
-      ? objectMessage.tool_calls.map((value) => toToolCall(value, validNames)).filter((toolCall): toolCall is LlmToolCall => toolCall !== null)
-      : []
-  };
-}
-
-function parseAnthropicMessage(body: unknown, validNames: Set<string> = new Set(TOOL_NAMES)): LlmResponse {
-  const content = Array.isArray((body as { content?: unknown[] })?.content)
-    ? (body as { content: unknown[] }).content
-    : [];
-  const text = content.map((block) => {
-    if (block && typeof block === "object" && (block as { type?: unknown }).type === "text") {
-      return typeof (block as { text?: unknown }).text === "string" ? (block as { text: string }).text : "";
-    }
-    return "";
-  }).join("");
-  const toolCalls = content.map((block) => {
-    if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "tool_use") {
-      return null;
-    }
-    const object = block as Record<string, unknown>;
-    const name = typeof object.name === "string" ? object.name : undefined;
-    if (!name || !validNames.has(name)) {
-      return null;
-    }
-    return {
-      id: typeof object.id === "string" ? object.id : `call-${Date.now()}`,
-      name,
-      arguments: object.input && typeof object.input === "object" && !Array.isArray(object.input)
-        ? object.input as Record<string, unknown>
-        : {}
-    };
-  }).filter((toolCall): toolCall is LlmToolCall => toolCall !== null);
-  return { content: text, toolCalls };
-}
-
-function toToolCall(value: unknown, validNames: Set<string>): LlmToolCall | null {
-  if (!value || typeof value !== "object") {
-    return null;
-  }
-  const object = value as Record<string, unknown>;
-  const fn = object.function && typeof object.function === "object" ? object.function as Record<string, unknown> : {};
-  const name = typeof fn.name === "string" ? fn.name : undefined;
-  if (!name || !validNames.has(name)) {
-    return null;
-  }
-  return {
-    id: typeof object.id === "string" ? object.id : `call-${Date.now()}`,
-    name,
-    arguments: typeof fn.arguments === "string" ? parseArguments(fn.arguments) : {}
-  };
-}
-
-function messageContent(value: unknown): string {
-  if (typeof value === "string") {
-    return value;
-  }
-  if (Array.isArray(value)) {
-    return value.map((part) => {
-      if (typeof part === "string") {
-        return part;
-      }
-      if (part && typeof part === "object" && typeof (part as { text?: unknown }).text === "string") {
-        return (part as { text: string }).text;
-      }
-      return "";
-    }).join("");
-  }
-  return "";
-}
-
-function chargedCost(response: Response, fallback: number): number {
-  const header = response.headers.get("x402-charged-cost-cents") ?? response.headers.get("x-charged-cost-cents");
-  if (header && Number.isFinite(Number(header))) {
-    return Math.round(Number(header));
-  }
-  return response.ok ? fallback : 0;
-}
-
-function paymentId(response: Response, fallback: string | undefined): string | undefined {
-  return response.headers.get("x402-payment-id") ?? response.headers.get("x-payment-id") ?? fallback;
-}
-
-function txHash(response: Response, fallback: string | undefined): string | undefined {
-  return response.headers.get("x402-tx-hash") ?? response.headers.get("x-transaction-hash") ?? fallback;
-}
-
-/** Cache breakpoints on the system prompt and the latest message; the prefix between them hits cache. */
-function withCacheControl(messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[]): unknown[] {
-  return messages.map((message, index) => {
-    const isBreakpoint = index === 0 || index === messages.length - 1;
-    if (!isBreakpoint || typeof message.content !== "string" || message.content.length === 0) {
-      return message;
-    }
-    return {
-      ...message,
-      content: [{ type: "text", text: message.content, cache_control: { type: "ephemeral" } }]
-    };
-  });
-}
-
-/** Actual cost from token usage and catalog pricing when the route doesn't report settled cost. */
-function usageCostCents(usage: { inputTokens?: number; outputTokens?: number }, model: LlmModel): number | undefined {
-  if (model.input_cost_cents_per_1k === undefined && model.output_cost_cents_per_1k === undefined) {
-    return undefined;
-  }
-  if (usage.inputTokens === undefined && usage.outputTokens === undefined) {
-    return undefined;
-  }
-  const cents = ((usage.inputTokens ?? 0) / 1_000) * (model.input_cost_cents_per_1k ?? 0)
-    + ((usage.outputTokens ?? 0) / 1_000) * (model.output_cost_cents_per_1k ?? 0);
-  return Math.round(cents);
-}
-
-function tokenUsage(body: unknown): { inputTokens?: number; outputTokens?: number } {
-  const usage = body && typeof body === "object" ? (body as { usage?: unknown }).usage : undefined;
-  if (!usage || typeof usage !== "object") {
-    return {};
-  }
-  const object = usage as Record<string, unknown>;
-  return {
-    inputTokens: numberValue(object.prompt_tokens ?? object.input_tokens),
-    outputTokens: numberValue(object.completion_tokens ?? object.output_tokens)
-  };
-}
-
-function responseError(response: { status: number }, body: unknown): string {
-  if (body && typeof body === "object") {
-    const error = (body as { error?: unknown }).error;
-    if (typeof error === "string") {
-      return error;
-    }
-    if (error && typeof error === "object" && typeof (error as { message?: unknown }).message === "string") {
-      return `HTTP ${response.status}: ${(error as { message: string }).message}`;
-    }
-  }
-  return `HTTP ${response.status}`;
-}
-
-function numberValue(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return Math.round(value);
-  }
-  if (typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))) {
-    return Math.round(Number(value));
-  }
-  return undefined;
-}
-
-function endpointUrl(baseUrl: string, path: string): URL {
-  return new URL(path, baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
 }
 
 function formatCents(cents: number): string {

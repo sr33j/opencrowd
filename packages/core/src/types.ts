@@ -39,15 +39,20 @@ export interface SessionState {
   spentCents: number;
   permissionMode: PermissionMode;
   shellEnabled: boolean;
-  /** Model policy resolution recorded at session start so evals are reproducible. */
-  modelPolicy?: {
-    mode: "auto" | "manual";
-    main: string;
-    subagent: string;
-    resolvedAt: string;
-  };
+  /**
+   * Provider and exact model IDs resolved at session start; persisted so
+   * `run --session` reproduces the same provider/model choices.
+   */
+  models?: SessionModels;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SessionModels {
+  provider: string;
+  main: string;
+  subagent?: string;
+  resolvedAt: string;
 }
 
 export interface BudgetStatus {

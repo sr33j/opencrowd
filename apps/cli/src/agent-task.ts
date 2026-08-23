@@ -1,28 +1,23 @@
 import {
   appendConversationMessage,
   compactConversationIfNeeded,
-  fallbackContextWindowTokens,
-  listLlmModels,
-  loadConfig,
   readConversationMessages,
-  resolveModelPolicy,
-  saveSession,
   type ConversationMessage,
-  type LlmModel,
-  type ModelPolicy,
   type ProgressEvent,
-  type ResolvedModelPolicy,
   type SessionState
 } from "@opencrowd/core";
 import { buildEconomyContext, sharedConnectorManager, type EconomyContext } from "@opencrowd/connectors";
 import {
   createMockToolExecutor,
+  fallbackContextWindowTokens,
   MockLlmProvider,
+  resolveLlmRuntime,
   runAgentTask,
   runAgentTaskDetailed,
   type AgentRunOptions,
   type AgentTaskResult,
   type LlmMessage,
+  type LlmRuntimeSelection,
   type PermissionRequest,
   type SubagentOptions,
   type ToolExecutor
@@ -44,9 +39,9 @@ export function ensureMockRuntime(state: ReplState): ReplState {
 
 export interface PersistentAgentTaskOptions {
   model?: string;
-  /** Explicit subagent model; overrides the configured policy. */
+  /** Explicit subagent model; overrides the configured preference. */
   subagentModel?: string;
-  /** Force auto model policy for this run (frontier main + cheap subagents). */
+  /** Force "auto" model resolution for this run. */
   forceAutoPolicy?: boolean;
   testMode?: boolean;
   testSeed?: string;
@@ -80,44 +75,92 @@ async function preparePersistentRun(
   session: SessionState,
   options: PersistentAgentTaskOptions
 ): Promise<AgentRunOptions> {
-  const economy = options.testMode ? undefined : await tryEconomyContext(options.onProgress);
-  const models = options.testMode ? [] : await tryListModels();
-  const policy = options.testMode ? undefined : await resolveSessionPolicy(session, models, options);
-  const mainModel = policy?.main ?? options.model;
-  const contextWindowTokens = options.testMode
-    ? fallbackContextWindowTokens("mock-test-mode")
-    : contextWindowFor(models, mainModel) ?? fallbackContextWindowTokens(mainModel ?? (await loadConfig()).x402LlmModel);
+  if (options.testMode) {
+    const contextWindowTokens = fallbackContextWindowTokens("mock-test-mode");
+    const history = await compactedHistory(session, contextWindowTokens, options.onProgress);
+    return {
+      maxTurns: options.maxTurns,
+      contextWindowTokens,
+      onProgress: options.onProgress,
+      onPermissionRequest: options.onPermissionRequest,
+      provider: options.mockProvider ?? new MockLlmProvider({ seed: options.testSeed }),
+      toolExecutor: options.mockToolExecutor ?? createMockToolExecutor(),
+      compactOutput: options.compactOutput ?? true,
+      history,
+      onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
+    };
+  }
+
+  const economy = await tryEconomyContext(options.onProgress);
+  const llm = await resolveLlmRuntime(session, {
+    model: options.model,
+    subagentModel: options.subagentModel,
+    auto: options.forceAutoPolicy
+  });
+  const contextWindowTokens = llm.catalog.find((model) => model.id === llm.models.main)?.contextWindowTokens
+    ?? fallbackContextWindowTokens(llm.models.main);
+  const history = await compactedHistory(session, contextWindowTokens, options.onProgress);
+  return {
+    maxTurns: options.maxTurns,
+    contextWindowTokens,
+    onProgress: options.onProgress,
+    onPermissionRequest: options.onPermissionRequest,
+    llm: {
+      provider: llm.provider,
+      model: llm.models.main,
+      maxCostCentsPerCall: llm.maxCostCentsPerCall,
+      promptCacheKey: session.sessionId,
+      catalog: llm.catalog
+    },
+    compactOutput: options.compactOutput ?? false,
+    subagent: subagentOptionsFor(session, llm),
+    dynamicTools: economy?.dynamicTools,
+    promptSections: economy?.promptSections,
+    history,
+    onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
+  };
+}
+
+async function compactedHistory(
+  session: SessionState,
+  contextWindowTokens: number,
+  onProgress?: (event: ProgressEvent) => void
+): Promise<LlmMessage[]> {
   const compaction = await compactConversationIfNeeded(session, { contextWindowTokens });
   if (compaction.compacted) {
-    options.onProgress?.({
+    onProgress?.({
       type: "complete",
       message: `Compacted prior conversation into ${compaction.archivePath}`,
       data: { archive_path: compaction.archivePath, tokens_before: compaction.tokensBefore }
     });
   }
-  const history = (compaction.compacted ? compaction.messages : await readConversationMessages(session)) as ConversationMessage[];
+  const history = compaction.compacted ? compaction.messages : await readConversationMessages(session);
+  return history as LlmMessage[];
+}
+
+function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): SubagentOptions | undefined {
+  if (!llm.models.subagent) {
+    return undefined;
+  }
+  const model = llm.catalog.find((candidate) => candidate.id === llm.models.subagent);
+  const outputCost = model?.outputCostCentsPer1k;
   return {
-    model: mainModel,
-    maxTurns: options.maxTurns,
-    contextWindowTokens,
-    onProgress: options.onProgress,
-    onPermissionRequest: options.onPermissionRequest,
-    provider: options.testMode ? options.mockProvider ?? new MockLlmProvider({ seed: options.testSeed }) : undefined,
-    toolExecutor: options.testMode ? options.mockToolExecutor ?? createMockToolExecutor() : undefined,
-    compactOutput: options.compactOutput ?? options.testMode,
-    subagent: policy ? subagentOptionsFor(models, policy) : undefined,
-    dynamicTools: economy?.dynamicTools,
-    promptSections: economy?.promptSections,
-    history: history as LlmMessage[],
-    onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
+    model: llm.models.subagent,
+    costHint: outputCost !== undefined ? `~${outputCost}¢ per 1k output tokens` : undefined,
+    llm: {
+      provider: llm.provider,
+      model: llm.models.subagent,
+      maxCostCentsPerCall: llm.maxCostCentsPerCall,
+      promptCacheKey: session.sessionId,
+      catalog: llm.catalog
+    }
   };
 }
 
 /**
  * Start the connector MCP servers and touch the wallet balance before a
  * session is created. On a fresh machine this both installs the pinned
- * vendors (npx cache) and auto-creates the shared AgentCash wallet, so the
- * session budget can read a real balance on the very first run.
+ * vendors (npx cache) and auto-creates the shared AgentCash wallet.
  */
 export async function warmStartEconomy(): Promise<void> {
   if (process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
@@ -129,13 +172,14 @@ export async function warmStartEconomy(): Promise<void> {
       await manager.execute("agentcash_get_balance", {});
     }
   } catch {
-    // Connectors are optional; the session falls back to legacy behavior.
+    // Connectors are optional at startup; paid capability surfaces the error when used.
   }
 }
 
 /**
- * Connector-ingested vendor tools (integration spec). Unavailable connectors
- * degrade to the legacy economic path rather than failing the run.
+ * Connector-ingested vendor tools. When the connectors are unavailable the
+ * run continues with local tools only — paid capability is explicitly
+ * unavailable, never silently rerouted.
  */
 async function tryEconomyContext(onProgress?: (event: ProgressEvent) => void): Promise<EconomyContext | undefined> {
   if (process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
@@ -147,76 +191,8 @@ async function tryEconomyContext(onProgress?: (event: ProgressEvent) => void): P
   } catch (error) {
     onProgress?.({
       type: "complete",
-      message: `connector MCP servers unavailable (${(error as Error).message}); using the legacy service path`
+      message: `connector MCP servers unavailable (${(error as Error).message}); paid services are unavailable this run`
     });
     return undefined;
-  }
-}
-
-/**
- * Resolve the model policy for this run and record it in the session so
- * evals are reproducible. Auto mode fails loudly when the catalog lacks a
- * frontier model; manual mode falls back to the existing single-model
- * behavior (no subagents) when resolution is impossible.
- */
-async function resolveSessionPolicy(
-  session: SessionState,
-  models: LlmModel[],
-  options: PersistentAgentTaskOptions
-): Promise<ResolvedModelPolicy | undefined> {
-  const config = await loadConfig();
-  const mode = options.forceAutoPolicy ? "auto" : config.modelPolicy.mode;
-  const policy: ModelPolicy = {
-    mode,
-    main: options.model
-      ?? (config.modelPolicy.main !== "auto" ? config.modelPolicy.main : mode === "auto" ? "auto" : config.x402LlmModel),
-    subagent: options.subagentModel ?? config.modelPolicy.subagent
-  };
-  try {
-    const resolved = resolveModelPolicy(models, policy);
-    session.modelPolicy = resolved;
-    await saveSession(session);
-    return resolved;
-  } catch (error) {
-    if (mode === "auto") {
-      throw error;
-    }
-    return undefined;
-  }
-}
-
-function subagentOptionsFor(models: LlmModel[], policy: ResolvedModelPolicy): SubagentOptions {
-  const model = models.find((candidate) => candidate.id === policy.subagent);
-  const outputCost = model?.output_cost_cents_per_1k;
-  return {
-    model: policy.subagent,
-    costHint: outputCost !== undefined ? `~${outputCost}¢ per 1k output tokens` : undefined
-  };
-}
-
-async function tryListModels(): Promise<LlmModel[]> {
-  try {
-    return await listLlmModels();
-  } catch {
-    return [];
-  }
-}
-
-function contextWindowFor(models: LlmModel[], modelId: string | undefined): number | undefined {
-  if (!modelId) {
-    return undefined;
-  }
-  return models.find((candidate) => candidate.id === modelId)?.context_window_tokens;
-}
-
-export async function resolveContextWindowTokens(model: string | undefined): Promise<number> {
-  const config = await loadConfig();
-  const modelId = model ?? config.x402LlmModel;
-  try {
-    const models = await listLlmModels();
-    const resolved = models.find((candidate) => candidate.id === modelId);
-    return resolved?.context_window_tokens ?? fallbackContextWindowTokens(modelId);
-  } catch {
-    return fallbackContextWindowTokens(modelId);
   }
 }

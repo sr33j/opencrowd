@@ -721,7 +721,7 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
       session={session}
       initialTestMode={testMode}
       initialTestSeed={options.testSeed ?? process.env.OPENCROWD_TEST_SEED}
-      defaultModel={config.x402LlmModel}
+      defaultModel={`${config.provider}/${config[config.provider].model}`}
       onboarding={onboarding}
     />,
     { exitOnCtrlC: false }

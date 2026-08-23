@@ -2,19 +2,26 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSession, readLedger, updateConfig, type PaymentAdapter, type PaymentRequest } from "../../core/src/index.js";
+import { createSession, readLedger } from "../../core/src/index.js";
 import {
+  BudgetedLlmProvider,
   createMockToolExecutor,
   MOCK_X402_SERVICES,
   MockLlmProvider,
+  normalizeProviderModels,
+  OpenRouterProvider,
   renderCompactPurchaseSummary,
   renderProgress,
+  resolveSessionModels,
   runAgentTask,
   runAgentTaskDetailed,
-  X402LlmProvider,
+  toWireChatMessage,
   type LlmMessage,
   type LlmProvider,
-  type LlmResponse
+  type LlmResponse,
+  type ProviderCompletion,
+  type ProviderModel,
+  type TypedLlmProvider
 } from "../src/index.js";
 
 const tmpRoots: string[] = [];
@@ -30,207 +37,95 @@ afterEach(async () => {
   await Promise.all(tmpRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("x402 LLM provider", () => {
-  it("reserves budget, signs upto, calls chat completions, and writes llm_call ledger rows", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await updateConfig({
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "zai-org-glm-4.7-flash",
-      x402LlmMaxCostCents: 10
-    });
-    const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
-    let signedRequest: PaymentRequest | undefined;
-    const signer: PaymentAdapter = {
-      async sign(request) {
-        signedRequest = request;
-        return { headers: { "x-payment": "signed" }, paymentId: "pay_1", txHash: "0xtx" };
+describe("typed providers and budget accounting", () => {
+  function fakeTypedProvider(overrides: Partial<ProviderCompletion> = {}, id: "venice" | "openrouter" = "venice"): TypedLlmProvider {
+    return {
+      id,
+      async listModels() {
+        return [{ id: "test-model", outputCostCentsPer1k: 2, inputCostCentsPer1k: 1 }];
+      },
+      async complete() {
+        return {
+          content: "done",
+          toolCalls: [],
+          usage: { inputTokens: 11, outputTokens: 3, cachedInputTokens: 5, costCents: 4 },
+          ...overrides
+        };
       }
     };
-    const provider = new X402LlmProvider(session, {
-      paymentAdapter: signer,
-      fetchImpl: async (input, init) => {
-        const url = String(input);
-        if (url === "https://llm.example/v1/models") {
-          return jsonResponse({ data: [{ id: "zai-org-glm-4.7-flash", max_cost_cents: 10 }] });
-        }
-        expect(url).toBe("https://llm.example/v1/chat/completions");
-        expect((init?.headers as Record<string, string>)["x-payment"]).toBe("signed");
-        expect(JSON.parse(String(init?.body))).toMatchObject({ model: "zai-org-glm-4.7-flash" });
-        return jsonResponse({
-          choices: [{ message: { content: "done" } }],
-          usage: { prompt_tokens: 11, completion_tokens: 3 }
-        }, {
-          "x402-charged-cost-cents": "4",
-          "x402-payment-id": "pay_header"
-        });
-      }
+  }
+
+  it("reserves budget, finalizes actual cost, and writes llm_call ledger rows with cache metrics", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
+    const provider = new BudgetedLlmProvider(session, fakeTypedProvider(), {
+      model: "test-model",
+      maxCostCentsPerCall: 10
     });
 
     await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toEqual({ content: "done", toolCalls: [] });
-    expect(signedRequest).toMatchObject({
-      resourceUrl: "https://llm.example/v1/chat/completions",
-      method: "POST",
-      quotedCostCents: 10,
-      paymentKind: "upto"
-    });
     expect(session.reservedCents).toBe(0);
     expect(session.spentCents).toBe(4);
     const rows = await readLedger(session.ledgerPath);
     expect(rows).toContainEqual(expect.objectContaining({
       type: "llm_call",
-      model: "zai-org-glm-4.7-flash",
+      endpoint: "venice",
+      model: "test-model",
       status: "charged",
       charged_cost_cents: "4",
-      payment_id: "pay_header",
       input_tokens: "11",
       output_tokens: "3"
     }));
+    const row = rows.find((candidate) => candidate.type === "llm_call");
+    expect(JSON.parse(row?.notes ?? "{}")).toMatchObject({ cached_input_tokens: 5 });
   });
 
-  it("fails clearly when default model is unavailable", async () => {
+  it("estimates cost from catalog pricing when the provider reports none", async () => {
     const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await updateConfig({
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "openai/gpt-5.6-sol",
-      x402LlmMaxCostCents: 1
+    const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
+    const provider = new BudgetedLlmProvider(session, fakeTypedProvider({
+      usage: { inputTokens: 1_000, outputTokens: 2_000 }
+    }), {
+      model: "test-model",
+      maxCostCentsPerCall: 10,
+      catalog: [{ id: "test-model", inputCostCentsPer1k: 1, outputCostCentsPer1k: 2 }]
     });
-    const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
-    const provider = new X402LlmProvider(session, {
-      fetchImpl: async () => jsonResponse({ data: [{ id: "available" }] })
-    });
-    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("Default model `openai/gpt-5.6-sol` is not available");
+
+    await provider.complete([{ role: "user", content: "hi" }]);
+    expect(session.spentCents).toBe(5);
   });
 
-  it("uses explicit model override instead of the stored preferred model", async () => {
+  it("rejects over-budget LLM calls before calling the provider", async () => {
     const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await updateConfig({
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "gpt-5.5",
-      x402LlmMaxCostCents: 3
-    });
-    const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
-    let calledModel: string | undefined;
-    const provider = new X402LlmProvider(session, {
-      model: "available",
-      paymentAdapter: {
-        async sign() {
-          return { headers: { "x-payment": "signed" } };
-        }
-      },
-      fetchImpl: async (input, init) => {
-        if (String(input).endsWith("/models")) {
-          return jsonResponse({ data: [{ id: "available", max_cost_cents: 3 }] });
-        }
-        calledModel = JSON.parse(String(init?.body)).model;
-        return jsonResponse({ choices: [{ message: { content: "done" } }] }, { "x402-charged-cost-cents": "2" });
-      }
-    });
-
-    await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toMatchObject({ content: "done" });
-    expect(calledModel).toBe("available");
-  });
-
-  it("omits assistant content when serializing tool-call history", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await updateConfig({
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "gpt-5.5",
-      x402LlmMaxCostCents: 3
-    });
-    const session = await createSession({ workspaceRoot: root, budgetCents: 10 });
-    let assistantMessage: Record<string, unknown> | undefined;
-    const provider = new X402LlmProvider(session, {
-      paymentAdapter: {
-        async sign() {
-          return { headers: { "x-payment": "signed" } };
-        }
-      },
-      fetchImpl: async (input, init) => {
-        if (String(input).endsWith("/models")) {
-          return jsonResponse({ data: [{ id: "gpt-5.5", max_cost_cents: 3 }] });
-        }
-        const body = JSON.parse(String(init?.body)) as { messages: Record<string, unknown>[] };
-        assistantMessage = body.messages.find((message) => message.role === "assistant");
-        return jsonResponse({ choices: [{ message: { content: "done" } }] }, { "x402-charged-cost-cents": "1" });
-      }
-    });
-
-    await provider.complete([
-      { role: "user", content: "show services" },
-      {
-        role: "assistant",
-        content: "I'll check available services.",
-        toolCalls: [{ id: "call_1", name: "search_services", arguments: { query: "all services", limit: 20 } }]
-      },
-      { role: "tool", toolCallId: "call_1", content: "{}" }
-    ]);
-
-    expect(assistantMessage).toMatchObject({
-      role: "assistant",
-      tool_calls: [{
-        id: "call_1",
-        type: "function",
-        function: {
-          name: "search_services",
-          arguments: JSON.stringify({ query: "all services", limit: 20 })
-        }
-      }]
-    });
-    expect(assistantMessage).not.toHaveProperty("content");
-  });
-
-  it("rejects over-budget LLM calls before OWS signing", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await updateConfig({
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "gpt-5.5",
-      x402LlmMaxCostCents: 10
-    });
     const session = await createSession({ workspaceRoot: root, budgetCents: 5 });
-    let signed = false;
-    const provider = new X402LlmProvider(session, {
-      paymentAdapter: {
-        async sign() {
-          signed = true;
-          return { headers: {} };
-        }
-      },
-      fetchImpl: async () => jsonResponse({ data: [{ id: "gpt-5.5", max_cost_cents: 10 }] })
-    });
+    let called = false;
+    const typed: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        called = true;
+        return { content: "", toolCalls: [], usage: {} };
+      }
+    };
+    const provider = new BudgetedLlmProvider(session, typed, { model: "m", maxCostCentsPerCall: 10 });
 
     await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("budget exceeded");
-    expect(signed).toBe(false);
+    expect(called).toBe(false);
     expect(session.reservedCents).toBe(0);
     expect(session.spentCents).toBe(0);
   });
 
-  it("releases reserved budget and writes failed ledger rows when the LLM call fails", async () => {
+  it("releases reserved budget and writes failed ledger rows when the provider fails", async () => {
     const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await updateConfig({
-      x402LlmBaseUrl: "https://llm.example/v1",
-      x402LlmModel: "gpt-5.5",
-      x402LlmMaxCostCents: 10
-    });
     const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
-    const provider = new X402LlmProvider(session, {
-      paymentAdapter: {
-        async sign() {
-          return { headers: { "x-payment": "signed" } };
-        }
-      },
-      fetchImpl: async (input) => {
-        if (String(input).endsWith("/models")) {
-          return jsonResponse({ data: [{ id: "gpt-5.5", max_cost_cents: 10 }] });
-        }
+    const typed: TypedLlmProvider = {
+      id: "openrouter",
+      async listModels() { return []; },
+      async complete() {
         throw new Error("network down");
       }
-    });
+    };
+    const provider = new BudgetedLlmProvider(session, typed, { model: "m", maxCostCentsPerCall: 10 });
 
     await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("network down");
     expect(session.reservedCents).toBe(0);
@@ -238,10 +133,140 @@ describe("x402 LLM provider", () => {
     const rows = await readLedger(session.ledgerPath);
     expect(rows).toContainEqual(expect.objectContaining({
       type: "llm_call",
-      model: "gpt-5.5",
+      endpoint: "openrouter",
       status: "failed",
       charged_cost_cents: "0"
     }));
+  });
+
+  it("filters tool calls the current tool surface does not include", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 25 });
+    const provider = new BudgetedLlmProvider(session, fakeTypedProvider({
+      toolCalls: [
+        { id: "a", name: "get_budget_status", arguments: {} },
+        { id: "b", name: "made_up_tool", arguments: {} }
+      ],
+      usage: {}
+    }), { model: "m", maxCostCentsPerCall: 10, tools: ["get_budget_status"] });
+
+    const response = await provider.complete([{ role: "user", content: "hi" }]);
+    expect(response.toolCalls).toEqual([{ id: "a", name: "get_budget_status", arguments: {} }]);
+  });
+});
+
+describe("OpenRouter provider", () => {
+  it("requires an API key with remediation", async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      const provider = new OpenRouterProvider({});
+      await expect(provider.complete({ model: "m", messages: [], tools: [] })).rejects.toThrow("OPENROUTER_API_KEY");
+    } finally {
+      if (saved !== undefined) {
+        process.env.OPENROUTER_API_KEY = saved;
+      }
+    }
+  });
+
+  it("sends the bearer key, requests usage accounting, and normalizes cost and cache metrics", async () => {
+    let seenUrl = "";
+    let seenAuth = "";
+    let seenBody: Record<string, unknown> = {};
+    const provider = new OpenRouterProvider({
+      apiKey: "sk-test",
+      fetchImpl: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        seenUrl = String(input);
+        seenAuth = (init?.headers as Record<string, string>).authorization;
+        seenBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify({
+          choices: [{ message: { content: "hello", tool_calls: [] } }],
+          usage: {
+            prompt_tokens: 10,
+            completion_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 6 },
+            cost: 0.012
+          }
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch
+    });
+
+    const completion = await provider.complete({
+      model: "openai/gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+      tools: []
+    });
+
+    expect(seenUrl).toContain("openrouter.ai/api/v1/chat/completions");
+    expect(seenAuth).toBe("Bearer sk-test");
+    expect(seenBody.usage).toEqual({ include: true });
+    expect(completion.content).toBe("hello");
+    expect(completion.usage).toMatchObject({
+      inputTokens: 10,
+      outputTokens: 4,
+      cachedInputTokens: 6,
+      costCents: 1.2
+    });
+  });
+
+  it("never falls back to another provider on failure", async () => {
+    const provider = new OpenRouterProvider({
+      apiKey: "sk-test",
+      fetchImpl: (async () => new Response(JSON.stringify({ error: { message: "no credits" } }), { status: 402 })) as typeof fetch
+    });
+    await expect(provider.complete({ model: "m", messages: [], tools: [] }))
+      .rejects.toThrow("OpenRouter account credit is exhausted");
+  });
+});
+
+describe("model resolution", () => {
+  const catalog: ProviderModel[] = [
+    { id: "frontier", inputCostCentsPer1k: 2, outputCostCentsPer1k: 8, contextWindowTokens: 200_000, supportsTools: true },
+    { id: "mid", inputCostCentsPer1k: 0.5, outputCostCentsPer1k: 1, contextWindowTokens: 128_000, supportsTools: true },
+    { id: "tiny", inputCostCentsPer1k: 0.05, outputCostCentsPer1k: 0.1, contextWindowTokens: 8_000, supportsTools: true },
+    { id: "no-tools", inputCostCentsPer1k: 9, outputCostCentsPer1k: 9, contextWindowTokens: 200_000, supportsTools: false }
+  ];
+
+  it("auto-resolves the priciest tool-capable main model and the cheapest viable subagent", () => {
+    const resolved = resolveSessionModels("venice", catalog, { main: "auto", subagent: "auto" });
+    expect(resolved).toMatchObject({ provider: "venice", main: "frontier", subagent: "mid" });
+    expect(resolved.resolvedAt).toBeTruthy();
+  });
+
+  it("supports disabling subagents and validates explicit IDs against the catalog", () => {
+    expect(resolveSessionModels("venice", catalog, { main: "frontier", subagent: "off" }).subagent).toBeUndefined();
+    expect(() => resolveSessionModels("venice", catalog, { main: "missing", subagent: "auto" }))
+      .toThrow("not in the venice catalog");
+  });
+
+  it("normalizes provider catalog shapes", () => {
+    const models = normalizeProviderModels({
+      data: [
+        { id: "or-model", context_length: 128_000, pricing: { prompt: "0.000001", completion: "0.000002" }, supported_parameters: ["tools"] },
+        { id: "venice-model", model_spec: { availableContextTokens: 65_536, capabilities: { supportsFunctionCalling: true }, pricing: { input: { usd: 0.5 }, output: { usd: 2 } } } },
+        "bare-model"
+      ]
+    });
+    expect(models[0]).toMatchObject({ id: "or-model", contextWindowTokens: 128_000, inputCostCentsPer1k: 0.1, outputCostCentsPer1k: 0.2, supportsTools: true });
+    expect(models[1]).toMatchObject({ id: "venice-model", contextWindowTokens: 65_536, supportsTools: true, inputCostCentsPer1k: 0.05, outputCostCentsPer1k: 0.2 });
+    expect(models[2]).toMatchObject({ id: "bare-model" });
+  });
+
+  it("serializes assistant tool-call history without content", () => {
+    const wire = toWireChatMessage({
+      role: "assistant",
+      content: "I'll check available services.",
+      toolCalls: [{ id: "call_1", name: "search_services", arguments: { query: "all services", limit: 20 } }]
+    });
+    expect(wire).toMatchObject({
+      role: "assistant",
+      tool_calls: [{
+        id: "call_1",
+        type: "function",
+        function: { name: "search_services", arguments: JSON.stringify({ query: "all services", limit: 20 }) }
+      }]
+    });
+    expect(wire).not.toHaveProperty("content");
   });
 });
 

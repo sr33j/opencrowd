@@ -15,7 +15,6 @@ import {
   createOpenCrowdSession,
   createSession,
   listArtifacts,
-  normalizeLlmModels,
   appendLedgerEntry,
   compatiblePaymentHeader,
   VeniceWalletPaidHttpClient,
@@ -28,7 +27,6 @@ import {
   searchServices,
   finalizeReservation,
   saveArtifact,
-  setPreferredLlmModel,
   updateConfig,
   walletAddress,
   runShell,
@@ -325,24 +323,6 @@ describe("Bazaar normalization", () => {
 	    expect(url.searchParams.has("q")).toBe(false);
 	  });
 	});
-
-describe("x402 LLM models", () => {
-  it("normalizes common model list shapes and persists selection", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const models = normalizeLlmModels({
-      data: [
-        { id: "gpt-5.5", display_name: "GPT 5.5", max_cost_cents: "12" },
-        "small-model"
-      ]
-    });
-    expect(models).toEqual([
-      expect.objectContaining({ id: "gpt-5.5", name: "GPT 5.5", max_cost_cents: 12 }),
-      expect.objectContaining({ id: "small-model" })
-    ]);
-    await expect(setPreferredLlmModel("small-model")).resolves.toEqual({ model: "small-model" });
-  });
-});
 
 describe("artifacts", () => {
   it("stores artifacts inside the session and rejects traversal", async () => {

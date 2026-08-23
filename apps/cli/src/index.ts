@@ -9,7 +9,6 @@ import {
   budgetStatus,
   clearConversation,
   createOpenCrowdSession,
-  listLlmModels,
   listAllowedServices,
   loadConfig,
   loadSession,
@@ -18,10 +17,11 @@ import {
   saveSession,
   searchServices,
   setPermissionMode,
-  setPreferredLlmModel,
   setSessionBudget,
+  updateConfig,
   walletAddress,
   walletBalance,
+  type OpenCrowdConfig,
   type PermissionMode,
   type ProgressEvent,
   type ServiceCandidate,
@@ -32,6 +32,7 @@ import {
   createMockToolExecutor,
   MockLlmProvider,
   renderProgress,
+  sharedTypedProvider,
   type RenderProgressOptions
 } from "@opencrowd/agent-runtime";
 import {
@@ -228,7 +229,8 @@ async function replCommand(session: SessionState, state: ReplState, inputLine: s
       return false;
     case "model":
       if (!rest[0]) {
-        printValue("Model", { model: state.model ?? (await loadConfig()).x402LlmModel }, { pretty: renderKeyValues({ model: state.model ?? (await loadConfig()).x402LlmModel }) });
+        const label = state.model ?? defaultModelLabel(await loadConfig());
+        printValue("Model", { model: label }, { pretty: renderKeyValues({ model: label }) });
         return false;
       }
       state.model = rest[0];
@@ -321,7 +323,7 @@ async function renderReplIntro(session: SessionState, state: ReplState): Promise
   const rows: Array<[string, string]> = [
     ["session", `${session.sessionId.slice(0, 8)}...${session.sessionId.slice(-6)}`],
     ["mode", state.testMode ? "test" : session.permissionMode],
-    ["model", state.model ?? config.x402LlmModel],
+    ["model", state.model ?? defaultModelLabel(config)],
     ["budget", `${formatCents(Number(budget.spent_cents ?? 0))} spent / ${formatCents(Number(budget.remaining_cents ?? 0))} left`],
     ["workspace", process.cwd().split("/").filter(Boolean).at(-1) ?? process.cwd()]
   ];
@@ -469,7 +471,7 @@ async function headlessRunCommand(args: string[]): Promise<void> {
     session_dir: session.sessionDir,
     trajectory_path: join(session.sessionDir, "messages.jsonl"),
     turns: result.turns,
-    model_policy: session.modelPolicy ?? null,
+    model_policy: session.models ?? null,
     usdc_spent_cents: {
       llm: Number(budget.llm_spend_cents ?? 0),
       services: Number(budget.external_service_spend_cents ?? 0),
@@ -605,29 +607,40 @@ async function modelsCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
   args = args.filter((arg) => arg !== "--json");
   const [action, value] = args;
-  if (action === "list") {
-    const models = await listLlmModels();
+  const config = await loadConfig();
+  if (action === "list" || action === undefined) {
+    const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs });
+    const models = await provider.listModels();
     const rows = models.map((model) => ({
       id: model.id,
       name: model.name,
-      max_cost_cents: model.max_cost_cents
+      context: model.contextWindowTokens,
+      output_cost_cents_per_1k: model.outputCostCentsPer1k
     }));
-    printValue("Models", rows, {
+    printValue(`Models (${config.provider})`, rows, {
       json,
       pretty: renderTable(rows, [
         ["id", "id"],
         ["name", "name"],
-        ["max_cost_cents", "max"]
+        ["context", "context"],
+        ["output_cost_cents_per_1k", "out/1k"]
       ])
     });
     return;
   }
   if (action === "set" && value) {
-    const result = await setPreferredLlmModel(value);
+    await updateConfig({
+      [config.provider]: { ...config[config.provider], model: value }
+    } as Partial<OpenCrowdConfig>);
+    const result = { provider: config.provider, model: value };
     printValue("Model", result, { json, pretty: renderKeyValues(asRecord(result)) });
     return;
   }
-  throw new Error("models supports list, set <model>");
+  throw new Error("models supports list, set <model|auto>");
+}
+
+function defaultModelLabel(config: OpenCrowdConfig): string {
+  return `${config.provider}/${config[config.provider].model}`;
 }
 
 async function evalsCommand(args: string[]): Promise<void> {

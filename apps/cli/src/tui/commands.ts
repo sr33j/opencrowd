@@ -3,18 +3,19 @@ import {
   blockService,
   budgetStatus,
   listAllowedServices,
-  listLlmModels,
   loadConfig,
   readLedger,
   removeAllowedService,
   setPermissionMode,
-  setPreferredLlmModel,
   setSessionBudget,
+  updateConfig,
   walletAddress,
   walletBalance,
+  type OpenCrowdConfig,
   type PermissionMode,
   type SessionState
 } from "@opencrowd/core";
+import { sharedTypedProvider } from "@opencrowd/agent-runtime";
 import {
   asRecord,
   formatCents,
@@ -100,27 +101,37 @@ export async function runSlashCommand(
     case "model": {
       if (!rest[0]) {
         const config = await loadConfig();
-        return { kind: "text", label: "Model", body: renderKeyValues({ model: state.model ?? config.x402LlmModel }) };
+        const label = state.model ?? `${config.provider}/${config[config.provider].model}`;
+        return { kind: "text", label: "Model", body: renderKeyValues({ model: label }) };
       }
       state.model = rest[0];
       return { kind: "text", label: "Model", body: renderKeyValues({ model: state.model }) };
     }
     case "models": {
       const [action, value] = rest;
+      const config = await loadConfig();
       if (action === "list" || action === undefined) {
-        const models = await listLlmModels();
-        const rows = models.map((model) => ({ id: model.id, name: model.name, max_cost_cents: model.max_cost_cents }));
+        const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs });
+        const models = await provider.listModels();
+        const rows = models.map((model) => ({
+          id: model.id,
+          name: model.name,
+          context: model.contextWindowTokens,
+          output_cost_cents_per_1k: model.outputCostCentsPer1k
+        }));
         return {
           kind: "text",
-          label: "Models",
-          body: renderTable(rows, [["id", "id"], ["name", "name"], ["max_cost_cents", "max"]])
+          label: `Models (${config.provider})`,
+          body: renderTable(rows, [["id", "id"], ["name", "name"], ["context", "context"], ["output_cost_cents_per_1k", "out/1k"]])
         };
       }
       if (action === "set" && value) {
-        const result = await setPreferredLlmModel(value);
-        return { kind: "text", label: "Model", body: renderKeyValues(asRecord(result)) };
+        await updateConfig({
+          [config.provider]: { ...config[config.provider], model: value }
+        } as Partial<OpenCrowdConfig>);
+        return { kind: "text", label: "Model", body: renderKeyValues({ provider: config.provider, model: value }) };
       }
-      throw new Error("/models supports list, set <model>");
+      throw new Error("/models supports list, set <model|auto>");
     }
     case "test-mode": {
       if (!rest[0]) {

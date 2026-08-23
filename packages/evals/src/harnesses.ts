@@ -5,18 +5,16 @@ import { basename, join } from "node:path";
 import {
   appendConversationMessage,
   createOpenCrowdSession,
-  listLlmModels,
-  loadConfig,
-  resolveModelPolicy,
-  saveSession,
-  type ConversationMessage,
-  type LlmModel,
-  type ResolvedModelPolicy
+  type ConversationMessage
 } from "@opencrowd/core";
 import {
   createMockToolExecutor,
+  fallbackContextWindowTokens,
   MockLlmProvider,
+  resolveLlmRuntime,
   runAgentTaskDetailed,
+  type LlmRuntimeSelection,
+  type ResolvedSessionModels,
   type SubagentOptions
 } from "@opencrowd/agent-runtime";
 import { buildEconomyContext, sharedConnectorManager, type EconomyContext } from "@opencrowd/connectors";
@@ -49,7 +47,7 @@ export interface HarnessRun {
   estimated_cost_usd?: number;
   tokens?: { input?: number; output?: number };
   trajectory_path?: string;
-  model_policy?: ResolvedModelPolicy;
+  model_policy?: ResolvedSessionModels;
   compliance?: ComplianceReport;
   error?: string;
 }
@@ -106,19 +104,25 @@ const openCrowdHarness: GaiaHarness = {
       await copyFile(context.attachmentPath, join(session.artifactsDir, name));
       prompt = `${prompt}\n\nAn input file is available at the session artifact path \`${name}\` (use read_file, or run_shell against ${join(session.artifactsDir, name)}).`;
     }
-    const models = context.testMode ? [] : await tryListModels();
-    const policy = context.testMode ? undefined : await resolvePolicy(models, context);
-    if (policy) {
-      session.modelPolicy = policy;
-      await saveSession(session);
-    }
+    const llm = context.testMode ? undefined : await resolveLlmRuntime(session, {
+      model: context.model,
+      auto: context.auto
+    });
     const economy = context.testMode ? undefined : await tryEconomyContext(context.log);
-    const mainModelId = policy?.main ?? context.model;
     const result = await runAgentTaskDetailed(session, prompt, {
-      model: mainModelId,
-      subagent: policy ? subagentOptions(models, policy) : undefined,
+      llm: llm ? {
+        provider: llm.provider,
+        model: llm.models.main,
+        maxCostCentsPerCall: llm.maxCostCentsPerCall,
+        promptCacheKey: session.sessionId,
+        catalog: llm.catalog
+      } : undefined,
+      subagent: llm ? subagentOptions(session.sessionId, llm) : undefined,
       maxTurns: 40,
-      contextWindowTokens: models.find((candidate) => candidate.id === mainModelId)?.context_window_tokens,
+      contextWindowTokens: llm
+        ? llm.catalog.find((candidate) => candidate.id === llm.models.main)?.contextWindowTokens
+          ?? fallbackContextWindowTokens(llm.models.main)
+        : fallbackContextWindowTokens("mock-test-mode"),
       provider: context.testMode ? new MockLlmProvider({ seed: context.testSeed ?? question.task_id }) : undefined,
       toolExecutor: context.testMode ? createMockToolExecutor() : undefined,
       dynamicTools: economy?.dynamicTools,
@@ -134,7 +138,7 @@ const openCrowdHarness: GaiaHarness = {
       llm_cost_cents: Number(budget.llm_spend_cents ?? 0),
       service_cost_cents: Number(budget.external_service_spend_cents ?? 0),
       trajectory_path: trajectoryPath,
-      model_policy: session.modelPolicy,
+      model_policy: llm?.models,
       compliance: await gradeTrajectoryFile(trajectoryPath).catch(() => undefined)
     };
   }
@@ -216,38 +220,24 @@ async function comparatorPrompt(context: HarnessContext): Promise<string> {
   return `${context.prompt}\n\nAn input file is available in the working directory at ./${name}`;
 }
 
-async function resolvePolicy(models: LlmModel[], context: HarnessContext): Promise<ResolvedModelPolicy | undefined> {
-  const config = await loadConfig();
-  try {
-    return resolveModelPolicy(models, {
-      mode: context.auto ? "auto" : "manual",
-      main: context.model ?? (context.auto ? "auto" : config.x402LlmModel),
-      subagent: config.modelPolicy.subagent
-    });
-  } catch (error) {
-    if (context.auto) {
-      throw error;
-    }
+function subagentOptions(sessionId: string, llm: LlmRuntimeSelection): SubagentOptions | undefined {
+  if (!llm.models.subagent) {
     return undefined;
   }
-}
-
-function subagentOptions(models: LlmModel[], policy: ResolvedModelPolicy): SubagentOptions {
-  const model = models.find((candidate) => candidate.id === policy.subagent);
+  const model = llm.catalog.find((candidate) => candidate.id === llm.models.subagent);
   return {
-    model: policy.subagent,
-    costHint: model?.output_cost_cents_per_1k !== undefined
-      ? `~${model.output_cost_cents_per_1k}¢ per 1k output tokens`
-      : undefined
+    model: llm.models.subagent,
+    costHint: model?.outputCostCentsPer1k !== undefined
+      ? `~${model.outputCostCentsPer1k}¢ per 1k output tokens`
+      : undefined,
+    llm: {
+      provider: llm.provider,
+      model: llm.models.subagent,
+      maxCostCentsPerCall: llm.maxCostCentsPerCall,
+      promptCacheKey: sessionId,
+      catalog: llm.catalog
+    }
   };
-}
-
-async function tryListModels(): Promise<LlmModel[]> {
-  try {
-    return await listLlmModels();
-  } catch {
-    return [];
-  }
 }
 
 async function tryEconomyContext(log: (message: string) => void): Promise<EconomyContext | undefined> {

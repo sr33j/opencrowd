@@ -92,7 +92,7 @@ export async function runGaiaBenchmark(options: GaiaRunOptions): Promise<GaiaRep
   await ensureGaiaAttachments(runnable, { hfToken: options.hfToken, log });
 
   const config = await loadConfig();
-  const ceiling = await estimateGaiaCostCents(runnable.length, harnesses, config.x402LlmMaxCostCents);
+  const ceiling = await estimateGaiaCostCents(runnable.length, harnesses, config.llmMaxCostCentsPerCall);
   if (!options.testMode && options.confirm) {
     const proceed = await options.confirm(ceiling.message);
     if (!proceed) {

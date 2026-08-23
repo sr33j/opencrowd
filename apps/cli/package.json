@@ -34,7 +34,6 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
     "ink": "^7.0.5",
-    "openai": "^4.103.0",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",
     "siwe": "^2.3.2",

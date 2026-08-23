@@ -115,25 +115,21 @@ outgrow the model's context window (archives kept under `sessions/<id>/context/`
 
 ## Configuration notes
 
-- **Model**: defaults to `openai/gpt-5.6-sol` on an x402-metered OpenRouter
-  route (`x402LlmBaseUrl` points at any OpenAI-compatible x402 endpoint).
-  `opencrowd models list` then `models set <model>` to change it.
-- **Model policy / subagents**: `modelPolicy` in config (`{"mode": "auto"|"manual",
-  "main": "<model>|auto", "subagent": "<model>|auto"}`) pairs the main loop
-  with a subagent model, both paid over the same x402 route. Defaults:
-  `openai/gpt-5.6-sol` main, `openai/gpt-5.6-luna` subagents. The main loop
-  gets `spawn_subagent`/`check_subagents` tools (local tools only, one level
-  deep, parallel with background mode); resolution is recorded per session
-  for reproducibility. Auto mode refuses to run if the catalog has no
-  frontier-tier model.
+- **Provider**: Venice is the default LLM provider, authenticated with the
+  shared AgentCash wallet (SIWX) and paid from prepaid Venice credit.
+  OpenRouter is optional via `OPENROUTER_API_KEY`. There is no automatic
+  fallback between providers.
+- **Models**: per-provider `model`/`submodel` preferences in config
+  (`"venice": {"model": "auto", "submodel": "auto"}`). `auto` resolves from
+  the live catalog at session start; the resolved IDs are recorded on the
+  session for reproducibility. The main loop gets
+  `spawn_subagent`/`check_subagents` tools (local tools only, one level deep,
+  parallel with background mode).
 - **Connectors**: paid capability comes from vendor MCP servers (AgentCash
   for wallet/payments, CrowdCode for reputation), configured under
   `mcpServers` in config with pinned versions. Their tools are ingested
   verbatim (`agentcash_fetch`, `crowdcode_get_service_score`, ...) and their
-  own instructions become prompt context. When connectors are unreachable the
-  runtime falls back to the legacy Bazaar path.
-- **Discovery (legacy fallback)**: Coinbase CDP Bazaar; custom bazaar URLs
-  supported in config.
+  own instructions become prompt context.
 - **Env overrides**: `OPENCROWD_BUDGET_CENTS`, `OPENCROWD_PERMISSION_MODE`,
   `OPENCROWD_SHELL_ENABLED`, `OPENCROWD_CONFIG_DIR`, `OPENCROWD_TEST_MODE`.
 
