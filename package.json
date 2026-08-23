@@ -22,14 +22,16 @@
     "build": "tsc -b packages/core packages/economy packages/agent-runtime packages/evals apps/cli && chmod +x apps/cli/dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false packages/core packages/economy packages/agent-runtime packages/evals apps/cli",
-    "lint": "tsc -b --pretty false packages/core packages/economy packages/agent-runtime packages/evals apps/cli"
+    "lint": "tsc -b --pretty false packages/core packages/economy packages/agent-runtime packages/evals apps/cli",
+    "deadcode": "knip",
+    "smoke": "bash scripts/smoke.sh"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",
     "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.17",
     "esbuild": "^0.28.2",
-    "tsx": "^4.19.4",
+    "knip": "^6.32.2",
     "typescript": "^5.8.3",
     "vitest": "^3.1.4"
   }

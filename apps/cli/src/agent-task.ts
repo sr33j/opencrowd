@@ -1,11 +1,4 @@
-import {
-  appendConversationMessage,
-  compactConversationIfNeeded,
-  readConversationMessages,
-  type ConversationMessage,
-  type ProgressEvent,
-  type SessionState
-} from "@opencrowd/core";
+import type { ProgressEvent, SessionState } from "@opencrowd/core";
 import {
   EconomyGateway,
   MockAgentCashAdapter,
@@ -187,23 +180,6 @@ async function vendorInstructions(): Promise<string[] | undefined> {
 
 function connectorsDisabled(): boolean {
   return process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true";
-}
-
-async function compactedHistory(
-  session: SessionState,
-  contextWindowTokens: number,
-  onProgress?: (event: ProgressEvent) => void
-): Promise<LlmMessage[]> {
-  const compaction = await compactConversationIfNeeded(session, { contextWindowTokens });
-  if (compaction.compacted) {
-    onProgress?.({
-      type: "complete",
-      message: `Compacted prior conversation into ${compaction.archivePath}`,
-      data: { archive_path: compaction.archivePath, tokens_before: compaction.tokensBefore }
-    });
-  }
-  const history = compaction.compacted ? compaction.messages : await readConversationMessages(session);
-  return history as LlmMessage[];
 }
 
 function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): SubagentOptions | undefined {

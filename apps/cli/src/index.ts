@@ -51,7 +51,7 @@ async function main(argv: string[]): Promise<void> {
     throw new Error("the interactive UI needs a terminal; use `opencrowd run --headless --prompt \"...\"` for scripts");
   }
   if (command === "--test-mode" || command === "--demo" || command === "demo") {
-    const extraArgs = rest.filter((arg, index) => !isConsumedOption(rest, index, ["--test-seed"]));
+    const extraArgs = rest.filter((_arg, index) => !isConsumedOption(rest, index, ["--test-seed"]));
     if (extraArgs.length > 0) {
       throw new Error("top-level --demo launches the interactive demo; use `opencrowd run --test-mode \"task\"` for one-shot demo tasks");
     }

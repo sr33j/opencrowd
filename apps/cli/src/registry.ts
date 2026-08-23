@@ -6,7 +6,6 @@ import {
   setApprovalMode,
   setSessionBudget,
   saveSession,
-  type ApprovalMode,
   type SessionState
 } from "@opencrowd/core";
 import {

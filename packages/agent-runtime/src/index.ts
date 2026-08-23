@@ -250,24 +250,10 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function integerValue(value: unknown): number | undefined {
-  if (typeof value === "number" && Number.isInteger(value)) {
-    return value;
-  }
-  if (typeof value === "string" && value.trim() !== "" && Number.isInteger(Number(value))) {
-    return Number(value);
-  }
-  return undefined;
-}
-
 function objectValue(value: unknown): Record<string, unknown> | undefined {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
-}
-
-function slugUrl(url: string): string {
-  return url.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 80) || "service";
 }
 
 export interface BudgetedLlmOptions {

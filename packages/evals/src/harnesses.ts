@@ -158,7 +158,7 @@ const openCrowdHarness: GaiaHarness = {
 const claudeHarness: GaiaHarness = {
   name: "claude",
   onChainCost: false,
-  async run(question, context) {
+  async run(_question, context) {
     const prompt = await comparatorPrompt(context);
     const { stdout } = await execFileAsync("claude", [
       "-p", prompt,
@@ -182,7 +182,7 @@ const claudeHarness: GaiaHarness = {
 const codexHarness: GaiaHarness = {
   name: "codex",
   onChainCost: false,
-  async run(question, context) {
+  async run(_question, context) {
     const prompt = await comparatorPrompt(context);
     // danger-full-access mirrors claude's --dangerously-skip-permissions so
     // both comparators get network and tool parity; each question runs in an

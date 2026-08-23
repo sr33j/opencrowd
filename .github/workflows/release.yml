@@ -20,13 +20,8 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      # Publish dependencies before dependents
-      - run: npm publish --workspace @opencrowd/core --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: npm publish --workspace @opencrowd/agent-runtime --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Only the CLI is published; internal workspace packages carry no
+      # semver-stability promise and are inlined into the CLI bundle.
       - run: npm publish --workspace opencrowd --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

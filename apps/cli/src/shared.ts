@@ -2,27 +2,6 @@ import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdout as output } from "node:process";
 
-export function renderInlinePairs(rows: Array<[string, string]>): string {
-  return rows.map(([key, value]) => `${style(key, "muted")} ${value}`).join("  ");
-}
-
-export function renderColumns(items: string[]): string {
-  const width = terminalWidth();
-  const columnWidth = width >= 110 ? 38 : width >= 82 ? 32 : width;
-  const columnCount = Math.max(1, Math.min(3, Math.floor(width / columnWidth)));
-  if (columnCount === 1) {
-    return items.map((item) => `  ${item}`).join("\n");
-  }
-  const lines: string[] = [];
-  for (let index = 0; index < items.length; index += columnCount) {
-    const row = items.slice(index, index + columnCount)
-      .map((item) => truncate(item, columnWidth - 4).padEnd(columnWidth - 2))
-      .join("");
-    lines.push(`  ${row.trimEnd()}`);
-  }
-  return lines.join("\n");
-}
-
 export function renderKeyValues(value: Record<string, unknown>): string {
   return Object.entries(value)
     .filter(([, item]) => item !== undefined)
@@ -145,10 +124,6 @@ export function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export function pruneUndefined<T extends Record<string, unknown>>(value: T): T {
-  return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined)) as T;
-}
-
 export function parseUsd(value: string): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) {
@@ -160,59 +135,6 @@ export function parseUsd(value: string): number {
 export function readOption(args: string[], option: string): string | undefined {
   const index = args.indexOf(option);
   return index >= 0 ? args[index + 1] : undefined;
-}
-
-export function splitArgs(inputLine: string): string[] {
-  const args: string[] = [];
-  let current = "";
-  let quote: "\"" | "'" | undefined;
-  let escaped = false;
-  for (const char of inputLine) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-      continue;
-    }
-    if (char === "\\") {
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      if (char === quote) {
-        quote = undefined;
-      } else {
-        current += char;
-      }
-      continue;
-    }
-    if (char === "\"" || char === "'") {
-      quote = char;
-      continue;
-    }
-    if (/\s/.test(char)) {
-      if (current) {
-        args.push(current);
-        current = "";
-      }
-      continue;
-    }
-    current += char;
-  }
-  if (escaped) {
-    current += "\\";
-  }
-  if (quote) {
-    throw new Error("unterminated quote in slash command");
-  }
-  if (current) {
-    args.push(current);
-  }
-  return args;
-}
-
-export function optionCents(args: string[], option: string): number | undefined {
-  const value = readOption(args, option);
-  return value === undefined ? undefined : parseUsd(value);
 }
 
 export function envFlag(name: string): boolean {

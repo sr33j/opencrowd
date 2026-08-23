@@ -1,0 +1,38 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "ignoreExportsUsedInFile": true,
+  "workspaces": {
+    "packages/core": {
+      "project": [
+        "src/**/*.ts"
+      ]
+    },
+    "packages/economy": {
+      "project": [
+        "src/**/*.ts"
+      ]
+    },
+    "packages/agent-runtime": {
+      "project": [
+        "src/**/*.ts"
+      ]
+    },
+    "packages/evals": {
+      "project": [
+        "src/**/*.ts"
+      ]
+    },
+    "apps/cli": {
+      "entry": [
+        "src/index.ts"
+      ],
+      "project": [
+        "src/**/*.{ts,tsx}"
+      ],
+      "ignoreDependencies": [
+        "@modelcontextprotocol/sdk",
+        "venice-x402-client"
+      ]
+    }
+  }
+}

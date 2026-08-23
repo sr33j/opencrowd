@@ -36,9 +36,7 @@
     "ink": "^7.0.5",
     "qrcode": "^1.5.4",
     "react": "^19.2.7",
-    "siwe": "^2.3.2",
-    "venice-x402-client": "^0.2.0",
-    "viem": "^2.51.3"
+    "venice-x402-client": "^0.2.0"
   },
   "devDependencies": {
     "@opencrowd/agent-runtime": "0.1.0",
