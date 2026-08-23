@@ -13,7 +13,33 @@ export interface WalletSummary {
   error?: string;
 }
 
-export async function walletSummary(): Promise<WalletSummary> {
+const BALANCE_TTL_MS = 15_000;
+let cachedSummary: { at: number; value: WalletSummary } | undefined;
+let inFlight: Promise<WalletSummary> | undefined;
+
+/**
+ * Balance calls are deduplicated: concurrent callers share one in-flight
+ * vendor request, and results are reused for a short TTL so the status bar,
+ * funding wizard, and /status never stack up balance lookups.
+ */
+export async function walletSummary(options: { refresh?: boolean } = {}): Promise<WalletSummary> {
+  if (!options.refresh && cachedSummary && Date.now() - cachedSummary.at < BALANCE_TTL_MS) {
+    return cachedSummary.value;
+  }
+  if (!inFlight) {
+    inFlight = fetchWalletSummary().then((value) => {
+      cachedSummary = { at: Date.now(), value };
+      inFlight = undefined;
+      return value;
+    }, (error) => {
+      inFlight = undefined;
+      throw error;
+    });
+  }
+  return inFlight;
+}
+
+async function fetchWalletSummary(): Promise<WalletSummary> {
   const wallet = await readAgentCashWallet();
   try {
     const runtime = await sharedEconomyRuntime();

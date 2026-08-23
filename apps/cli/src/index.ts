@@ -79,6 +79,14 @@ async function main(argv: string[]): Promise<void> {
     case "models":
       await modelsCommand(rest);
       return;
+    case "doctor": {
+      const { runDoctor } = await import("./doctor.js");
+      const healthy = await runDoctor((line) => console.log(line));
+      if (!healthy) {
+        process.exitCode = 1;
+      }
+      return;
+    }
     case "evals":
       await evalsCommand(rest);
       return;
@@ -426,6 +434,7 @@ function printHelp(): void {
   opencrowd ledger [--json] show [--session <id>]
   opencrowd wallet [--json] address|balance
   opencrowd models [--json] list
+  opencrowd doctor
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]
 
 Interactive commands (also /help inside the UI):

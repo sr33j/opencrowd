@@ -129,16 +129,16 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   },
   {
     name: "models",
-    usage: "/models",
-    summary: "List models for the active provider (no mutation)",
-    execute: async (_rest, { session, state }) => {
+    usage: "/models [refresh]",
+    summary: "List models for the active provider (cached; `refresh` refetches)",
+    execute: async (rest, { session, state }) => {
       if (state.testMode) {
         return { kind: "text", label: "Models", body: "  demo mode uses a scripted mock model" };
       }
       const config = await loadConfig();
       const providerId = activeProviderId(session, config.provider);
       const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs });
-      const models = await provider.listModels();
+      const models = await provider.listModels({ refresh: rest[0] === "refresh" });
       const rows = models.map((model) => ({
         id: model.id,
         name: model.name,

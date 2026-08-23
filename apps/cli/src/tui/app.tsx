@@ -5,7 +5,6 @@ import {
   clearConversation,
   createOpenCrowdSession,
   loadConfig,
-  readAgentCashWallet,
   setApprovalMode,
   setSessionBudget,
   type ApprovalMode,
@@ -57,8 +56,6 @@ interface AppProps {
   initialTestMode: boolean;
   initialTestSeed?: string;
   defaultModel: string;
-  /** Present when the shared wallet exists but is unfunded: show the deposit panel. */
-  onboarding?: { address: string };
 }
 
 interface WalletInfo {
@@ -66,7 +63,7 @@ interface WalletInfo {
   balanceCents?: number;
 }
 
-function App({ session: initialSession, initialTestMode, initialTestSeed, defaultModel, onboarding }: AppProps): React.ReactElement {
+function App({ session: initialSession, initialTestMode, initialTestSeed, defaultModel }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const width = Math.max(60, Math.min(140, stdout?.columns ?? 100));
@@ -88,7 +85,7 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
   const [activity, setActivity] = useState("");
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [modal, setModal] = useState<Modal | null>(null);
-  const [wizard, setWizard] = useState<Wizard | null>(onboarding ? { step: "fund", address: onboarding.address, balanceCents: 0 } : null);
+  const [wizard, setWizard] = useState<Wizard | null>(null);
   const [wallet, setWallet] = useState<WalletInfo>({});
   const [tick, setTick] = useState(0);
   const [exiting, setExiting] = useState(false);
@@ -114,7 +111,29 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
 
   useEffect(() => {
     push({ kind: "banner", text: "" });
-    void refreshWallet();
+    // First render never waits on the network: vendors, wallet balance, and
+    // catalogs initialize concurrently in the background after paint.
+    if (stateRef.current.testMode) {
+      void refreshWallet();
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      await warmStartEconomy();
+      const summary = await walletSummary().catch(() => undefined);
+      if (cancelled) {
+        return;
+      }
+      setWallet({ label: "agentcash", balanceCents: summary?.totalCents });
+      if (summary?.address && (summary.totalCents === undefined || summary.totalCents === 0)) {
+        // The shared wallet exists but is unfunded: offer the deposit panel.
+        setWizard((current) => current ?? { step: "fund", address: summary.address as string, balanceCents: 0 });
+      }
+      setTick((value) => value + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -726,22 +745,8 @@ function indent(text: string): string {
 
 export async function startTui(options: { testMode?: boolean; testSeed?: string } = {}): Promise<void> {
   const testMode = options.testMode ?? envFlag("OPENCROWD_TEST_MODE");
-  // Start the connector MCP servers before the session so the shared
-  // AgentCash wallet exists (auto-created on first balance call) and the
-  // session budget can read its balance.
-  let onboarding: { address: string } | undefined;
-  if (!testMode) {
-    await warmStartEconomy();
-    try {
-      const wallet = await readAgentCashWallet();
-      const summary = wallet ? await walletSummary() : undefined;
-      if (wallet && (summary?.totalCents === undefined || summary.totalCents === 0)) {
-        onboarding = { address: wallet.address };
-      }
-    } catch {
-      onboarding = undefined;
-    }
-  }
+  // Session creation and config are local-only; the TUI paints immediately
+  // and everything network-touching initializes in the background.
   const session = await createOpenCrowdSession({
     workspaceRoot: process.cwd()
   });
@@ -752,7 +757,6 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
       initialTestMode={testMode}
       initialTestSeed={options.testSeed ?? process.env.OPENCROWD_TEST_SEED}
       defaultModel={`${config.provider}/${config[config.provider].model}`}
-      onboarding={onboarding}
     />,
     { exitOnCtrlC: false }
   );
