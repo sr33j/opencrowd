@@ -4,7 +4,6 @@ import OpenAI from "openai";
 import {
   appendLedgerEntry,
   budgetStatus,
-  chargeActiveTestWallet,
   completeSession,
   createDefaultPaidHttpClient,
   executeTool,
@@ -279,7 +278,6 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
           context.onProgress?.({ type: "reserving_spend", message: `Mock reserving ${costCents} cents` });
           const reservation = await reserveBudget(context.session, costCents);
           try {
-            await chargeActiveTestWallet(costCents);
             await finalizeReservation(context.session, reservation, costCents);
             context.onProgress?.({ type: "calling_service", message: `Mock calling ${resourceUrl}` });
             context.onProgress?.({ type: "saving_artifact", message: "Mock saving service response artifact" });
@@ -1276,7 +1274,6 @@ async function completeMockLlmCall(
   const started = Date.now();
   try {
     const response = await provider.complete(messages);
-    await chargeActiveTestWallet(costCents);
     await finalizeReservation(session, reservation, costCents);
     await appendLedgerEntry(session.ledgerPath, {
       session_id: session.sessionId,

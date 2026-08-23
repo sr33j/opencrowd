@@ -97,8 +97,7 @@ const openCrowdHarness: GaiaHarness = {
     const session = await createOpenCrowdSession({
       workspaceRoot: context.runDir,
       permissionMode: "yolo",
-      shellEnabled: true,
-      useWalletBalanceBudget: !context.testMode
+      shellEnabled: true
     });
     let prompt = context.prompt;
     if (context.attachmentPath) {

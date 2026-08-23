@@ -19,6 +19,8 @@ export interface OpenCrowdConfig {
   x402LlmMaxCostCents: number;
   /** Per-request LLM timeout; reasoning models can think for minutes. */
   x402LlmTimeoutMs: number;
+  /** Default cumulative session spend cap in cents; local policy, not funds. */
+  defaultBudgetCents: number;
   modelPolicy: ModelPolicy;
   x402PaymentAsset: string;
   x402PaymentNetwork: string;
@@ -39,6 +41,7 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   x402LlmModel: DEFAULT_LLM_MODEL,
   x402LlmMaxCostCents: 100,
   x402LlmTimeoutMs: 600_000,
+  defaultBudgetCents: 2000,
   modelPolicy: DEFAULT_MODEL_POLICY,
   x402PaymentAsset: "USDC",
   x402PaymentNetwork: "base"
@@ -57,14 +60,6 @@ export function configPath(): string {
 
 export function permissionsPath(): string {
   return join(configDir(), "permissions.json");
-}
-
-export function walletsPath(): string {
-  return join(configDir(), "wallets.json");
-}
-
-export function walletSecretsPath(): string {
-  return join(configDir(), "wallet-secrets.json");
 }
 
 export async function loadConfig(): Promise<OpenCrowdConfig> {

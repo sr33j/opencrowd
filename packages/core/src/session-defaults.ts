@@ -1,15 +1,17 @@
+import { loadConfig } from "./config.js";
 import { createSession } from "./session.js";
-import { walletBalance } from "./ows.js";
 import type { PermissionMode, SessionOptions, SessionState } from "./types.js";
 
-export interface OpenCrowdSessionOptions extends SessionOptions {
-  useWalletBalanceBudget?: boolean;
-}
+export type OpenCrowdSessionOptions = SessionOptions;
 
+/**
+ * Session creation is local-only: the default budget cap comes from
+ * configuration, never from a live wallet-balance lookup.
+ */
 export async function createOpenCrowdSession(options: OpenCrowdSessionOptions = {}): Promise<SessionState> {
-  const budgetCents = options.budgetCents ?? envCents("OPENCROWD_BUDGET_CENTS") ?? (
-    options.useWalletBalanceBudget === false ? 0 : await activeWalletBudgetCents()
-  );
+  const budgetCents = options.budgetCents
+    ?? envCents("OPENCROWD_BUDGET_CENTS")
+    ?? (await loadConfig()).defaultBudgetCents;
   return createSession({
     ...options,
     budgetCents,
@@ -32,23 +34,6 @@ function defaultShellEnabled(): boolean {
     return false;
   }
   return true;
-}
-
-const DEFAULT_BUDGET_CAP_CENTS = 2000;
-
-async function activeWalletBudgetCents(): Promise<number> {
-  try {
-    const balance = await walletBalance();
-    if (balance.spendable_balance_cents !== undefined) {
-      return Math.min(DEFAULT_BUDGET_CAP_CENTS, Math.max(0, balance.spendable_balance_cents));
-    }
-    const parsed = Number(balance.spendable_balance);
-    return Number.isFinite(parsed)
-      ? Math.min(DEFAULT_BUDGET_CAP_CENTS, Math.max(0, Math.floor(parsed * 100)))
-      : 0;
-  } catch {
-    return 0;
-  }
 }
 
 function envCents(name: string): number | undefined {

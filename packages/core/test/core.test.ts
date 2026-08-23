@@ -8,24 +8,20 @@ import {
   assertServiceAllowed,
   blockService,
   callPaidService,
-  chooseFruitLabel,
   clearConversation,
   compactConversationIfNeeded,
   appendConversationMessage,
   readConversationMessages,
-  createTestWallet,
   createOpenCrowdSession,
   createSession,
-  FRUIT_LABELS,
-  fundActiveTestWallet,
   listArtifacts,
-  listStoredWallets,
   normalizeLlmModels,
   appendLedgerEntry,
   compatiblePaymentHeader,
   VeniceWalletPaidHttpClient,
   normalizeBazaarResponse,
   openCrowdToolDefinition,
+  readAgentCashWallet,
   readLedger,
   removeAllowedService,
   reserveBudget,
@@ -34,11 +30,8 @@ import {
   saveArtifact,
   setPreferredLlmModel,
   updateConfig,
-  walletList,
   walletAddress,
-  walletBalance,
   runShell,
-  type OpenCrowdConfig,
   type PaymentAdapter
 } from "../src/index.js";
 
@@ -55,7 +48,7 @@ process.env.AGENTCASH_WALLET_PATH = "/nonexistent/agentcash-wallet.json";
 
 afterEach(async () => {
   delete process.env.OPENCROWD_CONFIG_DIR;
-  delete process.env.OPENCROWD_WALLET_SECRET_STORE;
+  process.env.AGENTCASH_WALLET_PATH = "/nonexistent/agentcash-wallet.json";
   await Promise.all(tmpRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -72,26 +65,25 @@ describe("budget accounting", () => {
 });
 
 describe("OpenCrowd session defaults", () => {
-  it("defaults to ask_first mode, CLI shell access, and wallet-balance budget", async () => {
+  it("defaults to ask_first mode, shell access, and the configured budget cap without any network lookup", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await createTestWallet("mango", 1234);
 
-    const session = await createOpenCrowdSession({ workspaceRoot: root});
+    const session = await createOpenCrowdSession({ workspaceRoot: root });
 
     expect(session.permissionMode).toBe("ask_first");
     expect(session.shellEnabled).toBe(true);
-    expect(session.budgetCents).toBe(1234);
+    expect(session.budgetCents).toBe(2000);
   });
 
-  it("caps the default budget at $20 even when the wallet balance is larger", async () => {
+  it("uses the configured default budget cap", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await createTestWallet("papaya", 50_000);
+    await updateConfig({ defaultBudgetCents: 750 });
 
-    const session = await createOpenCrowdSession({ workspaceRoot: root});
+    const session = await createOpenCrowdSession({ workspaceRoot: root });
 
-    expect(session.budgetCents).toBe(2000);
+    expect(session.budgetCents).toBe(750);
   });
 });
 
@@ -107,29 +99,31 @@ describe("tool definitions", () => {
   });
 });
 
-describe("wallet registry", () => {
-  it("assigns unused fruit labels and falls back after fruit exhaustion", () => {
-    expect(FRUIT_LABELS.length).toBeGreaterThanOrEqual(100);
-    expect(chooseFruitLabel(["durian", "mango"])).not.toMatch(/^(durian|mango)$/);
-    expect(chooseFruitLabel([...FRUIT_LABELS])).toBe("fruit-1");
+describe("AgentCash wallet contract", () => {
+  it("reads the shared AgentCash wallet file when present", async () => {
+    const root = await tempRoot();
+    const walletPath = join(root, "wallet.json");
+    await writeFile(walletPath, JSON.stringify({
+      address: "0x1111111111111111111111111111111111111111",
+      privateKey: "0x59c6995e998f97a5a0044966f094538f89d8f907357e22278c4cfeabf7c5d1c6"
+    }));
+    process.env.AGENTCASH_WALLET_PATH = walletPath;
+
+    await expect(readAgentCashWallet()).resolves.toMatchObject({
+      address: "0x1111111111111111111111111111111111111111"
+    });
+    await expect(walletAddress()).resolves.toEqual({
+      address: "0x1111111111111111111111111111111111111111",
+      network: "base",
+      asset: "USDC"
+    });
   });
 
-  it("lists and funds active test wallets", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    await createTestWallet("passionfruit", 100);
-    await fundActiveTestWallet(25);
+  it("fails with an installation hint when no AgentCash wallet exists", async () => {
+    process.env.AGENTCASH_WALLET_PATH = "/nonexistent/agentcash-wallet.json";
 
-    await expect(walletBalance()).resolves.toMatchObject({
-      account: "passionfruit",
-      spendable_balance_cents: 125
-    });
-    await expect(walletList()).resolves.toContainEqual(expect.objectContaining({
-      label: "passionfruit",
-      active: true,
-      spendable_balance_cents: 125
-    }));
-    await expect(listStoredWallets()).resolves.toHaveLength(1);
+    await expect(readAgentCashWallet()).resolves.toBeUndefined();
+    await expect(walletAddress()).rejects.toThrow("No AgentCash wallet found");
   });
 });
 
@@ -475,27 +469,6 @@ describe("paid x402 calls", () => {
 });
 
 describe("OWS wallet helpers", () => {
-  it("reads active test wallet address and balance", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const wallet = await createTestWallet("lychee", 1234);
-
-    await expect(walletAddress()).resolves.toEqual({
-      account: "lychee",
-      address: wallet.address,
-      network: "mock-base",
-      asset: "mock-USDC"
-    });
-    await expect(walletBalance()).resolves.toEqual({
-      account: "lychee",
-      address: wallet.address,
-      network: "mock-base",
-      asset: "mock-USDC",
-      spendable_balance: "12.34",
-      spendable_balance_cents: 1234
-    });
-  });
-
   it("wraps legacy signed payments in the Coinbase x402 v2 envelope", () => {
     const flatHeader = Buffer.from(JSON.stringify({
       x402Version: 2,

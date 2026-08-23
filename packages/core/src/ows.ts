@@ -1,19 +1,12 @@
 import { VeniceClient } from "venice-x402-client";
 import { SiweMessage } from "siwe";
-import { createPublicClient, createWalletClient, erc20Abi, formatUnits, http, parseUnits } from "viem";
+import { createPublicClient, erc20Abi, formatUnits, http } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { base } from "viem/chains";
 import { createPaymentHeader } from "x402/client";
 import { createSigner } from "x402/types";
 import { loadConfig } from "./config.js";
-import {
-  activeStoredWallet,
-  listStoredWallets,
-  privateKeyForStoredWallet,
-  setActiveStoredWallet,
-  type StoredWallet,
-  type WalletListEntry
-} from "./wallets.js";
+import { requireAgentCashWallet } from "./agentcash.js";
 
 export interface PaymentRequest {
   resourceUrl: string;
@@ -53,7 +46,6 @@ export interface PaidHttpClient {
 }
 
 export interface PaymentWallet extends PaidHttpClient {
-  kind: "local-evm" | "agentic-wallet";
   address(): Promise<WalletAddress>;
   balance(): Promise<WalletBalance>;
 }
@@ -69,7 +61,6 @@ export interface PaymentAdapter {
 }
 
 export class VeniceWalletPaidHttpClient implements PaymentWallet {
-  readonly kind = "local-evm" as const;
   private readonly client: VeniceClient;
   private readonly timeoutMs: number;
 
@@ -138,7 +129,6 @@ export class VeniceWalletPaidHttpClient implements PaymentWallet {
 
   async address(): Promise<WalletAddress> {
     return {
-      account: "local-evm",
       address: this.client.address,
       network: "base",
       asset: "USDC"
@@ -151,7 +141,6 @@ export class VeniceWalletPaidHttpClient implements PaymentWallet {
       this.client.getBalance().catch(() => undefined)
     ]);
     return {
-      account: "local-evm",
       address: this.client.address,
       network: "base",
       asset: "USDC",
@@ -169,47 +158,20 @@ export async function createDefaultPaidHttpClient(): Promise<PaymentWallet> {
   return activePaymentWallet();
 }
 
+/** The one payment wallet: AgentCash's, signing via the shared key. */
 export async function activePaymentWallet(): Promise<PaymentWallet> {
-  const wallet = await activeStoredWallet();
-  if (wallet.kind === "test") {
-    throw new Error("Active wallet is a test wallet. Test wallets can only be used with --test-mode mock LLM and mock x402 services.");
-  }
+  const wallet = await requireAgentCashWallet();
   const config = await loadConfig();
-  return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet), { timeoutMs: config.x402LlmTimeoutMs });
-}
-
-export async function walletInit(): Promise<Record<string, unknown>> {
-  const active = await activeWalletSummary().catch((error) => ({ error: (error as Error).message }));
-  const wallets = await walletList().catch(() => []);
-  return {
-    configured: !("error" in active),
-    active_wallet: active,
-    wallets,
-    next_steps: wallets.length === 0
-      ? ["Run `opencrowd wallet new` to create a fresh OpenCrowd wallet."]
-      : ["Run `opencrowd wallet list` to see wallets and balances."]
-  };
-}
-
-export async function walletStatus(): Promise<Record<string, unknown>> {
-  const active = await activeWalletSummary().catch((error) => ({ error: (error as Error).message }));
-  const wallets = await listStoredWallets();
-  return {
-    configured: !("error" in active),
-    active_wallet: active,
-    wallet_count: wallets.length
-  };
+  return new VeniceWalletPaidHttpClient(wallet.privateKey, { timeoutMs: config.x402LlmTimeoutMs });
 }
 
 export interface WalletAddress {
-  account: string;
   address: string;
   network: string;
   asset: string;
 }
 
 export interface WalletBalance {
-  account: string;
   address?: string;
   network: string;
   asset: string;
@@ -222,105 +184,12 @@ export interface WalletBalance {
 }
 
 export async function walletAddress(): Promise<WalletAddress> {
-  const wallet = await activeStoredWallet();
-  return walletAddressFromStored(wallet);
+  const wallet = await requireAgentCashWallet();
+  return { address: wallet.address, network: "base", asset: "USDC" };
 }
 
 export async function walletBalance(): Promise<WalletBalance> {
-  const wallet = await activeStoredWallet();
-  return walletBalanceFromStored(wallet);
-}
-
-export async function walletList(): Promise<WalletListEntry[]> {
-  const rows = await listStoredWallets();
-  return Promise.all(rows.map(async (wallet) => ({
-    ...wallet,
-    ...(await walletBalanceFromStored(wallet).catch((error) => ({
-      spendable_balance: `error: ${(error as Error).message}`
-    })))
-  })));
-}
-
-export interface UsdcSendResult {
-  tx_hash: string;
-  from: string;
-  to: string;
-  amount_usdc: number;
-  network: "base";
-}
-
-/**
- * Send USDC from the active wallet by signing a plain ERC-20 transfer with
- * the shared key. Requires a little Base ETH for gas at the wallet address
- * (x402 payments are gasless via EIP-3009, but direct transfers are not).
- */
-export async function sendUsdc(to: string, amountUsdc: number): Promise<UsdcSendResult> {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
-    throw new Error("recipient must be a 0x-prefixed EVM address");
-  }
-  if (!Number.isFinite(amountUsdc) || amountUsdc <= 0) {
-    throw new Error("amount must be greater than zero");
-  }
-  const wallet = await activeStoredWallet();
-  if (wallet.kind === "test") {
-    throw new Error("test wallets cannot send real USDC");
-  }
-  const account = privateKeyToAccount(await privateKeyForStoredWallet(wallet));
-  const transport = http(process.env.OPENCROWD_BASE_RPC_URL ?? "https://mainnet.base.org");
-  const publicClient = createPublicClient({ chain: base, transport });
-  const amountAtomic = parseUnits(amountUsdc.toFixed(6), 6);
-  const [ethBalance, usdcBalance] = await Promise.all([
-    publicClient.getBalance({ address: account.address }),
-    publicClient.readContract({ address: BASE_USDC_ADDRESS, abi: erc20Abi, functionName: "balanceOf", args: [account.address] })
-  ]);
-  if (usdcBalance < amountAtomic) {
-    throw new Error(`insufficient USDC: have ${formatUnits(usdcBalance, 6)}, sending ${amountUsdc.toFixed(6)}`);
-  }
-  if (ethBalance === 0n) {
-    throw new Error([
-      `the wallet has no Base ETH for gas.`,
-      `Deposit ~$0.20 of ETH on Base to ${account.address} once, and sends will work from then on.`,
-      "(x402 payments stay gasless and are unaffected.)"
-    ].join(" "));
-  }
-  const walletClient = createWalletClient({ account, chain: base, transport });
-  const txHash = await walletClient.writeContract({
-    address: BASE_USDC_ADDRESS,
-    abi: erc20Abi,
-    functionName: "transfer",
-    args: [to as `0x${string}`, amountAtomic]
-  });
-  await publicClient.waitForTransactionReceipt({ hash: txHash, timeout: 120_000 });
-  return { tx_hash: txHash, from: account.address, to, amount_usdc: amountUsdc, network: "base" };
-}
-
-export async function setActivePaymentWallet(wallet: string): Promise<{ wallet: string; address: string }> {
-  const next = await setActiveStoredWallet(wallet);
-  return { wallet: next.label, address: next.address };
-}
-
-function walletAddressFromStored(wallet: StoredWallet): WalletAddress {
-  return {
-    account: wallet.label,
-    address: wallet.address,
-    network: wallet.network,
-    asset: wallet.asset
-  };
-}
-
-async function walletBalanceFromStored(wallet: StoredWallet): Promise<WalletBalance> {
-  if (wallet.kind === "test") {
-    const cents = wallet.mock_balance_cents ?? 0;
-    return {
-      account: wallet.label,
-      address: wallet.address,
-      network: wallet.network,
-      asset: wallet.asset,
-      spendable_balance: (cents / 100).toFixed(2),
-      spendable_balance_cents: cents
-    };
-  }
-  return new VeniceWalletPaidHttpClient(await privateKeyForStoredWallet(wallet)).balance();
+  return (await activePaymentWallet()).balance();
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -688,15 +557,6 @@ function paymentChallengeSummary(challenge: unknown): string | undefined {
     return "x402 retry returned HTTP 402 without a parseable challenge";
   }
   return `x402 retry returned HTTP 402; challenge version ${parsed.x402Version}; accepts ${parsed.accepts.length}`;
-}
-
-async function activeWalletSummary(): Promise<Record<string, unknown>> {
-  const wallet = await activePaymentWallet();
-  return {
-    kind: wallet.kind,
-    address: await wallet.address(),
-    balance: await wallet.balance()
-  };
 }
 
 /**

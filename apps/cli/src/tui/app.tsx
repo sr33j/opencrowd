@@ -4,18 +4,15 @@ import {
   budgetStatus,
   clearConversation,
   createOpenCrowdSession,
-  ensureDefaultTestWallet,
   loadConfig,
   setPermissionMode,
   setSessionBudget,
   walletBalance,
-  walletList,
   type PermissionMode,
   type ProgressEvent,
   type SessionState
 } from "@opencrowd/core";
 import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } from "./funding.js";
-import { exportWalletSecret } from "@opencrowd/core";
 import { buildSessionSummary, type PermissionRequest } from "@opencrowd/agent-runtime";
 import { ensureMockRuntime, runPersistentAgentTask, warmStartEconomy, type ReplState } from "../agent-task.js";
 import { COMMANDS, matchCommands, runSlashCommand, type CommandResult } from "./commands.js";
@@ -39,8 +36,7 @@ type Item =
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 type Modal =
-  | { type: "permission"; request: PermissionRequest; resolve: (approved: boolean) => void }
-  | { type: "seed-export"; target: string; value: string; error?: string };
+  | { type: "permission"; request: PermissionRequest; resolve: (approved: boolean) => void };
 
 type Wizard =
   | { step: "fund"; address: string; qr?: string; balanceCents: number }
@@ -92,9 +88,8 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
 
   const refreshWallet = useCallback(async () => {
     try {
-      const wallets = await walletList();
-      const active = wallets.find((entry) => entry.active);
-      setWallet({ label: active?.label, balanceCents: active?.spendable_balance_cents });
+      const balance = await walletBalance();
+      setWallet({ label: "agentcash", balanceCents: balance.spendable_balance_cents });
     } catch {
       setWallet({});
     }
@@ -296,9 +291,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
         }
         await submitTask(result.task, result.overrides);
         return;
-      case "wallet-export":
-        setModal({ type: "seed-export", target: result.target, value: "" });
-        return;
     }
   }, [finalize, push, session, stdout, submitTask]);
 
@@ -380,29 +372,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
         }
         return;
       }
-    }
-    if (modal?.type === "seed-export") {
-      if (key.escape) {
-        setModal(null);
-        push({ kind: "note", text: "export cancelled" });
-        return;
-      }
-      if (isReturn) {
-        void handleModalSubmit();
-        return;
-      }
-      if (key.backspace || key.delete) {
-        setModal({ ...modal, value: modal.value.slice(0, -1) });
-        return;
-      }
-      if (char && !key.ctrl && !key.meta) {
-        const [first, hasNewline] = splitChunk(char);
-        setModal({ ...modal, value: modal.value + first });
-        if (hasNewline) {
-          void handleModalSubmit(modal.value + first);
-        }
-      }
-      return;
     }
     if (key.tab && key.shift) {
       toggleMode();
@@ -498,31 +467,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
     }
   });
 
-  const handleModalSubmit = useCallback(async (valueOverride?: string) => {
-    if (!modal || modal.type === "permission") {
-      return;
-    }
-    const submitted = valueOverride ?? modal.value;
-    if (modal.type === "seed-export") {
-      if (submitted.trim() !== "EXPORT") {
-        setModal({ ...modal, value: "", error: "type EXPORT exactly to reveal the seed phrase (esc to cancel)" });
-        return;
-      }
-      try {
-        const result = await exportWalletSecret(modal.target);
-        setModal(null);
-        push({ kind: "block", label: "Wallet seed phrase", text: [
-          `  label    ${result.wallet.label}`,
-          `  address  ${result.wallet.address}`,
-          `  mnemonic ${result.mnemonic}`
-        ].join("\n") });
-      } catch (error) {
-        setModal(null);
-        push({ kind: "error", text: (error as Error).message });
-      }
-    }
-  }, [modal, push, refreshWallet]);
-
   const budget = budgetStatus(session);
   const state = stateRef.current;
   const modeLabel = session.permissionMode;
@@ -534,7 +478,6 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
         {(item) => <TranscriptLine key={item.id} item={item} width={width} sessionId={session.sessionId} modeLabel={modeLabel} modelLabel={modelLabel} testMode={state.testMode} />}
       </Static>
       {modal?.type === "permission" ? <PermissionModal request={modal.request} /> : null}
-      {modal?.type === "seed-export" ? <SeedExportModal value={modal.value} error={modal.error} /> : null}
       {wizard?.step === "fund" ? <FundPanel address={wizard.address} qr={wizard.qr} spinnerFrame={spinnerFrame} /> : null}
       {wizard?.step === "done" ? <DonePanel funded={wizard.funded} budgetCents={wizard.budgetCents} /> : null}
       {busy ? (
@@ -706,18 +649,6 @@ function DonePanel({ funded, budgetCents }: { funded: boolean; budgetCents: numb
   );
 }
 
-function SeedExportModal({ value, error }: { value: string; error?: string }): React.ReactElement {
-  return (
-    <Box borderStyle="round" borderColor="red" flexDirection="column" paddingX={1} marginTop={1}>
-      <Text color="red" bold>Reveal seed phrase?</Text>
-      <Text>Anyone with the seed phrase can spend this wallet's funds.</Text>
-      {error ? <Text color="red">{error}</Text> : null}
-      <Text>Type EXPORT to continue: <Text inverse>{value || " "}</Text></Text>
-      <Text dimColor>esc to cancel</Text>
-    </Box>
-  );
-}
-
 function StatusBar({ walletLabel, walletBalanceCents, spentCents, remainingCents, model, mode, testMode, width }: {
   walletLabel?: string;
   walletBalanceCents?: number;
@@ -765,9 +696,6 @@ function indent(text: string): string {
 
 export async function startTui(options: { testMode?: boolean; testSeed?: string } = {}): Promise<void> {
   const testMode = options.testMode ?? envFlag("OPENCROWD_TEST_MODE");
-  if (testMode) {
-    await ensureDefaultTestWallet();
-  }
   // Start the connector MCP servers before the session so the shared
   // AgentCash wallet exists (auto-created on first balance call) and the
   // session budget can read its balance.
@@ -785,8 +713,7 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
     }
   }
   const session = await createOpenCrowdSession({
-    workspaceRoot: process.cwd(),
-    useWalletBalanceBudget: true
+    workspaceRoot: process.cwd()
   });
   const config = await loadConfig();
   const { waitUntilExit } = render(

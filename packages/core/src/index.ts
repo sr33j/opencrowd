@@ -1,3 +1,4 @@
+export * from "./agentcash.js";
 export * from "./artifacts.js";
 export * from "./bazaar.js";
 export * from "./budget.js";
@@ -14,5 +15,4 @@ export * from "./shell.js";
 export * from "./tool-definitions.js";
 export * from "./tools.js";
 export * from "./types.js";
-export * from "./wallets.js";
 export * from "./x402.js";

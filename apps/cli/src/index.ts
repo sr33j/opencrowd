@@ -5,16 +5,10 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
   addAllowedService,
-  appendLedgerEntry,
-  configDir,
   blockService,
   budgetStatus,
   clearConversation,
-  createTestWallet,
   createOpenCrowdSession,
-  ensureDefaultTestWallet,
-  exportWalletSecret,
-  fundActiveTestWallet,
   listLlmModels,
   listAllowedServices,
   loadConfig,
@@ -23,17 +17,11 @@ import {
   removeAllowedService,
   saveSession,
   searchServices,
-  setActivePaymentWallet,
   setPermissionMode,
   setPreferredLlmModel,
   setSessionBudget,
   walletAddress,
-  sendUsdc,
   walletBalance,
-  walletInit,
-  walletList,
-  walletStatus,
-  type LedgerStatus,
   type PermissionMode,
   type ProgressEvent,
   type ServiceCandidate,
@@ -107,7 +95,7 @@ async function main(argv: string[]): Promise<void> {
       await ledgerCommand(rest);
       return;
     case "wallet":
-      await walletCommand(rest, { testMode: rest.includes("--test-mode") || envFlag("OPENCROWD_TEST_MODE") });
+      await walletCommand(rest);
       return;
     case "models":
       await modelsCommand(rest);
@@ -127,14 +115,11 @@ async function main(argv: string[]): Promise<void> {
 
 async function repl(options: { testMode?: boolean; testSeed?: string } = {}): Promise<void> {
   const initialTestMode = options.testMode ?? envFlag("OPENCROWD_TEST_MODE");
-  if (initialTestMode) {
-    await ensureDefaultTestWallet();
-  } else {
+  if (!initialTestMode) {
     await warmStartEconomy();
   }
   const session = await createOpenCrowdSession({
-    workspaceRoot: process.cwd(),
-    useWalletBalanceBudget: true
+    workspaceRoot: process.cwd()
   });
   const rl = createInterface({ input, output });
   const state: ReplState = {
@@ -259,7 +244,6 @@ async function replCommand(session: SessionState, state: ReplState, inputLine: s
       }
       state.testMode = rest[0] === "on";
       if (state.testMode) {
-        await ensureDefaultTestWallet();
         ensureMockRuntime(state);
       }
       printValue("Test mode", { test_mode: state.testMode, test_seed: state.testSeed }, { pretty: renderKeyValues({ test_mode: state.testMode, test_seed: state.testSeed }) });
@@ -289,7 +273,7 @@ async function replCommand(session: SessionState, state: ReplState, inputLine: s
       await ledgerCommand(rest, session);
       return false;
     case "wallet":
-      await walletCommand(rest, { testMode: state.testMode, session });
+      await walletCommand(rest);
       return false;
     case "models":
       await modelsCommand(rest);
@@ -349,9 +333,7 @@ async function renderReplIntro(session: SessionState, state: ReplState): Promise
     style("Commands", "muted"),
     renderColumns([
       "/budget <usd>",
-      state.testMode
-        ? "/wallet new|list|status|address|balance|use|fund"
-        : "/wallet new|list|status|address|balance|use|send|export",
+      "/wallet address|balance",
       "/models list|set <model>",
       "/model <model>",
       "/test-mode on|off",
@@ -391,9 +373,7 @@ async function runCommand(args: string[]): Promise<void> {
   if (!task) {
     throw new Error("run requires a task string");
   }
-  if (testMode) {
-    await ensureDefaultTestWallet();
-  } else {
+  if (!testMode) {
     await warmStartEconomy();
   }
   const session = sessionId
@@ -402,8 +382,7 @@ async function runCommand(args: string[]): Promise<void> {
       workspaceRoot: process.cwd(),
       budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
       permissionMode: mode,
-      shellEnabled,
-      useWalletBalanceBudget: true
+      shellEnabled
     });
   if (sessionId) {
     if (budgetArg !== undefined) {
@@ -449,17 +428,14 @@ async function headlessRunCommand(args: string[]): Promise<void> {
   const budgetArg = readOption(args, "--budget");
   const maxTurnsArg = readOption(args, "--max-turns");
   const workspaceRoot = readOption(args, "--workspace") ?? process.cwd();
-  if (testMode) {
-    await ensureDefaultTestWallet();
-  } else {
+  if (!testMode) {
     await warmStartEconomy();
   }
   const session = await createOpenCrowdSession({
     workspaceRoot,
     budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
     permissionMode: "yolo",
-    shellEnabled: !args.includes("--disable-shell"),
-    useWalletBalanceBudget: true
+    shellEnabled: !args.includes("--disable-shell")
   });
   let task = prompt;
   if (attach) {
@@ -606,60 +582,12 @@ async function ledgerCommand(args: string[], currentSession?: SessionState): Pro
   });
 }
 
-async function walletCommand(args: string[], options: { testMode?: boolean; session?: SessionState } = {}): Promise<void> {
+/** Public wallet info only: the shared AgentCash wallet's address and balances. */
+async function walletCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
-  const testMode = options.testMode || args.includes("--test-mode");
-  args = args.filter((arg) => arg !== "--json" && arg !== "--test-mode");
-  const [action, subaction] = args;
-  if (action === "new") {
-    const label = subaction;
-    if (testMode) {
-      const wallet = await createTestWallet(label);
-      if (options.session) {
-        await syncSessionBudgetToActiveWallet(options.session);
-      }
-      printValue("Wallet", wallet, { json, pretty: renderKeyValues(asRecord(wallet)) });
-      return;
-    }
-    throw new Error([
-      "OpenCrowd uses the shared AgentCash wallet — it is created automatically and there is nothing to set up.",
-      "Run `opencrowd wallet address` to see where to deposit USDC."
-    ].join(" "));
-  }
-  if (action === "list") {
-    const wallets = await walletList();
-    const rows = wallets.map((wallet) => ({
-      active: wallet.active ? "*" : "",
-      label: wallet.active ? style(wallet.label, "bold") : wallet.label,
-      kind: wallet.kind,
-      balance: wallet.spendable_balance_cents,
-      asset: wallet.asset,
-      address: wallet.address
-    }));
-    printValue("Wallets", wallets, {
-      json,
-      pretty: renderTable(rows, [
-        ["active", ""],
-        ["label", "label"],
-        ["kind", "kind"],
-        ["balance", "balance"],
-        ["asset", "asset"],
-        ["address", "address"]
-      ])
-    });
-    return;
-  }
-  if (action === "init") {
-    const result = await walletInit();
-    printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
-    return;
-  }
-  if (action === "status") {
-    const result = await walletStatus();
-    printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
-    return;
-  }
-  if (action === "address") {
+  args = args.filter((arg) => arg !== "--json");
+  const [action] = args;
+  if (action === "address" || action === undefined) {
     const result = await walletAddress();
     printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
     return;
@@ -669,173 +597,9 @@ async function walletCommand(args: string[], options: { testMode?: boolean; sess
     printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
     return;
   }
-  if (action === "use" && subaction) {
-    const result = await setActivePaymentWallet(subaction);
-    if (testMode && options.session) {
-      await syncSessionBudgetToActiveWallet(options.session);
-    }
-    printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
-    return;
-  }
-  if (action === "fund" && subaction) {
-    if (!testMode) {
-      throw new Error("wallet fund is only available in --test-mode");
-    }
-    const amountCents = parseUsd(subaction);
-    const result = await fundActiveTestWallet(amountCents);
-    if (options.session) {
-      await syncSessionBudgetToActiveWallet(options.session);
-    }
-    printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
-    return;
-  }
-  if (action === "export" && subaction) {
-    if (json) {
-      throw new Error("wallet export cannot use --json because seed phrase export requires an interactive confirmation");
-    }
-    await confirmSeedPhraseExport();
-    const result = await exportWalletSecret(subaction);
-    printValue("Wallet seed phrase", {
-      label: result.wallet.label,
-      address: result.wallet.address,
-      mnemonic: result.mnemonic
-    }, {
-      pretty: renderKeyValues({
-        label: result.wallet.label,
-        address: result.wallet.address,
-        mnemonic: result.mnemonic
-      })
-    });
-    return;
-  }
-  if (action === "send") {
-    await walletSendCommand(args.slice(1), { testMode, session: options.session });
-    return;
-  }
-  throw new Error(testMode
-    ? "wallet supports new [label], list, status, address, balance, use <label|address>, fund <usd>"
-    : "wallet supports new [label], list, status, address, balance, use <label|address>, send <address> <usd> [--network base|tempo], export <label|address>");
+  throw new Error("wallet supports address, balance");
 }
 
-/**
- * Send USDC to any address by signing a plain ERC-20 transfer with the
- * shared wallet key. This is a financial action, not a paid service: no
- * CrowdCode check, no receipt, no review, and never an automatic replay.
- * The model has no send tool; sends are human-initiated and human-confirmed.
- */
-async function walletSendCommand(args: string[], options: { testMode?: boolean; session?: SessionState }): Promise<void> {
-  if (options.testMode) {
-    throw new Error("wallet send moves real USDC and is not available in --test-mode");
-  }
-  const network = readOption(args, "--network") ?? "base";
-  if (network !== "base") {
-    throw new Error("wallet send currently supports base only");
-  }
-  const positional = args.filter((arg, index) => !isConsumedOption(args, index, ["--network"]));
-  const [to, amountArg] = positional;
-  if (!to || !amountArg) {
-    throw new Error("wallet send requires an address and a USD amount: opencrowd wallet send <address> <usd>");
-  }
-  const amountCents = parseUsd(amountArg);
-  if (amountCents <= 0) {
-    throw new Error("amount must be greater than zero");
-  }
-  if (!input.isTTY) {
-    throw new Error("wallet send requires an interactive terminal to confirm the transfer");
-  }
-  const amountUsdc = amountCents / 100;
-  const balance = await walletBalance().catch(() => undefined);
-  console.log([
-    style("Confirm USDC transfer", "bold"),
-    renderKeyValues({
-      from: balance?.address,
-      to,
-      amount: `$${amountUsdc.toFixed(2)} USDC`,
-      network,
-      current_balance: balance?.spendable_balance ?? "unavailable"
-    }),
-    "This signs an on-chain transfer with your wallet key. It cannot be reversed."
-  ].join("\n"));
-  const rl = createInterface({ input, output });
-  try {
-    const answer = (await rl.question("Type SEND to confirm: ")).trim();
-    if (answer !== "SEND") {
-      throw new Error("transfer cancelled");
-    }
-  } finally {
-    rl.close();
-  }
-  try {
-    const result = await sendUsdc(to, amountUsdc);
-    await recordTransfer({ to, amountCents, network, txHash: result.tx_hash, status: "charged", session: options.session });
-    printValue("Transfer", result, {
-      pretty: renderKeyValues({
-        from: result.from,
-        to: result.to,
-        amount: `$${result.amount_usdc.toFixed(2)} USDC`,
-        network: result.network,
-        tx_hash: result.tx_hash
-      })
-    });
-  } catch (error) {
-    const message = (error as Error).message;
-    // A thrown wait-for-receipt is ambiguous; everything else failed before broadcast.
-    const ambiguous = /waitForTransactionReceipt|timed out/i.test(message);
-    await recordTransfer({
-      to,
-      amountCents,
-      network,
-      status: ambiguous ? "unknown" : "failed",
-      notes: message,
-      session: options.session
-    });
-    throw ambiguous
-      ? new Error(`transfer outcome is unknown: ${message}. Verify on-chain activity before retrying; transfers are never replayed automatically.`)
-      : error;
-  }
-}
-
-async function recordTransfer(entry: {
-  to: string;
-  amountCents: number;
-  network: string;
-  txHash?: string;
-  status: LedgerStatus;
-  notes?: string;
-  session?: SessionState;
-}): Promise<void> {
-  const record = {
-    timestamp: new Date().toISOString(),
-    type: "transfer",
-    to: entry.to,
-    amount_cents: entry.amountCents,
-    network: entry.network,
-    tx_hash: entry.txHash,
-    status: entry.status,
-    notes: entry.notes
-  };
-  await mkdir(configDir(), { recursive: true });
-  await appendFile(join(configDir(), "transfers.jsonl"), `${JSON.stringify(record)}\n`, "utf8");
-  if (entry.session) {
-    await appendLedgerEntry(entry.session.ledgerPath, {
-      session_id: entry.session.sessionId,
-      type: "transfer",
-      method: entry.network,
-      quoted_cost_cents: entry.amountCents,
-      charged_cost_cents: entry.status === "charged" ? entry.amountCents : 0,
-      status: entry.status,
-      permission_mode: entry.session.permissionMode,
-      tx_hash: entry.txHash,
-      notes: entry.notes ?? `USDC transfer to ${entry.to}`
-    });
-  }
-}
-
-async function syncSessionBudgetToActiveWallet(session: SessionState): Promise<void> {
-  const balance = await walletBalance();
-  const balanceCents = balance.spendable_balance_cents ?? Math.max(0, Math.floor(Number(balance.spendable_balance) * 100));
-  await setSessionBudget(session, session.spentCents + session.reservedCents + (Number.isFinite(balanceCents) ? balanceCents : 0));
-}
 
 async function modelsCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
@@ -908,22 +672,6 @@ async function evalsCommand(args: string[]): Promise<void> {
   console.log(renderGaiaReport(report));
 }
 
-async function confirmSeedPhraseExport(): Promise<void> {
-  if (!input.isTTY) {
-    throw new Error("wallet export requires an interactive terminal");
-  }
-  console.log("This will reveal the wallet seed phrase. Anyone with it can spend the wallet funds.");
-  const rl = createInterface({ input, output });
-  try {
-    const answer = (await rl.question("Type EXPORT to continue: ")).trim();
-    if (answer !== "EXPORT") {
-      throw new Error("wallet export cancelled");
-    }
-  } finally {
-    rl.close();
-  }
-}
-
 function printHelp(): void {
   console.log(`Usage:
   opencrowd                       interactive agent UI (first run walks you through wallet setup)
@@ -934,8 +682,7 @@ function printHelp(): void {
   opencrowd search [--json] "<query>"
   opencrowd permissions [--json] list|allow|remove|block
   opencrowd ledger [--json] show [--session <id>]
-  opencrowd wallet [--json] list|status|address|balance|use <label|agentcash>|send <address> <usd>|export <label|address>
-  opencrowd wallet --test-mode [--json] new [label]|list|status|address|balance|use <label|address>|fund <usd>
+  opencrowd wallet [--json] address|balance
   opencrowd models [--json] list|set <model>
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]`);
 }

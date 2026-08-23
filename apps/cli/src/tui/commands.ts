@@ -2,23 +2,16 @@ import {
   addAllowedService,
   blockService,
   budgetStatus,
-  createTestWallet,
-  ensureDefaultTestWallet,
-  fundActiveTestWallet,
   listAllowedServices,
   listLlmModels,
   loadConfig,
   readLedger,
   removeAllowedService,
-  setActivePaymentWallet,
   setPermissionMode,
   setPreferredLlmModel,
   setSessionBudget,
   walletAddress,
   walletBalance,
-  walletInit,
-  walletList,
-  walletStatus,
   type PermissionMode,
   type SessionState
 } from "@opencrowd/core";
@@ -42,7 +35,6 @@ export type CommandResult =
   | { kind: "clear" }
   | { kind: "exit" }
   | { kind: "run-task"; task: string; overrides: { budgetCents?: number; model?: string; testMode?: boolean; testSeed?: string } }
-  | { kind: "wallet-export"; target: string }
   | { kind: "help" };
 
 export interface CommandSpec {
@@ -56,7 +48,7 @@ export const COMMANDS: CommandSpec[] = [
   { name: "clear", usage: "/clear", summary: "Clear all previous conversation context" },
   { name: "budget", usage: "/budget <usd>", summary: "Set the local session spend cap" },
   { name: "mode", usage: "/mode ask_first|yolo|blocked", summary: "Set the permission mode (shift+tab toggles)" },
-  { name: "wallet", usage: "/wallet list|status|address|balance|use|fund|export", summary: "Inspect the shared wallet" },
+  { name: "wallet", usage: "/wallet address|balance", summary: "Inspect the shared AgentCash wallet" },
   { name: "models", usage: "/models list|set <model>", summary: "List or set the x402 LLM model" },
   { name: "model", usage: "/model <model>", summary: "Set the model for this session only" },
   { name: "run", usage: "/run [--budget <usd>] [--model <m>] \"<task>\"", summary: "Run a task with one-off overrides" },
@@ -139,7 +131,6 @@ export async function runSlashCommand(
       }
       state.testMode = rest[0] === "on";
       if (state.testMode) {
-        await ensureDefaultTestWallet();
         ensureMockRuntime(state);
       }
       return { kind: "text", label: "Test mode", body: renderKeyValues({ test_mode: state.testMode, test_seed: state.testSeed }) };
@@ -239,88 +230,22 @@ export async function runSlashCommand(
       };
     }
     case "wallet":
-      return walletSlashCommand(session, state, rest);
+      return walletSlashCommand(rest);
     default:
       throw new Error(`unknown slash command: /${command} (try /help)`);
   }
 }
 
-async function walletSlashCommand(session: SessionState, state: ReplState, args: string[]): Promise<CommandResult> {
-  const [action, subaction] = args;
-  if (action === "new") {
-    if (state.testMode) {
-      const wallet = await createTestWallet(subaction);
-      await syncSessionBudgetToActiveWallet(session);
-      return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(wallet)) };
-    }
-    return {
-      kind: "text",
-      label: "Wallet",
-      body: "  OpenCrowd uses the shared AgentCash wallet — it already exists, nothing to create.\n  Use /wallet address to see where to deposit USDC."
-    };
-  }
-  if (action === "list" || action === undefined) {
-    const wallets = await walletList();
-    const rows = wallets.map((wallet) => ({
-      active: wallet.active ? "*" : "",
-      label: wallet.label,
-      kind: wallet.kind,
-      balance: wallet.spendable_balance_cents,
-      asset: wallet.asset,
-      address: wallet.address
-    }));
-    return {
-      kind: "text",
-      label: "Wallets",
-      body: renderTable(rows, [
-        ["active", ""],
-        ["label", "label"],
-        ["kind", "kind"],
-        ["balance", "balance"],
-        ["asset", "asset"],
-        ["address", "address"]
-      ])
-    };
-  }
-  if (action === "init") {
-    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(await walletInit())) };
-  }
-  if (action === "status") {
-    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(await walletStatus())) };
-  }
-  if (action === "address") {
+/** Public wallet info only: the shared AgentCash wallet's address and balances. */
+async function walletSlashCommand(args: string[]): Promise<CommandResult> {
+  const [action] = args;
+  if (action === "address" || action === undefined) {
     return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(await walletAddress())) };
   }
   if (action === "balance") {
     return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(await walletBalance())) };
   }
-  if (action === "use" && subaction) {
-    const result = await setActivePaymentWallet(subaction);
-    if (state.testMode) {
-      await syncSessionBudgetToActiveWallet(session);
-    }
-    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(result)) };
-  }
-  if (action === "fund" && subaction) {
-    if (!state.testMode) {
-      throw new Error("/wallet fund is only available in test mode");
-    }
-    const result = await fundActiveTestWallet(parseUsd(subaction));
-    await syncSessionBudgetToActiveWallet(session);
-    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(result)) };
-  }
-  if (action === "export" && subaction) {
-    return { kind: "wallet-export", target: subaction };
-  }
-  throw new Error(state.testMode
-    ? "/wallet supports new [label], list, status, address, balance, use <label|address>, fund <usd>"
-    : "/wallet supports new [label], list, status, address, balance, use <label|address>, export <label|address>");
-}
-
-async function syncSessionBudgetToActiveWallet(session: SessionState): Promise<void> {
-  const balance = await walletBalance();
-  const balanceCents = balance.spendable_balance_cents ?? Math.max(0, Math.floor(Number(balance.spendable_balance) * 100));
-  await setSessionBudget(session, session.spentCents + session.reservedCents + (Number.isFinite(balanceCents) ? balanceCents : 0));
+  throw new Error("/wallet supports address, balance");
 }
 
 function isConsumed(args: string[], index: number, options: string[]): boolean {

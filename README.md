@@ -78,7 +78,7 @@ Inside the interactive UI (`/help` shows this live):
 | --- | --- |
 | `/budget <usd>` | Set the local session spend cap |
 | `/mode ask_first\|yolo\|blocked` | Set permission mode (shift+tab toggles) |
-| `/wallet list\|balance\|use\|fund\|export` | Manage the shared payment wallet |
+| `/wallet address\|balance` | Show the shared AgentCash wallet |
 | `/models list\|set <model>` | Pick the x402 LLM model |
 | `/search "<query>"` | Search the x402 service bazaar |
 | `/permissions list\|allow\|block <url>` | Manage allowed/blocked services |
@@ -93,14 +93,10 @@ opencrowd run --session <session-id> "Follow up on the previous result"
 opencrowd run --headless --prompt "..." --output json   # programmatic run contract
 opencrowd search --json "stock price"
 opencrowd wallet balance
-opencrowd wallet send 0x... 5.00 --network base          # send USDC anywhere (confirmed interactively)
 opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
 ```
 
-`wallet send` signs a plain ERC-20 USDC transfer with the shared wallet key
-(the wallet needs a one-time ~$0.20 ETH deposit for gas; x402 payments stay
-gasless). It requires an interactive confirmation and is never retried
-automatically. `evals gaia` runs the GAIA validation split
+`evals gaia` runs the GAIA validation split
 against OpenCrowd — and optionally Claude Code and Codex with the same prompt
 template and scorer — reporting accuracy and cost per question (OpenCrowd's
 cost is measured on-chain spend; comparators are estimates).
@@ -110,8 +106,7 @@ cost is measured on-chain spend; comparators are estimates).
 | What | Where |
 | --- | --- |
 | Config | `~/.config/opencrowd/config.json` |
-| Wallet metadata | `~/.config/opencrowd/wallets.json` (no secrets) |
-| Seed phrases | OS credential store (Keychain on macOS) |
+| Wallet | `~/.agentcash/wallet.json` (owned by AgentCash; never copied) |
 | Service permissions | `~/.config/opencrowd/permissions.json` |
 | Sessions, ledger, artifacts | `./sessions/<session-id>/` |
 

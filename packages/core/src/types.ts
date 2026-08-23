@@ -6,7 +6,6 @@ export type LedgerType =
   | "service_call"
   | "llm_call"
   | "wallet_top_up"
-  | "transfer"
   | "artifact"
   | "shell"
   | "session";
