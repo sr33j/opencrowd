@@ -436,27 +436,29 @@ describe("model resolution", () => {
 });
 
 describe("agent loop transcript", () => {
-  it("tells the agent about local CLI or MCP limits and service discovery", async () => {
+  it("advertises the gateway lifecycle when paid tools exist, and says paid services are unavailable otherwise", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
-    let firstMessages: LlmMessage[] | undefined;
-    const provider: LlmProvider = {
+    let systemPrompt = "";
+    const capture: LlmProvider = {
       async complete(messages): Promise<LlmResponse> {
-        firstMessages = messages;
+        systemPrompt = messages.find((message) => message.role === "system")?.content ?? "";
         return { content: "done", toolCalls: [] };
       }
     };
 
-    await runAgentTask(session, "host an app", { provider });
-
-    const systemPrompt = firstMessages?.find((message) => message.role === "system")?.content ?? "";
-    expect(systemPrompt).toContain("CLI or MCP-backed");
+    await runAgentTask(session, "host an app", { provider: capture });
     expect(systemPrompt).toContain("personal machine");
-    expect(systemPrompt).toContain("installed tools");
-    expect(systemPrompt).toContain("process lifetime");
-    expect(systemPrompt).toContain("When the local or hosted computer is not the right environment");
-    expect(systemPrompt).toContain("use search_services");
-    expect(systemPrompt).toContain("superpower");
+    expect(systemPrompt).toContain("Paid external services are unavailable in this run");
+
+    const session2 = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    await runAgentTask(session2, "host an app", {
+      provider: capture,
+      dynamicTools: { definitions: [], execute: async () => ({ ok: true, data: {} }) }
+    });
+    expect(systemPrompt).toContain("inspect_paid_service");
+    expect(systemPrompt).toContain("review_paid_service");
+    expect(systemPrompt).toContain("enforced in code");
   });
 
   it("includes budget snapshots on every tool result message", async () => {
@@ -495,87 +497,6 @@ describe("agent loop transcript", () => {
   });
 });
 
-describe("mock test mode", () => {
-  it("counts mock tool turns from the latest user prompt instead of all history", async () => {
-    const provider = new MockLlmProvider({
-      seed: "history-seed",
-      tools: ["get_budget_status"],
-      endProbability: 1
-    });
-    const response = await provider.complete([
-      { role: "user", content: "old task" },
-      { role: "assistant", content: "", toolCalls: [{ id: "old_call", name: "get_budget_status", arguments: {} }] },
-      { role: "tool", toolCallId: "old_call", content: "{}" },
-      { role: "user", content: "new task" }
-    ]);
-
-    expect(response.toolCalls).toHaveLength(1);
-    expect(response.toolCalls[0]).toMatchObject({ name: "get_budget_status" });
-  });
-
-  it("runs the full agent loop with mock service search and zero spend", async () => {
-    const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
-    const persisted: LlmMessage[] = [];
-    const toolExecutor = createMockToolExecutor();
-
-    const rawSearch = await toolExecutor("search_services", { query: "mock", limit: 10 }, { session });
-    expect(rawSearch.data).toHaveLength(10);
-
-    const output = await runAgentTask(session, "find a mock service", {
-      provider: new MockLlmProvider({
-        seed: "search-seed",
-        tools: ["search_services"],
-        endProbability: 1
-      }),
-      toolExecutor,
-      onMessage: (message) => {
-        persisted.push(message);
-      }
-    });
-
-    expect(output).toContain("Total spent: $0.02");
-    expect(output).toContain("External service spend: $0.00");
-    const toolMessage = persisted.find((message) => message.role === "tool");
-    const payload = JSON.parse(toolMessage?.content ?? "{}") as Record<string, unknown>;
-    const result = payload.result as { data?: unknown[] } | undefined;
-    expect(result?.data).toHaveLength(8);
-    expect(result?.data?.[0]).toMatchObject({
-      resource_url: MOCK_X402_SERVICES[0].resource_url,
-      title: MOCK_X402_SERVICES[0].title
-    });
-    const rows = await readLedger(session.ledgerPath);
-    expect(rows.filter((row) => row.type === "llm_call")).toHaveLength(2);
-    expect(rows.filter((row) => row.type === "service_call")).toHaveLength(0);
-  });
-
-  it("mocks call_service output and records a charged service ledger row", async () => {
-    const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
-
-    const output = await runAgentTask(session, "call a mock service", {
-      provider: new MockLlmProvider({
-        seed: "call-service-seed",
-        tools: ["call_service"],
-        endProbability: 1
-      }),
-      toolExecutor: createMockToolExecutor()
-    });
-
-    expect(output).toContain("Total spent:");
-    expect(output).toContain("Purchased services:");
-    const rows = await readLedger(session.ledgerPath);
-    expect(rows).toContainEqual(expect.objectContaining({
-      type: "service_call",
-      status: "charged",
-      notes: "mock test mode service call"
-    }));
-    const serviceRow = rows.find((row) => row.type === "service_call");
-    expect(Number(serviceRow?.charged_cost_cents ?? 0)).toBeGreaterThan(0);
-    expect(session.spentCents).toBeGreaterThan(0);
-  });
-});
-
 describe("terminal rendering", () => {
   it("renders pretty progress rows with truncation and color disabled", () => {
     expect(renderProgress({
@@ -605,95 +526,6 @@ describe("terminal rendering", () => {
     });
 
     expect(output).toBe("Done.\nsummary: spent $0.12, remaining $0.88, services 1, $0.07, artifacts 1");
-  });
-});
-
-describe("human-in-the-loop permission gate", () => {
-  function permissionSeekingProvider(onSecondTurn: (toolMessage: LlmMessage) => void): LlmProvider {
-    return {
-      async complete(messages: LlmMessage[]): Promise<LlmResponse> {
-        const toolMessages = messages.filter((message) => message.role === "tool");
-        if (toolMessages.length === 0) {
-          return {
-            content: "",
-            toolCalls: [{
-              id: "call_1",
-              name: "request_service_permission",
-              arguments: { resource_url: "https://svc.example/api", reason: "needed for the task", caps: { max_cost_cents: 5 } }
-            }]
-          };
-        }
-        onSecondTurn(toolMessages[0]!);
-        return { content: "finished", toolCalls: [] };
-      }
-    };
-  }
-
-  it("never records the permission and tells the model when the user denies", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-    const seen: string[] = [];
-    let executorCalls = 0;
-    let denialReachedModel = false;
-    const provider = permissionSeekingProvider((toolMessage) => {
-      denialReachedModel = toolMessage.content.includes("user denied permission");
-    });
-
-    const result = await runAgentTask(session, "buy the thing", {
-      provider,
-      toolExecutor: async () => {
-        executorCalls += 1;
-        return { ok: true, data: {} };
-      },
-      onPermissionRequest: async (request) => {
-        seen.push(request.resource_url);
-        return false;
-      }
-    });
-
-    expect(seen).toEqual(["https://svc.example/api"]);
-    expect(executorCalls).toBe(0);
-    expect(denialReachedModel).toBe(true);
-    expect(result).toContain("finished");
-  });
-
-  it("executes the permission tool when the user approves", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-    let executorCalls = 0;
-    const provider = permissionSeekingProvider(() => {});
-
-    await runAgentTask(session, "buy the thing", {
-      provider,
-      toolExecutor: async (name) => {
-        executorCalls += 1;
-        expect(name).toBe("request_service_permission");
-        return { ok: true, data: { resource_url: "https://svc.example/api", mode: "ask_first" } };
-      },
-      onPermissionRequest: async () => true
-    });
-
-    expect(executorCalls).toBe(1);
-  });
-
-  it("records permission requests directly when no approval hook is set", async () => {
-    const root = await tempRoot();
-    process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-    let executorCalls = 0;
-    const provider = permissionSeekingProvider(() => {});
-
-    await runAgentTask(session, "buy the thing", {
-      provider,
-      toolExecutor: async () => {
-        executorCalls += 1;
-        return { ok: true, data: {} };
-      }
-    });
-
-    expect(executorCalls).toBe(1);
   });
 });
 
@@ -733,6 +565,51 @@ describe("connector dynamic tools", () => {
     expect(executed).toEqual([{ name: "agentcash_fetch", args: { url: "https://api.paid.dev/x" } }]);
     expect(systemPrompt).toContain("HOUSE RULES MARKER");
     expect(systemPrompt).not.toContain("search_services");
+  });
+});
+
+describe("completion gating", () => {
+  it("nudges once, then stops deterministically while the completion gate blocks", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    let completions = 0;
+    const provider: LlmProvider = {
+      async complete(): Promise<LlmResponse> {
+        completions += 1;
+        return { content: "all done", toolCalls: [] };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "finish up", {
+      provider,
+      completionGate: async () => "a confirmed paid purchase still needs its required review"
+    });
+
+    expect(completions).toBe(2); // initial attempt + one nudge
+    expect(result.outcome).toBe("stopped");
+    expect(String(result.summary.final_message)).toContain("required review");
+  });
+
+  it("completes normally once the gate clears", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    let gateCalls = 0;
+    const provider: LlmProvider = {
+      async complete(): Promise<LlmResponse> {
+        return { content: "all done", toolCalls: [] };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "finish up", {
+      provider,
+      completionGate: async () => {
+        gateCalls += 1;
+        return gateCalls === 1 ? "review pending" : undefined;
+      }
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("all done");
   });
 });
 

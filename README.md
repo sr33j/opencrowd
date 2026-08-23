@@ -37,19 +37,19 @@ First launch is two steps — there is no wallet setup:
    reputation, and pays per call.
 
 ```text
-❯ find an x402 service that returns live weather and get today's forecast
+❯ find a service that returns live weather and get today's forecast
 
-  → search_services query="live weather forecast"
-  ← search_services found 7 candidates; top: WeatherStation ($0.02 USDC)
-  $ paid $0.02 → api.weatherstation.xyz (HTTP 200) · saved forecast.json
+  → find_paid_service "live weather forecast"
+  → inspect_paid_service POST api.weatherstation.xyz/forecast
+  $ paid $0.02 → api.weatherstation.xyz (paid_success) · saved forecast.json
+  → review_paid_service rating=5
 
   Today: 72°F, clear. Full forecast saved to artifacts.
   summary: spent $0.05, remaining $19.95, services 1, artifacts 1
 ```
 
-The LLM itself is paid the same way: OpenCrowd uses an x402-metered,
-OpenAI-compatible route funded from the same wallet — no API keys, no
-subscriptions.
+The LLM itself is paid from the same wallet: Venice inference runs on
+prepaid credit topped up with USDC — no API keys, no subscriptions.
 
 ## Safety model
 
@@ -80,8 +80,6 @@ Inside the interactive UI (`/help` shows this live):
 | `/mode ask_first\|yolo\|blocked` | Set permission mode (shift+tab toggles) |
 | `/wallet address\|balance` | Show the shared AgentCash wallet |
 | `/models list\|set <model>` | Pick the x402 LLM model |
-| `/search "<query>"` | Search the x402 service bazaar |
-| `/permissions list\|allow\|block <url>` | Manage allowed/blocked services |
 | `/ledger show` | Show this session's spend ledger |
 | `/summary` | Spend and artifacts so far |
 
@@ -91,7 +89,6 @@ One-shot and scripting forms:
 opencrowd run --budget 1.00 "Find a service and summarize options"
 opencrowd run --session <session-id> "Follow up on the previous result"
 opencrowd run --headless --prompt "..." --output json   # programmatic run contract
-opencrowd search --json "stock price"
 opencrowd wallet balance
 opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
 ```

@@ -42,7 +42,7 @@
   },
   "devDependencies": {
     "@opencrowd/agent-runtime": "0.1.0",
-    "@opencrowd/connectors": "0.1.0",
+    "@opencrowd/economy": "0.1.0",
     "@opencrowd/core": "0.1.0",
     "@opencrowd/evals": "0.1.0"
   },

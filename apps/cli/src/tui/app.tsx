@@ -5,15 +5,17 @@ import {
   clearConversation,
   createOpenCrowdSession,
   loadConfig,
+  readAgentCashWallet,
   setPermissionMode,
   setSessionBudget,
-  walletBalance,
   type PermissionMode,
   type ProgressEvent,
   type SessionState
 } from "@opencrowd/core";
+import type { ApprovalAnswer, ApprovalRequest } from "@opencrowd/economy";
 import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } from "./funding.js";
-import { buildSessionSummary, type PermissionRequest } from "@opencrowd/agent-runtime";
+import { buildSessionSummary } from "@opencrowd/agent-runtime";
+import { walletSummary } from "../wallet.js";
 import { ensureMockRuntime, runPersistentAgentTask, warmStartEconomy, type ReplState } from "../agent-task.js";
 import { COMMANDS, matchCommands, runSlashCommand, type CommandResult } from "./commands.js";
 import { envFlag, formatCents, shortUrl, truncateMiddle } from "../shared.js";
@@ -36,7 +38,7 @@ type Item =
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 type Modal =
-  | { type: "permission"; request: PermissionRequest; resolve: (approved: boolean) => void };
+  | { type: "approval"; request: ApprovalRequest; resolve: (answer: ApprovalAnswer) => void };
 
 type Wizard =
   | { step: "fund"; address: string; qr?: string; balanceCents: number }
@@ -88,9 +90,14 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
   }, []);
 
   const refreshWallet = useCallback(async () => {
+    if (stateRef.current.testMode) {
+      setWallet({ label: "demo", balanceCents: 2500 });
+      setTick((value) => value + 1);
+      return;
+    }
     try {
-      const balance = await walletBalance();
-      setWallet({ label: "agentcash", balanceCents: balance.spendable_balance_cents });
+      const summary = await walletSummary();
+      setWallet({ label: "agentcash", balanceCents: summary.totalCents });
     } catch {
       setWallet({});
     }
@@ -135,8 +142,8 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
     }
     const poll = async () => {
       try {
-        const balance = await walletBalance();
-        const cents = balance.spendable_balance_cents ?? Math.floor(Number(balance.spendable_balance) * 100);
+        const summary = await walletSummary();
+        const cents = summary.totalCents ?? Number.NaN;
         if (cancelled || !Number.isFinite(cents)) {
           return;
         }
@@ -189,8 +196,8 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
       case "calling_tool": {
         const summary = event.message.replace(/^Tool call: /, "");
         const data = event.data as { tool?: string; arguments?: Record<string, unknown> } | undefined;
-        if (data?.tool === "call_service") {
-          lastServiceUrlRef.current = String(data.arguments?.resource_url ?? "");
+        if (data?.tool === "call_paid_service") {
+          lastServiceUrlRef.current = String(data.arguments?.url ?? "");
         }
         push({ kind: "tool", text: summary });
         setActivity(summary);
@@ -199,12 +206,12 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
       case "tool_result": {
         const data = event.data as { tool?: string; ok?: boolean; error?: string; result?: Record<string, unknown> } | undefined;
         const summary = event.message.replace(/^Tool result: /, "");
-        if (data?.tool === "call_service" && data.ok && data.result) {
+        if (data?.tool === "call_paid_service" && data.ok && data.result) {
           const charged = Number(data.result.charged_cost_cents ?? 0);
-          const status = String(data.result.status ?? "?");
+          const outcome = String(data.result.outcome ?? "?");
           const artifact = data.result.artifact_path ? ` · saved ${String(data.result.artifact_path)}` : "";
           const host = lastServiceUrlRef.current ? shortUrl(lastServiceUrlRef.current) : "service";
-          push({ kind: "payment", text: `paid ${formatCents(charged)} → ${host} (HTTP ${status})${artifact}` });
+          push({ kind: "payment", text: charged > 0 ? `paid ${formatCents(charged)} → ${host} (${outcome})${artifact}` : `${outcome} → ${host}${artifact}` });
         } else if (data?.ok === false) {
           push({ kind: "tool-err", text: summary });
         } else {
@@ -242,14 +249,14 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
         mockToolExecutor: testMode ? state.mockToolExecutor : undefined,
         compactOutput: true,
         onProgress: handleProgress,
-        onPermissionRequest: (request) => new Promise<boolean>((resolve) => {
+        approvalHandler: (request) => new Promise<ApprovalAnswer>((resolve) => {
           setModal({
-            type: "permission",
+            type: "approval",
             request,
-            resolve: (approved) => {
+            resolve: (answer) => {
               setModal(null);
-              setActivity(approved ? "permission approved" : "permission denied");
-              resolve(approved);
+              setActivity(`approval: ${answer.decision.replace("_", " ")}`);
+              resolve(answer);
             }
           });
         })
@@ -357,11 +364,15 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
       }, 1500);
       return;
     }
-    if (modal?.type === "permission") {
+    if (modal?.type === "approval") {
       if (char === "y" || char === "Y") {
-        modal.resolve(true);
+        modal.resolve({ decision: "allow_once" });
+      } else if (char === "a" || char === "A") {
+        modal.resolve({ decision: "always_allow" });
+      } else if (char === "b" || char === "B") {
+        modal.resolve({ decision: "block" });
       } else if (char === "n" || char === "N" || key.escape) {
-        modal.resolve(false);
+        modal.resolve({ decision: "deny_once" });
       }
       return;
     }
@@ -483,7 +494,7 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
       <Static items={items}>
         {(item) => <TranscriptLine key={item.id} item={item} width={width} sessionId={session.sessionId} modeLabel={modeLabel} modelLabel={modelLabel} testMode={state.testMode} />}
       </Static>
-      {modal?.type === "permission" ? <PermissionModal request={modal.request} /> : null}
+      {modal?.type === "approval" ? <ApprovalModal request={modal.request} /> : null}
       {wizard?.step === "fund" ? <FundPanel address={wizard.address} qr={wizard.qr} spinnerFrame={spinnerFrame} /> : null}
       {wizard?.step === "done" ? <DonePanel funded={wizard.funded} budgetCents={wizard.budgetCents} /> : null}
       {busy ? (
@@ -605,15 +616,14 @@ function TranscriptLine({ item, width, sessionId, modeLabel, modelLabel, testMod
   }
 }
 
-function PermissionModal({ request }: { request: PermissionRequest }): React.ReactElement {
+function ApprovalModal({ request }: { request: ApprovalRequest }): React.ReactElement {
   return (
     <Box borderStyle="round" borderColor="yellow" flexDirection="column" paddingX={1} marginTop={1}>
-      <Text color="yellow" bold>Permission request — the agent wants to pay a new service</Text>
-      <Text>  service  <Text color="cyan">{request.resource_url}</Text></Text>
-      {request.reason ? <Text>  reason   {request.reason}</Text> : null}
-      {request.caps?.max_cost_cents !== undefined ? <Text>  max cost {formatCents(request.caps.max_cost_cents)} per call</Text> : null}
-      {request.caps?.session_max_cents !== undefined ? <Text>  max this session {formatCents(request.caps.session_max_cents)}</Text> : null}
-      <Text dimColor>  [y] approve · [n]/esc deny</Text>
+      <Text color="yellow" bold>Approval — the agent wants to pay a service</Text>
+      <Text>  service  <Text color="cyan">{request.endpoint}</Text></Text>
+      <Text>  method   {request.method} · up to {formatCents(request.quotedCostCents)}</Text>
+      {request.evidenceSummary ? <Text>  reputation {request.evidenceSummary}</Text> : null}
+      <Text dimColor>  [y] allow once · [a] always allow this service · [n]/esc deny · [b] block service</Text>
     </Box>
   );
 }
@@ -709,10 +719,10 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
   if (!testMode) {
     await warmStartEconomy();
     try {
-      const balance = await walletBalance();
-      const cents = balance.spendable_balance_cents ?? Math.floor(Number(balance.spendable_balance) * 100);
-      if (balance.address && (!Number.isFinite(cents) || cents === 0)) {
-        onboarding = { address: balance.address };
+      const wallet = await readAgentCashWallet();
+      const summary = wallet ? await walletSummary() : undefined;
+      if (wallet && (summary?.totalCents === undefined || summary.totalCents === 0)) {
+        onboarding = { address: wallet.address };
       }
     } catch {
       onboarding = undefined;

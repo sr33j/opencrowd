@@ -1,34 +1,25 @@
 import {
-  addAllowedService,
-  blockService,
   budgetStatus,
-  listAllowedServices,
   loadConfig,
+  readAgentCashWallet,
   readLedger,
-  removeAllowedService,
   setPermissionMode,
   setSessionBudget,
   updateConfig,
-  walletAddress,
-  walletBalance,
   type OpenCrowdConfig,
   type PermissionMode,
   type SessionState
 } from "@opencrowd/core";
 import { sharedTypedProvider } from "@opencrowd/agent-runtime";
+import { walletSummary } from "../wallet.js";
 import {
   asRecord,
-  formatCents,
-  formatServiceCandidate,
-  optionCents,
   parseUsd,
   readOption,
   renderKeyValues,
   renderTable,
-  shortUrl,
   splitArgs
 } from "../shared.js";
-import { searchServices } from "@opencrowd/core";
 import { ensureMockRuntime, type ReplState } from "../agent-task.js";
 
 export type CommandResult =
@@ -53,8 +44,6 @@ export const COMMANDS: CommandSpec[] = [
   { name: "models", usage: "/models list|set <model>", summary: "List or set the x402 LLM model" },
   { name: "model", usage: "/model <model>", summary: "Set the model for this session only" },
   { name: "run", usage: "/run [--budget <usd>] [--model <m>] \"<task>\"", summary: "Run a task with one-off overrides" },
-  { name: "search", usage: "/search \"<query>\"", summary: "Search the x402 service bazaar" },
-  { name: "permissions", usage: "/permissions list|allow|remove|block <url>", summary: "Manage allowed and blocked services" },
   { name: "ledger", usage: "/ledger show", summary: "Show this session's spend ledger" },
   { name: "summary", usage: "/summary [verbose]", summary: "Summarize spend and artifacts so far" },
   { name: "test-mode", usage: "/test-mode on|off", summary: "Toggle mock wallets, services, and LLM" },
@@ -180,51 +169,6 @@ export async function runSlashCommand(
         }
       };
     }
-    case "search": {
-      const query = rest.join(" ");
-      if (!query) {
-        throw new Error("/search requires a query");
-      }
-      const results = await searchServices(query);
-      const rows = results.map(formatServiceCandidate);
-      return {
-        kind: "text",
-        label: "Search results",
-        body: renderTable(rows, [["title", "title"], ["price", "price"], ["methods", "methods"], ["url", "url"]])
-      };
-    }
-    case "permissions": {
-      const [action, resourceUrl] = rest;
-      if (action === "list" || action === undefined) {
-        const permissions = await listAllowedServices();
-        return {
-          kind: "text",
-          label: "Permissions",
-          body: renderTable(permissions.map(asRecord), [
-            ["resource_url", "service"],
-            ["mode", "mode"],
-            ["max_cost_cents", "max"],
-            ["session_max_cents", "session max"]
-          ])
-        };
-      }
-      if (action === "allow" && resourceUrl) {
-        await addAllowedService(resourceUrl, {
-          max_cost_cents: optionCents(rest, "--max-cost"),
-          session_max_cents: optionCents(rest, "--session-max")
-        });
-        return { kind: "text", label: "Permissions", body: `  allowed ${shortUrl(resourceUrl)}` };
-      }
-      if (action === "remove" && resourceUrl) {
-        await removeAllowedService(resourceUrl);
-        return { kind: "text", label: "Permissions", body: `  removed ${shortUrl(resourceUrl)}` };
-      }
-      if (action === "block" && resourceUrl) {
-        await blockService(resourceUrl);
-        return { kind: "text", label: "Permissions", body: `  blocked ${shortUrl(resourceUrl)}` };
-      }
-      throw new Error("/permissions supports list, allow, remove, block");
-    }
     case "ledger": {
       const rows = await readLedger(session.ledgerPath);
       return {
@@ -251,10 +195,18 @@ export async function runSlashCommand(
 async function walletSlashCommand(args: string[]): Promise<CommandResult> {
   const [action] = args;
   if (action === "address" || action === undefined) {
-    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(await walletAddress())) };
+    const wallet = await readAgentCashWallet();
+    if (!wallet) {
+      throw new Error("No AgentCash wallet found. Install agentcash (its wallet is created automatically) and retry.");
+    }
+    return { kind: "text", label: "Wallet", body: renderKeyValues({ address: wallet.address, networks: "base, tempo, solana", asset: "USDC" }) };
   }
   if (action === "balance") {
-    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(await walletBalance())) };
+    const summary = await walletSummary();
+    if (summary.error) {
+      throw new Error(`wallet balance unavailable: ${summary.error}`);
+    }
+    return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(summary.raw ?? summary)) };
   }
   throw new Error("/wallet supports address, balance");
 }

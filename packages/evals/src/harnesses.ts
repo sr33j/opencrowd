@@ -17,7 +17,12 @@ import {
   type ResolvedSessionModels,
   type SubagentOptions
 } from "@opencrowd/agent-runtime";
-import { buildEconomyContext, sharedConnectorManager, type EconomyContext } from "@opencrowd/connectors";
+import {
+  EconomyGateway,
+  MockAgentCashAdapter,
+  MockCrowdCodeAdapter,
+  sharedEconomyRuntime
+} from "@opencrowd/economy";
 import { gradeTrajectoryFile, type ComplianceReport } from "./grader.js";
 import type { GaiaQuestion } from "./gaia.js";
 
@@ -108,7 +113,7 @@ const openCrowdHarness: GaiaHarness = {
       model: context.model,
       auto: context.auto
     });
-    const economy = context.testMode ? undefined : await tryEconomyContext(context.log);
+    const gateway = await buildEvalGateway(session, context);
     const result = await runAgentTaskDetailed(session, prompt, {
       llm: llm ? {
         provider: llm.provider,
@@ -125,8 +130,14 @@ const openCrowdHarness: GaiaHarness = {
         : fallbackContextWindowTokens("mock-test-mode"),
       provider: context.testMode ? new MockLlmProvider({ seed: context.testSeed ?? question.task_id }) : undefined,
       toolExecutor: context.testMode ? createMockToolExecutor() : undefined,
-      dynamicTools: economy?.dynamicTools,
-      promptSections: economy?.promptSections,
+      dynamicTools: gateway
+        ? { definitions: gateway.definitions(), execute: (name, args) => gateway.execute(name, args) }
+        : undefined,
+      completionGate: gateway
+        ? async () => (await gateway.hasPendingRequiredReviews())
+          ? "a confirmed paid purchase still needs its required review; submit it with review_paid_service"
+          : undefined
+        : undefined,
       onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
     });
     const budget = asRecord(result.summary.budget);
@@ -240,14 +251,32 @@ function subagentOptions(sessionId: string, llm: LlmRuntimeSelection): SubagentO
   };
 }
 
-async function tryEconomyContext(log: (message: string) => void): Promise<EconomyContext | undefined> {
+/**
+ * Evals run with auto approval: no interactive prompt exists, and the
+ * lifecycle (reputation, budget, receipts, reviews) still enforces itself.
+ */
+async function buildEvalGateway(session: Parameters<typeof runAgentTaskDetailed>[0], context: HarnessContext): Promise<EconomyGateway | undefined> {
+  if (context.testMode) {
+    return new EconomyGateway({
+      session,
+      agentcash: new MockAgentCashAdapter(),
+      crowdcode: new MockCrowdCodeAdapter(),
+      approvalMode: "auto"
+    });
+  }
   if (process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
     return undefined;
   }
   try {
-    return await buildEconomyContext(await sharedConnectorManager());
+    const runtime = await sharedEconomyRuntime();
+    return new EconomyGateway({
+      session,
+      agentcash: runtime.agentcash,
+      crowdcode: runtime.crowdcode,
+      approvalMode: "auto"
+    });
   } catch (error) {
-    log(`connector MCP servers unavailable (${(error as Error).message}); using the legacy service path`);
+    context.log(`AgentCash/CrowdCode vendors unavailable (${(error as Error).message}); paid services are unavailable this run`);
     return undefined;
   }
 }

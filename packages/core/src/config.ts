@@ -16,8 +16,7 @@ export interface ProviderModelDefaults {
 }
 
 export interface OpenCrowdConfig {
-  bazaarUrl: string;
-  /** Connector MCP servers; tools are ingested verbatim with a name prefix. Pin versions. */
+  /** Vendor MCP servers (AgentCash, CrowdCode). Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
   /** Default LLM provider for new sessions. */
   provider: "venice" | "openrouter";
@@ -31,15 +30,9 @@ export interface OpenCrowdConfig {
   veniceMaxTopUpCents: number;
   /** Default cumulative session spend cap in cents; local policy, not funds. */
   defaultBudgetCents: number;
-  x402PaymentAsset: string;
-  x402PaymentNetwork: string;
 }
 
-const COINBASE_BAZAAR_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
-const AGENTIC_MARKET_DEFAULT_URL = "https://api.agentic.market/v1/services";
-
 const DEFAULT_CONFIG: OpenCrowdConfig = {
-  bazaarUrl: COINBASE_BAZAAR_URL,
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
@@ -52,9 +45,7 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   llmTimeoutMs: 600_000,
   llmMaxCostCentsPerCall: 100,
   veniceMaxTopUpCents: 1000,
-  defaultBudgetCents: 2000,
-  x402PaymentAsset: "USDC",
-  x402PaymentNetwork: "base"
+  defaultBudgetCents: 2000
 };
 
 export function configDir(): string {
@@ -96,8 +87,5 @@ export async function updateConfig(patch: Partial<OpenCrowdConfig>): Promise<Ope
 }
 
 function normalizeConfig(config: OpenCrowdConfig): OpenCrowdConfig {
-  if (config.bazaarUrl === AGENTIC_MARKET_DEFAULT_URL) {
-    return { ...config, bazaarUrl: COINBASE_BAZAAR_URL };
-  }
   return config;
 }

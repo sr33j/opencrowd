@@ -1,48 +1,21 @@
-import { searchServices } from "./bazaar.js";
 import { budgetStatus, createSession } from "./session.js";
-import { addAllowedService, blockService, listAllowedServices, removeAllowedService, requestServicePermission } from "./permissions.js";
-import { callPaidService } from "./x402.js";
 import { listArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
 import { readLedger, appendLedgerEntry } from "./ledger.js";
 import { runShell } from "./shell.js";
 import type { ToolName } from "./tool-definitions.js";
-import type { ProgressEvent, ServiceCaps, SessionState, ToolResult } from "./types.js";
+import type { ProgressEvent, SessionState, ToolResult } from "./types.js";
 
 export interface ToolContext {
   session: SessionState;
   onProgress?: (event: ProgressEvent) => void;
 }
 
+/** Execute one built-in local tool. Paid tools live in the economy gateway. */
 export async function executeTool(name: ToolName, args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
   try {
     switch (name) {
-      case "search_services":
-        return ok(await searchServices(requiredString(args.query, "query"), {
-          maxBudgetCents: optionalInteger(args.max_budget_cents, "max_budget_cents"),
-          limit: optionalInteger(args.limit, "limit"),
-          onProgress: context.onProgress
-        }));
       case "get_budget_status":
         return ok(budgetStatus(context.session));
-      case "list_allowed_services":
-        return ok(await listAllowedServices());
-      case "add_allowed_service":
-        return ok(await addAllowedService(requiredString(args.resource_url, "resource_url"), caps(args.caps)));
-      case "remove_allowed_service":
-        await removeAllowedService(requiredString(args.resource_url, "resource_url"));
-        return ok({ removed: true });
-      case "block_service":
-        return ok(await blockService(requiredString(args.resource_url, "resource_url")));
-      case "request_service_permission":
-        return ok(await requestServicePermission(requiredString(args.resource_url, "resource_url"), requiredString(args.reason, "reason"), caps(args.caps)));
-      case "call_service":
-        return ok(await callPaidService(context.session, {
-          resource_url: requiredString(args.resource_url, "resource_url"),
-          method: optionalString(args.method, "method") ?? "POST",
-          quoted_cost_cents: requiredInteger(args.quoted_cost_cents, "quoted_cost_cents"),
-          content_type: optionalString(args.content_type, "content_type"),
-          body: args.body
-        }, { onProgress: context.onProgress }));
       case "save_file":
         return ok(await saveArtifact(context.session, requiredString(args.path, "path"), requiredString(args.content, "content"), objectValue(args.metadata)));
       case "read_file":
@@ -128,14 +101,6 @@ function optionalString(value: unknown, label: string): string | undefined {
   return value;
 }
 
-function requiredInteger(value: unknown, label: string): number {
-  const next = optionalInteger(value, label);
-  if (next === undefined) {
-    throw new Error(`${label} is required`);
-  }
-  return next;
-}
-
 function optionalInteger(value: unknown, label: string): number | undefined {
   if (value === undefined || value === null) {
     return undefined;
@@ -144,18 +109,6 @@ function optionalInteger(value: unknown, label: string): number | undefined {
     throw new Error(`${label} must be an integer`);
   }
   return value;
-}
-
-function caps(value: unknown): ServiceCaps {
-  if (value === undefined || value === null) {
-    return {};
-  }
-  const object = objectValue(value);
-  return {
-    max_cost_cents: optionalInteger(object?.max_cost_cents, "caps.max_cost_cents"),
-    session_max_cents: optionalInteger(object?.session_max_cents, "caps.session_max_cents"),
-    methods: Array.isArray(object?.methods) ? object.methods.map(String) : undefined
-  };
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {

@@ -11,7 +11,7 @@
       "path": "../../packages/core"
     },
     {
-      "path": "../../packages/connectors"
+      "path": "../../packages/economy"
     },
     {
       "path": "../../packages/agent-runtime"

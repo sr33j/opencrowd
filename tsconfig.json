@@ -8,9 +8,6 @@
       "path": "./packages/economy"
     },
     {
-      "path": "./packages/connectors"
-    },
-    {
       "path": "./packages/agent-runtime"
     },
     {

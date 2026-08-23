@@ -1,8 +1,6 @@
 export type PermissionMode = "ask_first" | "yolo" | "blocked";
 
 export type LedgerType =
-  | "search"
-  | "permission"
   | "service_call"
   | "llm_call"
   | "wallet_top_up"
@@ -64,34 +62,6 @@ export interface BudgetStatus {
   permission_mode: PermissionMode;
 }
 
-export interface ServiceCaps {
-  max_cost_cents?: number;
-  session_max_cents?: number;
-  methods?: string[];
-}
-
-export interface PermissionEntry {
-  resource_url: string;
-  mode: PermissionMode;
-  caps: ServiceCaps;
-  created_at: string;
-  updated_at: string;
-  notes?: string;
-}
-
-export interface ServiceCandidate {
-  resource_url: string;
-  title?: string;
-  description?: string;
-  methods: string[];
-  price_cents?: number;
-  price_display?: string;
-  currency?: string;
-  tags: string[];
-  score: number;
-  raw?: unknown;
-}
-
 export interface LedgerEntry {
   timestamp?: string;
   session_id: string;
@@ -121,13 +91,8 @@ export interface ArtifactRecord {
 
 export interface ProgressEvent {
   type:
-    | "searching"
-    | "ranking"
-    | "checking_budget"
-    | "checking_permission"
     | "requesting_permission"
     | "reserving_spend"
-    | "signing_with_ows"
     | "calling_llm"
     | "assistant_delta"
     | "calling_tool"
@@ -146,19 +111,3 @@ export interface ToolResult {
   error?: string;
 }
 
-export interface CallServiceInput {
-  resource_url: string;
-  method: string;
-  quoted_cost_cents: number;
-  content_type?: string;
-  body?: unknown;
-}
-
-export interface PaidCallResult {
-  status: number;
-  headers: Record<string, string>;
-  body: unknown;
-  charged_cost_cents: number;
-  tx_hash?: string;
-  artifact_path?: string;
-}

@@ -14,9 +14,7 @@ import {
   SUBAGENT_TOOL_NAMES,
   TOOL_NAMES,
   type ProgressEvent,
-  type ServiceCaps,
   type SessionState,
-  type ServiceCandidate,
   type ToolContext,
   type ToolResult,
   type ToolName
@@ -129,116 +127,17 @@ function lastUserMessageIndex(messages: LlmMessage[]): number {
   return -1;
 }
 
-export interface MockToolExecutorOptions {
-  services?: ServiceCandidate[];
-}
-
-export function createMockToolExecutor(options: MockToolExecutorOptions = {}): ToolExecutor {
-  const services = options.services ?? MOCK_X402_SERVICES;
+/**
+ * Local-tools-only mock executor for tests and demo mode. Paid capability in
+ * demo mode runs through the REAL economy gateway over in-memory mock
+ * adapters, so the enforced lifecycle is exercised, not simulated.
+ */
+export function createMockToolExecutor(): ToolExecutor {
   return async (name, args, context) => {
     try {
       switch (name) {
-        case "search_services": {
-          const limit = integerValue(args.limit) ?? services.length;
-          const maxBudgetCents = integerValue(args.max_budget_cents);
-          const query = stringValue(args.query) ?? "mock service";
-          context.onProgress?.({ type: "searching", message: `Mock searching Bazaar for "${query}"` });
-          context.onProgress?.({ type: "ranking", message: "Mock ranking service candidates" });
-          return ok(services
-            .filter((service) => maxBudgetCents === undefined || service.price_cents === undefined || service.price_cents <= maxBudgetCents)
-            .slice(0, limit));
-        }
         case "get_budget_status":
           return ok(budgetStatus(context.session));
-        case "list_allowed_services":
-          return ok([
-            {
-              resource_url: services[0]?.resource_url ?? "https://mock.opencrowd.test/x402/service-1",
-              mode: "yolo",
-              caps: { max_cost_cents: 0, session_max_cents: 0 },
-              created_at: context.session.createdAt,
-              updated_at: context.session.updatedAt,
-              notes: "mock test mode permission"
-            }
-          ]);
-        case "add_allowed_service":
-        case "request_service_permission":
-          return ok({
-            resource_url: stringValue(args.resource_url) ?? services[0]?.resource_url,
-            mode: name === "request_service_permission" ? "ask_first" : "yolo",
-            caps: objectValue(args.caps) ?? {},
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            notes: stringValue(args.reason) ?? "mock test mode permission"
-          });
-        case "remove_allowed_service":
-          return ok({ removed: true, resource_url: stringValue(args.resource_url) });
-        case "block_service":
-          return ok({
-            resource_url: stringValue(args.resource_url) ?? services[0]?.resource_url,
-            mode: "blocked",
-            caps: {},
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-            notes: "mock test mode block"
-          });
-        case "call_service": {
-          const resourceUrl = stringValue(args.resource_url) ?? services[0]?.resource_url ?? "https://mock.opencrowd.test/x402/service-1";
-          const method = stringValue(args.method) ?? "GET";
-          const matchedService = services.find((service) => service.resource_url === resourceUrl);
-          const costCents = integerValue(args.quoted_cost_cents) ?? matchedService?.price_cents ?? 0;
-          const artifactPath = `artifacts/mock-service-calls/${Date.now()}-${slugUrl(resourceUrl)}.json`;
-          context.onProgress?.({ type: "checking_budget", message: "Mock checking session budget" });
-          context.onProgress?.({ type: "checking_permission", message: `Mock checking permission for ${resourceUrl}` });
-          context.onProgress?.({ type: "reserving_spend", message: `Mock reserving ${costCents} cents` });
-          const reservation = await reserveBudget(context.session, costCents);
-          try {
-            await finalizeReservation(context.session, reservation, costCents);
-            context.onProgress?.({ type: "calling_service", message: `Mock calling ${resourceUrl}` });
-            context.onProgress?.({ type: "saving_artifact", message: "Mock saving service response artifact" });
-            await appendLedgerEntry(context.session.ledgerPath, {
-              session_id: context.session.sessionId,
-              type: "service_call",
-              resource_url: resourceUrl,
-              method,
-              quoted_cost_cents: costCents,
-              charged_cost_cents: costCents,
-              status: "charged",
-              permission_mode: context.session.permissionMode,
-              artifact_path: artifactPath,
-              payment_id: "mock-payment",
-              notes: "mock test mode service call"
-            });
-          } catch (error) {
-            await releaseReservation(context.session, reservation);
-            await appendLedgerEntry(context.session.ledgerPath, {
-              session_id: context.session.sessionId,
-              type: "service_call",
-              resource_url: resourceUrl,
-              method,
-              quoted_cost_cents: costCents,
-              charged_cost_cents: 0,
-              status: "failed",
-              permission_mode: context.session.permissionMode,
-              artifact_path: artifactPath,
-              notes: (error as Error).message
-            });
-            throw error;
-          }
-          return ok({
-            status: 200,
-            headers: { "content-type": "application/json", "x-opencrowd-mock": "true" },
-            body: {
-              ok: true,
-              mock: true,
-              resource_url: resourceUrl,
-              method,
-              summary: "This is a mock x402 service response. No network request occurred."
-            },
-            charged_cost_cents: costCents,
-            artifact_path: artifactPath
-          });
-        }
         case "save_file":
           return ok({
             path: `artifacts/${stringValue(args.path) ?? "mock-output.txt"}`,
@@ -248,10 +147,7 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
         case "read_file":
           return ok({ content: `Mock file content for ${stringValue(args.path) ?? "unknown path"}.` });
         case "list_files":
-          return ok([
-            "mock-output.txt",
-            "mock-service-calls/service-1.json"
-          ].filter((path) => path.startsWith(stringValue(args.prefix) ?? "")));
+          return ok(["mock-output.txt"].filter((path) => path.startsWith(stringValue(args.prefix) ?? "")));
         case "run_shell":
           context.onProgress?.({ type: "running_shell", message: "Mock running gated shell command" });
           return ok({
@@ -283,56 +179,18 @@ export function createMockToolExecutor(options: MockToolExecutorOptions = {}): T
   };
 }
 
-export const MOCK_X402_SERVICES: ServiceCandidate[] = Array.from({ length: 10 }, (_, index) => {
-  const number = index + 1;
-  const method = number % 3 === 0 ? "POST" : "GET";
-  const priceCents = number;
-  return {
-    resource_url: `https://mock.opencrowd.test/x402/service-${number}`,
-    title: `Mock x402 Service ${number}`,
-    description: `Deterministic mock x402 service ${number} for OpenCrowd test mode.`,
-    methods: [method],
-    price_cents: priceCents,
-    price_display: `$${(priceCents / 100).toFixed(2)} USDC`,
-    currency: "USDC",
-    tags: ["mock", "x402", number % 2 === 0 ? "data" : "analysis"],
-    score: 1 - index / 20,
-    raw: { mock: true, id: number }
-  };
-});
-
 function mockToolArguments(
   name: ToolName,
   messages: LlmMessage[],
   turn: number,
-  random: SeededRandom
+  _random: SeededRandom
 ): Record<string, unknown> {
-  const service = MOCK_X402_SERVICES[random.integer(MOCK_X402_SERVICES.length)] ?? MOCK_X402_SERVICES[0];
   const task = [...messages].reverse().find((message) => message.role === "user")?.content ?? "mock OpenCrowd task";
   switch (name) {
-    case "search_services":
-      return { query: task.slice(0, 80) || "mock OpenCrowd service", limit: 10 };
     case "get_budget_status":
-    case "list_allowed_services":
+    case "check_subagents":
+    case "list_files":
       return {};
-    case "add_allowed_service":
-      return { resource_url: service.resource_url, caps: { max_cost_cents: service.price_cents ?? 0 } };
-    case "remove_allowed_service":
-    case "block_service":
-      return { resource_url: service.resource_url };
-    case "request_service_permission":
-      return {
-        resource_url: service.resource_url,
-        reason: "Mock test mode wants to exercise permission handling.",
-        caps: { max_cost_cents: service.price_cents ?? 0 }
-      };
-    case "call_service":
-      return {
-        resource_url: service.resource_url,
-        method: service.methods[0] ?? "GET",
-        quoted_cost_cents: service.price_cents ?? 0,
-        body: { mock: true, task }
-      };
     case "save_file":
       return {
         path: `mock-output-${turn}.txt`,
@@ -341,14 +199,10 @@ function mockToolArguments(
       };
     case "read_file":
       return { path: "mock-output.txt" };
-    case "list_files":
-      return {};
     case "run_shell":
       return { command: "echo mock test mode", cwd: ".", timeout_ms: 1000 };
     case "spawn_subagent":
       return { task: `Mock subtask for: ${task.slice(0, 80)}` };
-    case "check_subagents":
-      return {};
     case "complete_session":
       return { final_message: `Mock test mode completed task: ${task.slice(0, 120)}` };
   }
@@ -599,12 +453,6 @@ function wireToolDefinitions(names?: ToolName[], extraTools?: DynamicToolDefinit
   ];
 }
 
-export interface PermissionRequest {
-  resource_url: string;
-  reason: string;
-  caps?: ServiceCaps;
-}
-
 /** Typed provider + resolved model for one loop role (main or subagent). */
 export interface TypedLlmRuntime {
   provider: TypedLlmProvider;
@@ -624,13 +472,6 @@ export interface AgentRunOptions {
   history?: LlmMessage[];
   onMessage?: (message: LlmMessage) => Promise<void> | void;
   onProgress?: (event: ProgressEvent) => void;
-  /**
-   * Human-in-the-loop gate for request_service_permission. When set, the
-   * permission is only recorded if this resolves true; otherwise the agent
-   * receives a denial. When unset (MCP/local-api/non-interactive), the
-   * request is recorded directly as before.
-   */
-  onPermissionRequest?: (request: PermissionRequest) => Promise<boolean>;
   toolExecutor?: ToolExecutor;
   compactOutput?: boolean;
   maxTurns?: number;
@@ -639,9 +480,8 @@ export interface AgentRunOptions {
   /** Enable spawn_subagent delegation to a cheap fast model with local tools only. */
   subagent?: SubagentOptions;
   /**
-   * Connector-ingested vendor tools (integration spec). When present, the
-   * legacy marketplace/permission tools are dropped from the model surface
-   * and `promptSections` replaces the legacy economy prompt.
+   * The economy gateway's stable paid-capability tools (or any injected
+   * dynamic tool surface). Absent means paid services are unavailable.
    */
   dynamicTools?: DynamicToolsOption;
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
@@ -651,18 +491,13 @@ export interface AgentRunOptions {
    * ~70% of this window. The persisted trajectory keeps full fidelity.
    */
   contextWindowTokens?: number;
+  /**
+   * Session-completion gate: returns a blocking reason (e.g. a pending
+   * required review) or undefined. The loop refuses to complete while it
+   * blocks, nudging the model once before stopping deterministically.
+   */
+  completionGate?: () => Promise<string | undefined>;
 }
-
-/** Legacy economic surface retired from the model when connector tools are active. */
-export const LEGACY_ECONOMY_TOOLS: ToolName[] = [
-  "search_services",
-  "call_service",
-  "list_allowed_services",
-  "add_allowed_service",
-  "remove_allowed_service",
-  "block_service",
-  "request_service_permission"
-];
 
 export interface SubagentOptions {
   model: string;
@@ -700,11 +535,8 @@ export async function runAgentTask(session: SessionState, task: string, options:
 }
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
-  let enabledTools = options.tools
+  const enabledTools = options.tools
     ?? (options.subagent ? TOOL_NAMES : TOOL_NAMES.filter((name) => name !== "spawn_subagent"));
-  if (options.dynamicTools) {
-    enabledTools = enabledTools.filter((name) => !LEGACY_ECONOMY_TOOLS.includes(name));
-  }
   const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
   const provider = options.provider ?? (options.llm
     ? new BudgetedLlmProvider(session, options.llm.provider, {
@@ -723,23 +555,20 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   }
   const toolExecutor = options.toolExecutor ?? executeTool;
   const systemPromptParts = [
-    "You are the local OpenCrowd agent running as a CLI or MCP-backed tool on the user's personal machine.",
-    "You have a Base USDC wallet attached to this session, local file tools, and a gated bash tool.",
+    "You are the local OpenCrowd agent, a CLI agent with a USDC wallet running on the user's personal machine.",
     "Try to solve the user's task completely. Use local files and bash when they are sufficient, but remember they are bounded by the user's installed tools, credentials, network, open ports, and process lifetime.",
     "Before repeatedly fighting the local environment, decide whether the task needs external capability such as hosting, persistent infrastructure, remote compute, specialized APIs, live data, or access the user's device does not have."
   ];
   if (options.dynamicTools) {
     systemPromptParts.push(
-      "When the local computer is not the right environment, or after one clear local capability failure, use the paid connector tools; discovering and paying bespoke services is your superpower.",
-      "Each tool result includes the budget before and after that tool call.",
+      "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
+      "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
+      "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",
       ...(options.promptSections ?? [])
     );
   } else {
     systemPromptParts.push(
-      "When the local or hosted computer is not the right environment, or after one clear local capability failure, use search_services; discovering bespoke x402 services is your superpower.",
-      "After selecting a service, spend Base USDC with call_service as needed.",
-      "You may need to try multiple services or use several services in sequence. Each tool result includes the budget before and after that tool call.",
-      "Budgeting and permissioning are local policy gates; yolo mode means services are allowed unless blocked. Never ask for wallet private keys or secrets."
+      "Paid external services are unavailable in this run; work with local tools only and say so if the task truly requires external capability."
     );
   }
   systemPromptParts.push("End by calling complete_session with a concise final message.");
@@ -762,6 +591,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
 
   const maxTurns = options.maxTurns ?? 100;
   const repeatedFailures = new Map<string, number>();
+  let completionNudges = 0;
   let serviceCallFailures = 0;
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
@@ -797,6 +627,18 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       await options.onMessage?.(assistantMessage);
     }
     if (response.toolCalls.length === 0) {
+      const blocker = await options.completionGate?.();
+      if (blocker) {
+        if (completionNudges >= 1) {
+          const summary = await completeSession(session, `Stopped: ${blocker}`);
+          return { outcome: "stopped", summary, turns: turn + 1 };
+        }
+        completionNudges += 1;
+        const nudge: LlmMessage = { role: "user", content: `You cannot finish yet: ${blocker}` };
+        messages.push(nudge);
+        await options.onMessage?.(nudge);
+        continue;
+      }
       const summary = await completeSession(session, response.content || "Session completed.");
       return { outcome: "completed", summary, turns: turn + 1 };
     }
@@ -865,7 +707,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           };
         }
       } else if (TOOL_NAMES.includes(call.name as ToolName)) {
-        result = await runGatedTool(toolExecutor, call as LlmToolCall & { name: ToolName }, session, options);
+        result = await toolExecutor(call.name as ToolName, call.arguments, { session, onProgress: options.onProgress });
       } else if (options.dynamicTools) {
         result = await options.dynamicTools.execute(call.name, call.arguments);
       } else {
@@ -889,7 +731,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       messages.push(toolMessage);
       await options.onMessage?.(toolMessage);
       if (!result.ok) {
-        if (call.name === "call_service") {
+        if (call.name === "call_paid_service") {
           serviceCallFailures += 1;
           if (serviceCallFailures >= 3) {
             const summary = await completeSession(session, `Stopped after ${serviceCallFailures} service call failures. Last error: ${result.error}`);
@@ -905,6 +747,22 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         }
       }
       if (call.name === "complete_session") {
+        const blocker = await options.completionGate?.();
+        if (blocker) {
+          if (completionNudges >= 1) {
+            const summary = await completeSession(session, `Stopped: ${blocker}`);
+            return { outcome: "stopped", summary, turns: turn + 1 };
+          }
+          completionNudges += 1;
+          const gateMessage = {
+            role: "tool",
+            toolCallId: call.id,
+            content: JSON.stringify({ result: { ok: false, error: `cannot complete yet: ${blocker}` } })
+          } as LlmMessage;
+          messages.push(gateMessage);
+          await options.onMessage?.(gateMessage);
+          continue;
+        }
         const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
         if (result.ok && result.data && typeof result.data === "object") {
           const summary = result.data as Record<string, unknown>;
@@ -1120,34 +978,6 @@ function subagentProvider(
   throw new Error("subagent has no provider: pass subagent.provider (tests) or subagent.llm (typed runtime)");
 }
 
-async function runGatedTool(
-  toolExecutor: ToolExecutor,
-  call: LlmToolCall & { name: ToolName },
-  session: SessionState,
-  options: AgentRunOptions
-): Promise<ToolResult> {
-  if (call.name === "request_service_permission" && options.onPermissionRequest) {
-    const request: PermissionRequest = {
-      resource_url: String(call.arguments.resource_url ?? ""),
-      reason: String(call.arguments.reason ?? ""),
-      caps: objectValue(call.arguments.caps) as ServiceCaps | undefined
-    };
-    options.onProgress?.({
-      type: "requesting_permission",
-      message: `Waiting for user approval: ${request.resource_url}`,
-      data: { ...request } as unknown as Record<string, unknown>
-    });
-    const approved = await options.onPermissionRequest(request);
-    if (!approved) {
-      return {
-        ok: false,
-        error: `user denied permission for ${request.resource_url}; do not retry this service unless the user asks`
-      };
-    }
-  }
-  return toolExecutor(call.name, call.arguments, { session, onProgress: options.onProgress });
-}
-
 /**
  * Mid-run in-memory compaction: keep the system prompt and the most recent
  * messages under ~30% of the window, replace the dropped middle with a
@@ -1350,8 +1180,6 @@ export function renderProgress(event: ProgressEvent, options: RenderProgressOpti
       return `  -> ${event.message.replace(/^Tool call: /, "")}`;
     case "tool_result":
       return `  <- ${event.message.replace(/^Tool result: /, "")}`;
-    case "searching":
-      return `     ${event.message}`;
     case "calling_service":
       return `     ${event.message}`;
     case "running_shell":
@@ -1376,13 +1204,8 @@ function renderPrettyProgress(event: ProgressEvent, options: RenderProgressOptio
       return `  ${accent("->")} ${truncateMiddle(event.message.replace(/^Tool call: /, ""), width - 7)}`;
     case "tool_result":
       return `  ${ok("<-")} ${truncateMiddle(event.message.replace(/^Tool result: /, ""), width - 7)}`;
-    case "searching":
-    case "ranking":
-    case "checking_budget":
-    case "checking_permission":
     case "requesting_permission":
     case "reserving_spend":
-    case "signing_with_ows":
     case "calling_service":
     case "saving_artifact":
     case "running_shell":
@@ -1511,12 +1334,14 @@ function validToolNames(names?: ToolName[], extraTools?: DynamicToolDefinition[]
 
 function summarizeToolCall(call: LlmToolCall): string {
   switch (call.name) {
-    case "search_services":
-      return `search_services query="${String(call.arguments.query ?? "")}"`;
-    case "call_service":
-      return `call_service ${String(call.arguments.method ?? "POST")} ${String(call.arguments.resource_url ?? "")}`;
-    case "request_service_permission":
-      return `request_service_permission ${String(call.arguments.resource_url ?? "")}`;
+    case "find_paid_service":
+      return `find_paid_service ${String(call.arguments.origin ?? call.arguments.query ?? "")}`;
+    case "inspect_paid_service":
+      return `inspect_paid_service ${String(call.arguments.method ?? "POST")} ${String(call.arguments.url ?? "")}`;
+    case "call_paid_service":
+      return `call_paid_service ${String(call.arguments.method ?? "POST")} ${String(call.arguments.url ?? "")}`;
+    case "review_paid_service":
+      return `review_paid_service ${String(call.arguments.purchase_id ?? "")} rating=${String(call.arguments.rating ?? "")}`;
     case "complete_session":
       return "complete_session";
     default:
@@ -1528,21 +1353,13 @@ function summarizeToolResult(name: string, result: ToolResult): string {
   if (!result.ok) {
     return `${name} failed: ${result.error}`;
   }
-  if (name === "search_services" && Array.isArray(result.data)) {
-    const first = result.data[0] as { title?: unknown; resource_url?: unknown; price_display?: unknown } | undefined;
-    return `search_services found ${result.data.length} candidate${result.data.length === 1 ? "" : "s"}${first ? `; top: ${String(first.title ?? first.resource_url)} (${String(first.price_display ?? "price unknown")})` : ""}`;
-  }
-  if (name === "call_service" && result.data && typeof result.data === "object") {
-    const data = result.data as { status?: unknown; charged_cost_cents?: unknown; artifact_path?: unknown };
-    return `call_service HTTP ${String(data.status ?? "unknown")}, charged ${formatCents(Number(data.charged_cost_cents ?? 0))}${data.artifact_path ? `, saved ${String(data.artifact_path)}` : ""}`;
+  if (name === "call_paid_service" && result.data && typeof result.data === "object") {
+    const data = result.data as { outcome?: unknown; status?: unknown; charged_cost_cents?: unknown; artifact_path?: unknown };
+    return `call_paid_service ${String(data.outcome ?? "?")} HTTP ${String(data.status ?? "?")}, charged ${formatCents(Number(data.charged_cost_cents ?? 0))}${data.artifact_path ? `, saved ${String(data.artifact_path)}` : ""}`;
   }
   if (name === "get_budget_status" && result.data && typeof result.data === "object") {
     const data = result.data as { remaining_cents?: unknown };
     return `remaining ${formatCents(Number(data.remaining_cents ?? 0))}`;
-  }
-  if (name === "request_service_permission" && result.data && typeof result.data === "object") {
-    const data = result.data as { resource_url?: unknown; mode?: unknown };
-    return `permission ${String(data.mode ?? "recorded")} for ${String(data.resource_url ?? "")}`;
   }
   return `${name} ok: ${compactJson(result.data, 220)}`;
 }

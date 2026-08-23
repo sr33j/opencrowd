@@ -10,7 +10,7 @@
       "path": "../core"
     },
     {
-      "path": "../connectors"
+      "path": "../economy"
     },
     {
       "path": "../agent-runtime"

@@ -4,29 +4,23 @@ import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
-  addAllowedService,
-  blockService,
   budgetStatus,
   clearConversation,
   createOpenCrowdSession,
-  listAllowedServices,
   loadConfig,
   loadSession,
+  readAgentCashWallet,
   readLedger,
-  removeAllowedService,
   saveSession,
-  searchServices,
   setPermissionMode,
   setSessionBudget,
   updateConfig,
-  walletAddress,
-  walletBalance,
   type OpenCrowdConfig,
   type PermissionMode,
   type ProgressEvent,
-  type ServiceCandidate,
   type SessionState
 } from "@opencrowd/core";
+import { closeSharedEconomyRuntime } from "@opencrowd/economy";
 import {
   buildSessionSummary,
   createMockToolExecutor,
@@ -39,7 +33,6 @@ import {
   asRecord,
   envFlag,
   formatCents,
-  formatServiceCandidate,
   isConsumedOption,
   latestSessionId,
   optionCents,
@@ -55,8 +48,8 @@ import {
   style,
   terminalWidth
 } from "./shared.js";
-import { closeSharedConnectorManager } from "@opencrowd/connectors";
 import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, warmStartEconomy, type ReplState } from "./agent-task.js";
+import { walletSummary } from "./wallet.js";
 import { startTui } from "./tui/app.js";
 
 async function main(argv: string[]): Promise<void> {
@@ -85,12 +78,6 @@ async function main(argv: string[]): Promise<void> {
   switch (command) {
     case "run":
       await runCommand(rest);
-      return;
-    case "search":
-      await searchCommand(rest);
-      return;
-    case "permissions":
-      await permissionsCommand(rest);
       return;
     case "ledger":
       await ledgerCommand(rest);
@@ -265,12 +252,6 @@ async function replCommand(session: SessionState, state: ReplState, inputLine: s
     case "run":
       await replRunCommand(session, state, rest);
       return false;
-    case "search":
-      await searchCommand(rest);
-      return false;
-    case "permissions":
-      await permissionsCommand(rest);
-      return false;
     case "ledger":
       await ledgerCommand(rest, session);
       return false;
@@ -341,8 +322,6 @@ async function renderReplIntro(session: SessionState, state: ReplState): Promise
       "/test-mode on|off",
       "/test-seed <seed>",
       "/run [--budget <usd>] [--model <model>] \"<task>\"",
-      "/search \"<query>\"",
-      "/permissions list|allow|remove|block",
       "/ledger show [--session <id>]",
       "/summary [verbose]",
       "/clear",
@@ -489,71 +468,6 @@ async function headlessRunCommand(args: string[]): Promise<void> {
   }
 }
 
-async function searchCommand(args: string[]): Promise<void> {
-  const json = args.includes("--json");
-  const query = args.filter((arg) => arg !== "--json").join(" ");
-  if (!query) {
-    throw new Error("search requires a query");
-  }
-  const results = await searchServices(query);
-  const rows = results.map(formatServiceCandidate);
-  printValue("Search results", rows, {
-    json,
-    pretty: renderTable(rows, [
-      ["title", "title"],
-      ["price", "price"],
-      ["methods", "methods"],
-      ["url", "url"]
-    ])
-  });
-}
-
-async function permissionsCommand(args: string[]): Promise<void> {
-  const json = args.includes("--json");
-  args = args.filter((arg) => arg !== "--json");
-  const [action, resourceUrl] = args;
-  switch (action) {
-    case "list":
-      {
-        const permissions = await listAllowedServices();
-        printValue("Permissions", permissions, {
-          json,
-          pretty: renderTable(permissions.map(asRecord), [
-            ["resource_url", "service"],
-            ["mode", "mode"],
-            ["max_cost_cents", "max"],
-            ["session_max_cents", "session max"]
-          ])
-        });
-      }
-      return;
-    case "allow":
-      if (!resourceUrl) {
-        throw new Error("permissions allow requires a resource URL");
-      }
-      printValue("Permission", await addAllowedService(resourceUrl, {
-        max_cost_cents: optionCents(args, "--max-cost"),
-        session_max_cents: optionCents(args, "--session-max")
-      }), { json, pretty: `allowed ${shortUrl(resourceUrl)}` });
-      return;
-    case "remove":
-      if (!resourceUrl) {
-        throw new Error("permissions remove requires a resource URL");
-      }
-      await removeAllowedService(resourceUrl);
-      console.log("removed");
-      return;
-    case "block":
-      if (!resourceUrl) {
-        throw new Error("permissions block requires a resource URL");
-      }
-      printValue("Permission", await blockService(resourceUrl), { json, pretty: `blocked ${shortUrl(resourceUrl)}` });
-      return;
-    default:
-      throw new Error("permissions supports list, allow, remove, block");
-  }
-}
-
 async function ledgerCommand(args: string[], currentSession?: SessionState): Promise<void> {
   const json = args.includes("--json");
   args = args.filter((arg) => arg !== "--json");
@@ -584,19 +498,25 @@ async function ledgerCommand(args: string[], currentSession?: SessionState): Pro
   });
 }
 
-/** Public wallet info only: the shared AgentCash wallet's address and balances. */
 async function walletCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
   args = args.filter((arg) => arg !== "--json");
   const [action] = args;
   if (action === "address" || action === undefined) {
-    const result = await walletAddress();
+    const wallet = await readAgentCashWallet();
+    if (!wallet) {
+      throw new Error("No AgentCash wallet found. Install agentcash (its wallet is created automatically on first use) and retry.");
+    }
+    const result = { address: wallet.address, networks: "base, tempo, solana", asset: "USDC" };
     printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
     return;
   }
   if (action === "balance") {
-    const result = await walletBalance();
-    printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
+    const summary = await walletSummary();
+    if (summary.error) {
+      throw new Error(`wallet balance unavailable: ${summary.error}`);
+    }
+    printValue("Wallet", summary.raw ?? summary, { json, pretty: renderKeyValues(asRecord(summary.raw ?? summary)) });
     return;
   }
   throw new Error("wallet supports address, balance");
@@ -692,8 +612,6 @@ function printHelp(): void {
   opencrowd [--test-mode [--test-seed <seed>]]
   opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--mode ask_first|yolo|blocked] [--test-mode] [--test-seed <seed>] [--disable-shell] [--verbose] "<task>"
   opencrowd run --headless --prompt "<text>" [--attach <file>] [--output json|text] [--auto] [--model <model>] [--subagent-model <model>] [--budget <usd>] [--max-turns <n>] [--workspace <dir>] [--verbose]
-  opencrowd search [--json] "<query>"
-  opencrowd permissions [--json] list|allow|remove|block
   opencrowd ledger [--json] show [--session <id>]
   opencrowd wallet [--json] address|balance
   opencrowd models [--json] list|set <model>
@@ -713,4 +631,4 @@ main(process.argv.slice(2))
     console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   })
-  .finally(() => closeSharedConnectorManager().catch(() => undefined));
+  .finally(() => closeSharedEconomyRuntime().catch(() => undefined));

@@ -1,7 +1,6 @@
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { stdout as output } from "node:process";
-import type { ServiceCandidate } from "@opencrowd/core";
 
 export function renderInlinePairs(rows: Array<[string, string]>): string {
   return rows.map(([key, value]) => `${style(key, "muted")} ${value}`).join("  ");
@@ -144,18 +143,6 @@ export function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : {};
-}
-
-export function formatServiceCandidate(candidate: ServiceCandidate): Record<string, unknown> {
-  return pruneUndefined({
-    title: candidate.title,
-    url: candidate.resource_url,
-    methods: candidate.methods,
-    price: candidate.price_display ?? (candidate.price_cents === undefined ? undefined : `$${(candidate.price_cents / 100).toFixed(2)}`),
-    currency: candidate.currency,
-    tags: candidate.tags,
-    score: Number(candidate.score.toFixed(4))
-  });
 }
 
 export function pruneUndefined<T extends Record<string, unknown>>(value: T): T {

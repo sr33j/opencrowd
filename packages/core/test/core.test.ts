@@ -4,10 +4,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  addAllowedService,
-  assertServiceAllowed,
-  blockService,
-  callPaidService,
   clearConversation,
   compactConversationIfNeeded,
   appendConversationMessage,
@@ -15,22 +11,14 @@ import {
   createOpenCrowdSession,
   createSession,
   listArtifacts,
-  appendLedgerEntry,
-  compatiblePaymentHeader,
-  VeniceWalletPaidHttpClient,
-  normalizeBazaarResponse,
   openCrowdToolDefinition,
   readAgentCashWallet,
-  readLedger,
-  removeAllowedService,
+  requireAgentCashWallet,
   reserveBudget,
-  searchServices,
   finalizeReservation,
   saveArtifact,
   updateConfig,
-  walletAddress,
-  runShell,
-  type PaymentAdapter
+  runShell
 } from "../src/index.js";
 
 const tmpRoots: string[] = [];
@@ -85,18 +73,6 @@ describe("OpenCrowd session defaults", () => {
   });
 });
 
-describe("tool definitions", () => {
-  it("describes search_services as the external capability discovery path", () => {
-    const description = openCrowdToolDefinition("search_services").description;
-
-    expect(description).toContain("bespoke paid services");
-    expect(description).toContain("external capabilities");
-    expect(description).toContain("hosted services");
-    expect(description).toContain("remote compute");
-    expect(description).toContain("beyond the local device");
-  });
-});
-
 describe("AgentCash wallet contract", () => {
   it("reads the shared AgentCash wallet file when present", async () => {
     const root = await tempRoot();
@@ -110,10 +86,8 @@ describe("AgentCash wallet contract", () => {
     await expect(readAgentCashWallet()).resolves.toMatchObject({
       address: "0x1111111111111111111111111111111111111111"
     });
-    await expect(walletAddress()).resolves.toEqual({
-      address: "0x1111111111111111111111111111111111111111",
-      network: "base",
-      asset: "USDC"
+    await expect(requireAgentCashWallet()).resolves.toMatchObject({
+      address: "0x1111111111111111111111111111111111111111"
     });
   });
 
@@ -121,7 +95,7 @@ describe("AgentCash wallet contract", () => {
     process.env.AGENTCASH_WALLET_PATH = "/nonexistent/agentcash-wallet.json";
 
     await expect(readAgentCashWallet()).resolves.toBeUndefined();
-    await expect(walletAddress()).rejects.toThrow("No AgentCash wallet found");
+    await expect(requireAgentCashWallet()).rejects.toThrow("No AgentCash wallet found");
   });
 });
 
@@ -163,166 +137,6 @@ describe("conversation compaction", () => {
     expect(result.messages[0]?.content).toContain("Original transcript archive:");
   });
 });
-
-describe("permission gates", () => {
-  it("blocks paid calls to unknown services in ask_first mode", async () => {
-    const root = await tempRoot();
-    const permissionPath = join(root, "permissions.json");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-
-    await expect(assertServiceAllowed(session, "https://unknown.example/api", "POST", 5, permissionPath))
-      .rejects.toThrow("permission required before paid call");
-  });
-
-  it("enforces per-call cost caps", async () => {
-    const root = await tempRoot();
-    const permissionPath = join(root, "permissions.json");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-    await addAllowedService("https://svc.example/api", { max_cost_cents: 10 }, "yolo", permissionPath);
-
-    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 11, permissionPath))
-      .rejects.toThrow("quoted cost exceeds service cap");
-    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 10, permissionPath))
-      .resolves.toMatchObject({ resource_url: "https://svc.example/api" });
-  });
-
-  it("enforces per-session service spend caps from the ledger", async () => {
-    const root = await tempRoot();
-    const permissionPath = join(root, "permissions.json");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-    await addAllowedService("https://svc.example/api", { session_max_cents: 15 }, "yolo", permissionPath);
-    await appendLedgerEntry(session.ledgerPath, {
-      session_id: session.sessionId,
-      type: "service_call",
-      resource_url: "https://svc.example/api",
-      charged_cost_cents: 10,
-      status: "charged",
-      permission_mode: "yolo"
-    });
-
-    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 6, permissionPath))
-      .rejects.toThrow("quoted cost exceeds session cap");
-    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 5, permissionPath))
-      .resolves.toMatchObject({ resource_url: "https://svc.example/api" });
-  });
-
-  it("blocks everything when the session mode is blocked", async () => {
-    const root = await tempRoot();
-    const permissionPath = join(root, "permissions.json");
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "blocked" });
-    await addAllowedService("https://svc.example/api", {}, "yolo", permissionPath);
-
-    await expect(assertServiceAllowed(session, "https://svc.example/api", "POST", 1, permissionPath))
-      .rejects.toThrow("session permission mode is blocked");
-  });
-});
-
-describe("permissions", () => {
-  it("allows, blocks, and removes services", async () => {
-    const root = await tempRoot();
-    const path = join(root, "permissions.json");
-    const url = "https://service.example/x402";
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100, permissionMode: "ask_first" });
-
-    await expect(assertServiceAllowed(session, url, "POST", 1, path)).rejects.toThrow("permission required");
-    await addAllowedService(url, { max_cost_cents: 10, methods: ["POST"] }, "yolo", path);
-    await expect(assertServiceAllowed(session, url, "POST", 5, path)).resolves.toMatchObject({ resource_url: url });
-    await expect(assertServiceAllowed(session, url, "GET", 5, path)).rejects.toThrow("method not allowed");
-    await blockService(url, path);
-    await expect(assertServiceAllowed(session, url, "POST", 5, path)).rejects.toThrow("blocked");
-    await removeAllowedService(url, path);
-    await expect(assertServiceAllowed(session, url, "POST", 5, path)).rejects.toThrow("permission required");
-  });
-});
-
-describe("Bazaar normalization", () => {
-  it("normalizes common result shapes", () => {
-    const normalized = normalizeBazaarResponse({
-      results: [
-        {
-          url: "https://a.example/tool",
-          name: "A",
-          summary: "first",
-          method: "POST",
-          cost_cents: "7",
-          categories: ["data"],
-          rank: 3
-        },
-        { endpoint: "https://b.example/tool", methods: ["GET"], price_cents: 1, score: 10 }
-      ]
-    });
-    expect(normalized).toEqual([
-      expect.objectContaining({ resource_url: "https://a.example/tool", title: "A", price_cents: 7, methods: ["POST"] }),
-      expect.objectContaining({ resource_url: "https://b.example/tool", price_cents: 1, methods: ["GET"] })
-    ]);
-	  });
-
-	  it("normalizes Coinbase Bazaar resources with x402 payment requirements", () => {
-	    const normalized = normalizeBazaarResponse({
-	      resources: [
-	        {
-	          resource: "https://orbisapi.com/proxy/stock-price-api-d847a6/:endpoint",
-	          serviceName: "Stock Price API",
-	          description: "Get real-time stock prices",
-	          tags: ["stocks", "x402"],
-	          accepts: [
-	            {
-	              amount: "5000",
-	              asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-	              extra: { name: "USD Coin", version: "2" },
-	              network: "eip155:8453",
-	              resource: { url: "https://orbisapi.com/proxy/stock-price-api-d847a6/quote" },
-	              scheme: "exact"
-	            }
-	          ],
-	          extensions: {
-	            bazaar: {
-	              info: {
-	                input: { method: "GET", type: "http" }
-	              }
-	            }
-	          }
-	        }
-	      ]
-	    });
-	    expect(normalized).toEqual([
-	      expect.objectContaining({
-	        resource_url: "https://orbisapi.com/proxy/stock-price-api-d847a6/quote",
-	        title: "Stock Price API",
-	        methods: ["GET"],
-	        price_cents: 1,
-	        price_display: "0.005 USDC",
-	        currency: "USDC",
-	        tags: ["stocks", "x402"]
-	      })
-	    ]);
-	  });
-
-	  it("uses Coinbase Bazaar query params for CDP discovery search", async () => {
-	    const seen: string[] = [];
-	    const fetchImpl = (async (input: RequestInfo | URL) => {
-	      seen.push(String(input));
-	      return new Response(JSON.stringify({ resources: [] }), {
-	        status: 200,
-	        headers: { "content-type": "application/json" }
-	      });
-	    }) as typeof fetch;
-
-	    await expect(searchServices("stock price", {
-	      bazaarUrl: "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search",
-	      fetchImpl,
-	      limit: 3,
-	      maxBudgetCents: 25
-	    })).resolves.toEqual([]);
-
-	    const url = new URL(seen[0]);
-	    expect(url.searchParams.get("query")).toBe("stock price");
-	    expect(url.searchParams.get("network")).toBe("eip155:8453");
-	    expect(url.searchParams.get("limit")).toBe("3");
-	    expect(url.searchParams.get("maxUsdPrice")).toBe("0.25");
-	    expect(url.searchParams.has("q")).toBe(false);
-	  });
-	});
 
 describe("artifacts", () => {
   it("stores artifacts inside the session and rejects traversal", async () => {
@@ -377,191 +191,6 @@ describe("shell policy", () => {
       timed_out: false
     });
     expect(result.stdout).toContain("done");
-  });
-});
-
-describe("paid x402 calls", () => {
-  it("checks permission, signs, calls, saves artifact, and writes ledger rows", async () => {
-    const root = await tempRoot();
-    const permissionPath = join(root, "permissions.json");
-    const serviceUrl = "https://service.example/paid";
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "ask_first" });
-    await addAllowedService(serviceUrl, { max_cost_cents: 20 }, "yolo", permissionPath);
-    const signer: PaymentAdapter = {
-      async sign() {
-        return { headers: { "x-payment": "signed" }, txHash: "0xtx" };
-      }
-    };
-    const response = new Response(JSON.stringify({ ok: true }), {
-      status: 200,
-      headers: { "x402-charged-cost-cents": "9" }
-    });
-    const result = await callPaidService(session, {
-      resource_url: serviceUrl,
-      method: "POST",
-      quoted_cost_cents: 10,
-      body: { prompt: "hi" }
-    }, {
-      permissionPath,
-      paymentAdapter: signer,
-      fetchImpl: async () => response
-    });
-
-    expect(result.charged_cost_cents).toBe(9);
-    expect(session.spentCents).toBe(9);
-    expect(result.artifact_path).toContain("service-calls/");
-    const rows = await readLedger(session.ledgerPath);
-    expect(rows.some((row) => row.type === "service_call" && row.status === "charged" && row.tx_hash === "0xtx")).toBe(true);
-  });
-
-  it("sends string service bodies without JSON encoding", async () => {
-    const root = await tempRoot();
-    const permissionPath = join(root, "permissions.json");
-    const serviceUrl = "https://service.example/upload";
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "ask_first" });
-    await addAllowedService(serviceUrl, { max_cost_cents: 5 }, "yolo", permissionPath);
-    let sentBody: string | undefined;
-    let sentContentType: string | undefined;
-    const result = await callPaidService(session, {
-      resource_url: serviceUrl,
-      method: "PUT",
-      quoted_cost_cents: 5,
-      content_type: "text/html",
-      body: "<!doctype html><title>Pong</title>"
-    }, {
-      permissionPath,
-      paymentAdapter: {
-        async sign() {
-          return { headers: { "x-payment": "signed" } };
-        }
-      },
-      fetchImpl: async (_input, init) => {
-        sentBody = String(init?.body);
-        sentContentType = (init?.headers as Record<string, string>)["content-type"];
-        return new Response("ok", { status: 200, headers: { "x402-charged-cost-cents": "5" } });
-      }
-    });
-
-    expect(result.status).toBe(200);
-    expect(sentContentType).toBe("text/html");
-    expect(sentBody).toBe("<!doctype html><title>Pong</title>");
-  });
-});
-
-describe("OWS wallet helpers", () => {
-  it("wraps legacy signed payments in the Coinbase x402 v2 envelope", () => {
-    const flatHeader = Buffer.from(JSON.stringify({
-      x402Version: 2,
-      scheme: "exact",
-      network: "base",
-      payload: {
-        signature: "0xsig",
-        authorization: {
-          from: "0xfrom",
-          to: "0xto",
-          value: "1000",
-          validAfter: "1",
-          validBefore: "2",
-          nonce: "0xnonce"
-        }
-      }
-    })).toString("base64");
-    const wrapped = compatiblePaymentHeader(flatHeader, 2, {
-      scheme: "exact",
-      network: "eip155:8453",
-      amount: "1000",
-      asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-      payTo: "0xpayto",
-      maxTimeoutSeconds: 300,
-      extra: { name: "USD Coin", version: "2" }
-    }, "https://service.example/stock/TSLA");
-
-    expect(JSON.parse(Buffer.from(wrapped, "base64").toString("utf8"))).toEqual({
-      x402Version: 2,
-      // accepted must round-trip the offered requirement exactly; v2
-      // middleware deep-matches it and rejects injected fields
-      accepted: {
-        scheme: "exact",
-        network: "eip155:8453",
-        amount: "1000",
-        asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        payTo: "0xpayto",
-        maxTimeoutSeconds: 300,
-        extra: { name: "USD Coin", version: "2" }
-      },
-      payload: expect.objectContaining({
-        signature: "0xsig",
-        authorization: expect.objectContaining({ value: "1000" })
-      })
-    });
-  });
-
-  it("pays x402 challenges carried only in the Payment-Required header", async () => {
-    let paymentHeader: string | undefined;
-    const server = createServer((request: IncomingMessage, response: ServerResponse) => {
-      paymentHeader = request.headers["x-payment"] as string | undefined;
-      if (!paymentHeader) {
-        response.writeHead(402, {
-          "content-type": "application/json",
-          "payment-required": Buffer.from(JSON.stringify({
-            x402Version: 2,
-            resource: {
-              url: `http://127.0.0.1:${addressPort(server)}/api/site`,
-              method: "POST",
-              description: "Buy a site upload slot.",
-              mimeType: "application/json"
-            },
-            accepts: [{
-              scheme: "exact",
-              network: "eip155:8453",
-              amount: "5000",
-              asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-              payTo: "0x06dFF3c8380b5D1799874adA903fc3422882FD6f",
-              maxTimeoutSeconds: 300,
-              extra: { name: "USD Coin", version: "2" }
-            }]
-          })).toString("base64")
-        });
-        response.end();
-        return;
-      }
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ ok: true }));
-    });
-    await listen(server);
-    try {
-      const url = `http://127.0.0.1:${addressPort(server)}/api/site`;
-      const client = new VeniceWalletPaidHttpClient("0x59c6995e998f97a5a0044966f094538f89d8f907357e22278c4cfeabf7c5d1c6");
-      await expect(client.request({
-        url,
-        method: "POST",
-        maxCostCents: 1,
-        body: { filename: "site.zip", tier: "short-10mb" }
-      })).resolves.toMatchObject({
-        status: 200,
-        ok: true,
-        body: { ok: true }
-      });
-      expect(paymentHeader).toBeTruthy();
-      const decoded = JSON.parse(Buffer.from(paymentHeader ?? "", "base64").toString("utf8"));
-      expect(decoded).toMatchObject({
-        x402Version: 2,
-        // accepted round-trips the offered requirement exactly (no injected resource)
-        accepted: {
-          network: "eip155:8453",
-          amount: "5000"
-        },
-        payload: {
-          authorization: {
-            value: "5000",
-            to: "0x06dFF3c8380b5D1799874adA903fc3422882FD6f"
-          }
-        }
-      });
-      expect((decoded as { accepted: Record<string, unknown> }).accepted.resource).toBeUndefined();
-    } finally {
-      await closeServer(server);
-    }
   });
 });
 

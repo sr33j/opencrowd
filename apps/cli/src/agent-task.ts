@@ -6,7 +6,14 @@ import {
   type ProgressEvent,
   type SessionState
 } from "@opencrowd/core";
-import { buildEconomyContext, sharedConnectorManager, type EconomyContext } from "@opencrowd/connectors";
+import {
+  EconomyGateway,
+  MockAgentCashAdapter,
+  MockCrowdCodeAdapter,
+  sharedEconomyRuntime,
+  type ApprovalHandler,
+  type ApprovalMode
+} from "@opencrowd/economy";
 import {
   createMockToolExecutor,
   fallbackContextWindowTokens,
@@ -17,8 +24,9 @@ import {
   type AgentRunOptions,
   type AgentTaskResult,
   type LlmMessage,
+  type LlmProvider,
+  type LlmResponse,
   type LlmRuntimeSelection,
-  type PermissionRequest,
   type SubagentOptions,
   type ToolExecutor
 } from "@opencrowd/agent-runtime";
@@ -27,14 +35,26 @@ export interface ReplState {
   model?: string;
   testMode: boolean;
   testSeed?: string;
-  mockProvider?: MockLlmProvider;
+  mockProvider?: LlmProvider;
   mockToolExecutor?: ToolExecutor;
 }
 
 export function ensureMockRuntime(state: ReplState): ReplState {
-  state.mockProvider ??= new MockLlmProvider({ seed: state.testSeed });
+  state.mockProvider ??= createDemoLlmProvider();
   state.mockToolExecutor ??= createMockToolExecutor();
   return state;
+}
+
+/** Session permission mode mapped onto the economy approval policy. */
+export function approvalModeFor(session: SessionState): ApprovalMode {
+  switch (session.permissionMode) {
+    case "yolo":
+      return "auto";
+    case "blocked":
+      return "off";
+    default:
+      return "ask";
+  }
 }
 
 export interface PersistentAgentTaskOptions {
@@ -45,12 +65,13 @@ export interface PersistentAgentTaskOptions {
   forceAutoPolicy?: boolean;
   testMode?: boolean;
   testSeed?: string;
-  mockProvider?: MockLlmProvider;
+  mockProvider?: LlmProvider;
   mockToolExecutor?: ToolExecutor;
   compactOutput?: boolean;
   maxTurns?: number;
   onProgress?: (event: ProgressEvent) => void;
-  onPermissionRequest?: (request: PermissionRequest) => Promise<boolean>;
+  /** Human decision point for ask-mode purchases; absent means they are denied. */
+  approvalHandler?: ApprovalHandler;
 }
 
 export async function runPersistentAgentTask(
@@ -75,6 +96,21 @@ async function preparePersistentRun(
   session: SessionState,
   options: PersistentAgentTaskOptions
 ): Promise<AgentRunOptions> {
+  const gateway = await buildGateway(session, options);
+  const gatewayOptions = gateway
+    ? {
+      dynamicTools: {
+        definitions: gateway.definitions(),
+        execute: (name: string, args: Record<string, unknown>) => gateway.execute(name, args)
+      },
+      completionGate: async () => {
+        return (await gateway.hasPendingRequiredReviews())
+          ? "a confirmed paid purchase still needs its required review; submit it with review_paid_service"
+          : undefined;
+      }
+    }
+    : {};
+
   if (options.testMode) {
     const contextWindowTokens = fallbackContextWindowTokens("mock-test-mode");
     const history = await compactedHistory(session, contextWindowTokens, options.onProgress);
@@ -82,16 +118,16 @@ async function preparePersistentRun(
       maxTurns: options.maxTurns,
       contextWindowTokens,
       onProgress: options.onProgress,
-      onPermissionRequest: options.onPermissionRequest,
-      provider: options.mockProvider ?? new MockLlmProvider({ seed: options.testSeed }),
+      provider: options.mockProvider ?? createDemoLlmProvider(),
       toolExecutor: options.mockToolExecutor ?? createMockToolExecutor(),
       compactOutput: options.compactOutput ?? true,
       history,
+      ...gatewayOptions,
       onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
     };
   }
 
-  const economy = await tryEconomyContext(options.onProgress);
+  const promptSections = await vendorInstructions();
   const llm = await resolveLlmRuntime(session, {
     model: options.model,
     subagentModel: options.subagentModel,
@@ -104,7 +140,6 @@ async function preparePersistentRun(
     maxTurns: options.maxTurns,
     contextWindowTokens,
     onProgress: options.onProgress,
-    onPermissionRequest: options.onPermissionRequest,
     llm: {
       provider: llm.provider,
       model: llm.models.main,
@@ -119,11 +154,68 @@ async function preparePersistentRun(
     },
     compactOutput: options.compactOutput ?? false,
     subagent: subagentOptionsFor(session, llm),
-    dynamicTools: economy?.dynamicTools,
-    promptSections: economy?.promptSections,
+    promptSections,
     history,
+    ...gatewayOptions,
     onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
   };
+}
+
+/**
+ * Build this run's economy gateway. Demo/test mode uses in-memory mock
+ * adapters through the REAL enforced lifecycle. When the vendors are
+ * unavailable, paid capability is explicitly absent — never rerouted.
+ */
+async function buildGateway(
+  session: SessionState,
+  options: PersistentAgentTaskOptions
+): Promise<EconomyGateway | undefined> {
+  if (options.testMode) {
+    return new EconomyGateway({
+      session,
+      agentcash: demoAgentCashAdapter(),
+      crowdcode: new MockCrowdCodeAdapter(),
+      approvalMode: approvalModeFor(session),
+      // Demo without a UI auto-allows: no real money exists to protect.
+      approvalHandler: options.approvalHandler ?? (async () => ({ decision: "allow_once" })),
+      onProgress: options.onProgress
+    });
+  }
+  if (connectorsDisabled()) {
+    return undefined;
+  }
+  try {
+    const runtime = await sharedEconomyRuntime();
+    return new EconomyGateway({
+      session,
+      agentcash: runtime.agentcash,
+      crowdcode: runtime.crowdcode,
+      approvalMode: approvalModeFor(session),
+      approvalHandler: options.approvalHandler,
+      onProgress: options.onProgress
+    });
+  } catch (error) {
+    options.onProgress?.({
+      type: "complete",
+      message: `AgentCash/CrowdCode vendors unavailable (${(error as Error).message}); paid services are unavailable this run`
+    });
+    return undefined;
+  }
+}
+
+async function vendorInstructions(): Promise<string[] | undefined> {
+  if (connectorsDisabled()) {
+    return undefined;
+  }
+  try {
+    return (await sharedEconomyRuntime()).instructions();
+  } catch {
+    return undefined;
+  }
+}
+
+function connectorsDisabled(): boolean {
+  return process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true";
 }
 
 async function compactedHistory(
@@ -164,41 +256,139 @@ function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): Su
 }
 
 /**
- * Start the connector MCP servers and touch the wallet balance before a
- * session is created. On a fresh machine this both installs the pinned
- * vendors (npx cache) and auto-creates the shared AgentCash wallet.
+ * Warm the vendor connections and touch the wallet balance before a session
+ * starts. On a fresh machine this both installs the pinned vendors (npx
+ * cache) and auto-creates the shared AgentCash wallet.
  */
 export async function warmStartEconomy(): Promise<void> {
-  if (process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
+  if (connectorsDisabled()) {
     return;
   }
   try {
-    const manager = await sharedConnectorManager();
-    if (manager.hasTool("agentcash_get_balance")) {
-      await manager.execute("agentcash_get_balance", {});
-    }
+    const runtime = await sharedEconomyRuntime();
+    await runtime.agentcash.getBalance();
   } catch {
-    // Connectors are optional at startup; paid capability surfaces the error when used.
+    // Vendors are optional at startup; paid capability surfaces the error when used.
   }
 }
 
+export const DEMO_ENDPOINT = "https://demo.opencrowd.test/api/answer";
+
+/** Mock AgentCash with one plausible demo service; no network, no real money. */
+export function demoAgentCashAdapter(): MockAgentCashAdapter {
+  let paymentIndex = 0;
+  return new MockAgentCashAdapter({
+    balance: { total_usd: 25, networks: { base: { usdc: 25, address: "0xDEMO000000000000000000000000000000000000" } }, demo: true },
+    searchResults: {
+      results: [{
+        origin: "https://demo.opencrowd.test",
+        endpoint: DEMO_ENDPOINT,
+        method: "POST",
+        description: "Demo paid answering service (mock; no real money moves)",
+        price_usd: 0.05
+      }]
+    },
+    schemas: {
+      [DEMO_ENDPOINT]: {
+        url: DEMO_ENDPOINT,
+        method: "POST",
+        auth: "paid x402 base",
+        price: 0.05,
+        input: { type: "object", properties: { task: { type: "string" } }, required: ["task"] }
+      }
+    },
+    fetchResults: {
+      [DEMO_ENDPOINT]: (request) => {
+        paymentIndex += 1;
+        return {
+          ok: true,
+          ambiguous: false,
+          status: 200,
+          data: { answer: `Demo service answer for ${JSON.stringify(request.body)}. (mock response — no network request occurred)` },
+          authMode: "paid",
+          payment: {
+            paidUsd: 0.05,
+            rail: "x402-base",
+            reference: `0xdemo${paymentIndex}`,
+            proof: "ZGVtby1wcm9vZg==",
+            payTo: "0xdemopayee"
+          }
+        };
+      }
+    }
+  });
+}
+
 /**
- * Connector-ingested vendor tools. When the connectors are unavailable the
- * run continues with local tools only — paid capability is explicitly
- * unavailable, never silently rerouted.
+ * Deterministic demo agent: walks the full enforced purchase lifecycle —
+ * discover, inspect, pay, review — against the mock adapters, then finishes.
  */
-async function tryEconomyContext(onProgress?: (event: ProgressEvent) => void): Promise<EconomyContext | undefined> {
-  if (process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
+export function createDemoLlmProvider(): LlmProvider {
+  return {
+    async complete(messages: LlmMessage[]): Promise<LlmResponse> {
+      const task = [...messages].reverse().find((message) => message.role === "user")?.content ?? "demo task";
+      const toolMessages = messages.filter((message) => message.role === "tool");
+      const step = toolMessages.length;
+      switch (step) {
+        case 0:
+          return {
+            content: "I'll look for a paid service that can help with this.",
+            toolCalls: [{ id: "demo_1", name: "find_paid_service", arguments: { query: task.slice(0, 80) } }]
+          };
+        case 1:
+          return {
+            content: "Inspecting the demo service's schema, price, and reputation before paying.",
+            toolCalls: [{ id: "demo_2", name: "inspect_paid_service", arguments: { url: DEMO_ENDPOINT, method: "POST" } }]
+          };
+        case 2:
+          return {
+            content: "Price and reputation look fine — executing one paid call.",
+            toolCalls: [{
+              id: "demo_3",
+              name: "call_paid_service",
+              arguments: { url: DEMO_ENDPOINT, method: "POST", body: { task: task.slice(0, 120) }, max_cost_cents: 5 }
+            }]
+          };
+        case 3: {
+          const purchaseId = purchaseIdFrom(toolMessages[toolMessages.length - 1]);
+          if (!purchaseId) {
+            return {
+              content: "",
+              toolCalls: [{ id: "demo_4", name: "complete_session", arguments: { final_message: "Demo finished (the paid call did not go through)." } }]
+            };
+          }
+          return {
+            content: "Submitting the required CrowdCode review for the purchase.",
+            toolCalls: [{
+              id: "demo_4",
+              name: "review_paid_service",
+              arguments: { purchase_id: purchaseId, rating: 5, reason: "Demo service answered instantly with a clean receipt.", task_context: task.slice(0, 120) }
+            }]
+          };
+        }
+        default:
+          return {
+            content: "",
+            toolCalls: [{
+              id: "demo_5",
+              name: "complete_session",
+              arguments: { final_message: `Demo complete: discovered, inspected, paid, and reviewed a mock service for "${task.slice(0, 80)}". No real money moved.` }
+            }]
+          };
+      }
+    }
+  };
+}
+
+function purchaseIdFrom(toolMessage: LlmMessage | undefined): string | undefined {
+  if (!toolMessage) {
     return undefined;
   }
   try {
-    const manager = await sharedConnectorManager();
-    return await buildEconomyContext(manager);
-  } catch (error) {
-    onProgress?.({
-      type: "complete",
-      message: `connector MCP servers unavailable (${(error as Error).message}); paid services are unavailable this run`
-    });
+    const parsed = JSON.parse(toolMessage.content) as { result?: { data?: { purchase_id?: unknown } } };
+    const id = parsed.result?.data?.purchase_id;
+    return typeof id === "string" ? id : undefined;
+  } catch {
     return undefined;
   }
 }
