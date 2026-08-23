@@ -1,30 +1,25 @@
 #!/usr/bin/env node
-import { appendFile, copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
-  budgetStatus,
-  clearConversation,
   createOpenCrowdSession,
   loadConfig,
   loadSession,
   readAgentCashWallet,
   readLedger,
   saveSession,
-  setPermissionMode,
+  setApprovalMode,
   setSessionBudget,
   updateConfig,
+  type ApprovalMode,
   type OpenCrowdConfig,
-  type PermissionMode,
-  type ProgressEvent,
-  type SessionState
+  type ProgressEvent
 } from "@opencrowd/core";
-import { closeSharedEconomyRuntime } from "@opencrowd/economy";
+import { closeSharedEconomyRuntime, isApprovalMode } from "@opencrowd/economy";
 import {
-  buildSessionSummary,
-  createMockToolExecutor,
-  MockLlmProvider,
+  isProviderId,
   renderProgress,
   sharedTypedProvider,
   type RenderProgressOptions
@@ -32,23 +27,17 @@ import {
 import {
   asRecord,
   envFlag,
-  formatCents,
   isConsumedOption,
   latestSessionId,
-  optionCents,
   parseUsd,
   readOption,
-  renderColumns,
-  renderInlinePairs,
   renderKeyValues,
   renderTable,
-  shortUrl,
   shouldUseColor,
-  splitArgs,
-  style,
   terminalWidth
 } from "./shared.js";
-import { ensureMockRuntime, runPersistentAgentTask, runPersistentAgentTaskDetailed, warmStartEconomy, type ReplState } from "./agent-task.js";
+import { runPersistentAgentTask, runPersistentAgentTaskDetailed, warmStartEconomy } from "./agent-task.js";
+import { renderCommandHelp } from "./registry.js";
 import { walletSummary } from "./wallet.js";
 import { startTui } from "./tui/app.js";
 
@@ -57,27 +46,29 @@ async function main(argv: string[]): Promise<void> {
   if (!command) {
     if (input.isTTY) {
       await startTui();
-    } else {
-      await repl();
+      return;
     }
-    return;
+    throw new Error("the interactive UI needs a terminal; use `opencrowd run --headless --prompt \"...\"` for scripts");
   }
   if (command === "--test-mode" || command === "--demo" || command === "demo") {
     const extraArgs = rest.filter((arg, index) => !isConsumedOption(rest, index, ["--test-seed"]));
     if (extraArgs.length > 0) {
-      throw new Error("top-level --demo/--test-mode launches the interactive UI; use `opencrowd run --test-mode \"task\"` for one-shot tasks");
+      throw new Error("top-level --demo launches the interactive demo; use `opencrowd run --test-mode \"task\"` for one-shot demo tasks");
     }
-    const options = { testMode: true, testSeed: readOption(rest, "--test-seed") };
     if (input.isTTY) {
-      await startTui(options);
-    } else {
-      await repl(options);
+      await startTui({ testMode: true, testSeed: readOption(rest, "--test-seed") });
+      return;
     }
+    // Non-interactive demo (smoke tests): run one scripted demo task.
+    await runCommand(["--test-mode", "demo: find a paid service, pay it with mock money, and review it"]);
     return;
   }
   switch (command) {
     case "run":
       await runCommand(rest);
+      return;
+    case "config":
+      await configCommand(rest);
       return;
     case "ledger":
       await ledgerCommand(rest);
@@ -101,194 +92,6 @@ async function main(argv: string[]): Promise<void> {
   }
 }
 
-async function repl(options: { testMode?: boolean; testSeed?: string } = {}): Promise<void> {
-  const initialTestMode = options.testMode ?? envFlag("OPENCROWD_TEST_MODE");
-  if (!initialTestMode) {
-    await warmStartEconomy();
-  }
-  const session = await createOpenCrowdSession({
-    workspaceRoot: process.cwd()
-  });
-  const rl = createInterface({ input, output });
-  const state: ReplState = {
-    testMode: initialTestMode,
-    testSeed: options.testSeed ?? process.env.OPENCROWD_TEST_SEED
-  };
-  if (state.testMode) {
-    ensureMockRuntime(state);
-  }
-  console.log(await renderReplIntro(session, state));
-  try {
-    if (!input.isTTY) {
-      for await (const rawLine of rl) {
-        const shouldExit = await handleReplLine(session, state, rawLine.trim());
-        if (shouldExit) {
-          return;
-        }
-      }
-      return;
-    }
-    while (true) {
-      let line: string;
-      try {
-        line = (await rl.question("opencrowd> ")).trim();
-      } catch (error) {
-        if ((error as Error).message === "readline was closed") {
-          return;
-        }
-        throw error;
-      }
-      if (!line) {
-        continue;
-      }
-      const shouldExit = await handleReplLine(session, state, line);
-      if (shouldExit) {
-        return;
-      }
-    }
-  } finally {
-    rl.close();
-  }
-}
-
-async function handleReplLine(session: SessionState, state: ReplState, line: string): Promise<boolean> {
-  if (!line) {
-    return false;
-  }
-  try {
-    if (line.startsWith("/")) {
-      return await replCommand(session, state, line.slice(1));
-    }
-    if (line === ":quit" || line === ":exit") {
-      console.log(await buildSessionSummary(session, "Interactive session ended.", { compact: true }));
-      return true;
-    }
-    if (line.startsWith(":budget")) {
-      await setSessionBudget(session, parseUsd(line.split(/\s+/)[1] ?? "0"));
-      printValue("Budget", budgetStatus(session), { pretty: renderKeyValues(asRecord(budgetStatus(session))) });
-      return false;
-    }
-    if (line === ":summary") {
-      console.log(await buildSessionSummary(session, "Interactive summary.", { compact: true }));
-      return false;
-    }
-    console.log(await runPersistentAgentTask(session, line, {
-      model: state.model,
-      testMode: state.testMode,
-      testSeed: state.testSeed,
-      mockProvider: state.mockProvider,
-      mockToolExecutor: state.mockToolExecutor,
-      compactOutput: true,
-      onProgress: progressLogger({ style: output.isTTY ? "pretty" : "compact", color: shouldUseColor(), width: terminalWidth() })
-    }));
-  } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
-  }
-  return false;
-}
-
-async function replCommand(session: SessionState, state: ReplState, inputLine: string): Promise<boolean> {
-  const args = splitArgs(inputLine);
-  const [command, ...rest] = args;
-  switch (command) {
-    case "":
-    case "help":
-    case "?":
-      console.log(await renderReplIntro(session, state));
-      return false;
-    case "quit":
-    case "exit":
-      console.log(await buildSessionSummary(session, "Interactive session ended.", { compact: true }));
-      return true;
-    case "clear": {
-      const cleared = await clearConversation(session);
-      console.log(cleared.cleared
-        ? `context cleared — ${cleared.messagesCleared} prior messages archived to ${cleared.archivePath}`
-        : "context is already empty");
-      return false;
-    }
-    case "budget":
-      await setSessionBudget(session, parseUsd(rest[0] ?? "0"));
-      printValue("Budget", budgetStatus(session), { pretty: renderKeyValues(asRecord(budgetStatus(session))) });
-      return false;
-    case "summary":
-      console.log(await buildSessionSummary(session, "Interactive summary.", { compact: rest[0] !== "verbose" }));
-      return false;
-    case "model":
-      if (!rest[0]) {
-        const label = state.model ?? defaultModelLabel(await loadConfig());
-        printValue("Model", { model: label }, { pretty: renderKeyValues({ model: label }) });
-        return false;
-      }
-      state.model = rest[0];
-      printValue("Model", { model: state.model }, { pretty: renderKeyValues({ model: state.model }) });
-      return false;
-    case "test-mode":
-      if (!rest[0]) {
-        printValue("Test mode", { test_mode: state.testMode, test_seed: state.testSeed }, { pretty: renderKeyValues({ test_mode: state.testMode, test_seed: state.testSeed }) });
-        return false;
-      }
-      if (!["on", "off"].includes(rest[0])) {
-        throw new Error("/test-mode supports on or off");
-      }
-      state.testMode = rest[0] === "on";
-      if (state.testMode) {
-        ensureMockRuntime(state);
-      }
-      printValue("Test mode", { test_mode: state.testMode, test_seed: state.testSeed }, { pretty: renderKeyValues({ test_mode: state.testMode, test_seed: state.testSeed }) });
-      return false;
-    case "test-seed":
-      if (!rest[0]) {
-        printValue("Test seed", { test_seed: state.testSeed }, { pretty: renderKeyValues({ test_seed: state.testSeed }) });
-        return false;
-      }
-      state.testSeed = rest[0];
-      if (state.testMode) {
-        state.mockProvider = new MockLlmProvider({ seed: state.testSeed });
-        state.mockToolExecutor ??= createMockToolExecutor();
-      }
-      printValue("Test seed", { test_seed: state.testSeed }, { pretty: renderKeyValues({ test_seed: state.testSeed }) });
-      return false;
-    case "run":
-      await replRunCommand(session, state, rest);
-      return false;
-    case "ledger":
-      await ledgerCommand(rest, session);
-      return false;
-    case "wallet":
-      await walletCommand(rest);
-      return false;
-    case "models":
-      await modelsCommand(rest);
-      return false;
-    default:
-      throw new Error(`unknown slash command: /${command}`);
-  }
-}
-
-async function replRunCommand(session: SessionState, state: ReplState, args: string[]): Promise<void> {
-  const budgetArg = readOption(args, "--budget");
-  if (budgetArg !== undefined) {
-    await setSessionBudget(session, parseUsd(budgetArg));
-  }
-  const model = readOption(args, "--model") ?? state.model;
-  const testMode = args.includes("--test-mode") || state.testMode;
-  const testSeed = readOption(args, "--test-seed") ?? state.testSeed;
-  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--model", "--test-seed"]) && arg !== "--test-mode").join(" ");
-  if (!task) {
-    throw new Error("/run requires a task string");
-  }
-  console.log(await runPersistentAgentTask(session, task, {
-    model,
-    testMode,
-    testSeed,
-    mockProvider: testMode ? ensureMockRuntime(state).mockProvider : undefined,
-    mockToolExecutor: testMode ? ensureMockRuntime(state).mockToolExecutor : undefined,
-    compactOutput: true,
-    onProgress: progressLogger({ style: output.isTTY ? "pretty" : "compact", color: shouldUseColor(), width: terminalWidth() })
-  }));
-}
-
 function progressLogger(options: RenderProgressOptions): (event: ProgressEvent) => void {
   return (event) => {
     const message = renderProgress(event, options);
@@ -296,38 +99,6 @@ function progressLogger(options: RenderProgressOptions): (event: ProgressEvent) 
       console.log(message);
     }
   };
-}
-
-async function renderReplIntro(session: SessionState, state: ReplState): Promise<string> {
-  const config = await loadConfig();
-  const budget = budgetStatus(session);
-  const rows: Array<[string, string]> = [
-    ["session", `${session.sessionId.slice(0, 8)}...${session.sessionId.slice(-6)}`],
-    ["mode", state.testMode ? "test" : session.permissionMode],
-    ["model", state.model ?? defaultModelLabel(config)],
-    ["budget", `${formatCents(Number(budget.spent_cents ?? 0))} spent / ${formatCents(Number(budget.remaining_cents ?? 0))} left`],
-    ["workspace", process.cwd().split("/").filter(Boolean).at(-1) ?? process.cwd()]
-  ];
-  const header = `${style("OpenCrowd", "bold")} ${style("CLI", "muted")}`;
-  return [
-    header,
-    renderInlinePairs(rows),
-    "",
-    style("Commands", "muted"),
-    renderColumns([
-      "/budget <usd>",
-      "/wallet address|balance",
-      "/models list|set <model>",
-      "/model <model>",
-      "/test-mode on|off",
-      "/test-seed <seed>",
-      "/run [--budget <usd>] [--model <model>] \"<task>\"",
-      "/ledger show [--session <id>]",
-      "/summary [verbose]",
-      "/clear",
-      "/quit"
-    ])
-  ].join("\n");
 }
 
 async function runCommand(args: string[]): Promise<void> {
@@ -340,13 +111,13 @@ async function runCommand(args: string[]): Promise<void> {
   const verbose = args.includes("--verbose");
   const testMode = args.includes("--test-mode") || envFlag("OPENCROWD_TEST_MODE");
   const testSeed = readOption(args, "--test-seed") ?? process.env.OPENCROWD_TEST_SEED;
-  const mode = readOption(args, "--mode") as PermissionMode | undefined;
-  if (mode !== undefined && !["ask_first", "yolo", "blocked"].includes(mode)) {
-    throw new Error("mode must be ask_first, yolo, or blocked");
+  const approval = readOption(args, "--approval");
+  if (approval !== undefined && !isApprovalMode(approval)) {
+    throw new Error("--approval must be ask, auto, or off");
   }
   const shellEnabled = args.includes("--enable-shell") ? true : args.includes("--disable-shell") ? false : undefined;
   const sessionId = readOption(args, "--session");
-  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--mode", "--model", "--session", "--test-seed"])
+  const task = args.filter((arg, index) => !isConsumedOption(args, index, ["--budget", "--approval", "--model", "--session", "--test-seed"])
     && arg !== "--enable-shell"
     && arg !== "--disable-shell"
     && arg !== "--test-mode"
@@ -362,15 +133,15 @@ async function runCommand(args: string[]): Promise<void> {
     : await createOpenCrowdSession({
       workspaceRoot: process.cwd(),
       budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
-      permissionMode: mode,
+      approvalMode: approval as ApprovalMode | undefined,
       shellEnabled
     });
   if (sessionId) {
     if (budgetArg !== undefined) {
       await setSessionBudget(session, parseUsd(budgetArg));
     }
-    if (mode !== undefined) {
-      await setPermissionMode(session, mode);
+    if (approval !== undefined) {
+      await setApprovalMode(session, approval as ApprovalMode);
     }
     if (shellEnabled !== undefined) {
       session.shellEnabled = shellEnabled;
@@ -390,8 +161,8 @@ async function runCommand(args: string[]): Promise<void> {
 /**
  * Programmatic run contract: non-interactive, exits when the session
  * completes or blocks, and emits the structured completion object plus
- * spend split, turn count, and model policy. The eval runner and any
- * external wrapper share this same interface.
+ * spend split, turn count, and model policy. Approval never waits for UI
+ * input: `ask` mode denies un-ruled purchases with a clear error instead.
  */
 async function headlessRunCommand(args: string[]): Promise<void> {
   const prompt = readOption(args, "--prompt");
@@ -401,6 +172,10 @@ async function headlessRunCommand(args: string[]): Promise<void> {
   const outputFormat = readOption(args, "--output") ?? "json";
   if (!["json", "text"].includes(outputFormat)) {
     throw new Error("--output must be json or text");
+  }
+  const approval = readOption(args, "--approval") ?? (await loadConfig()).approval;
+  if (!isApprovalMode(approval)) {
+    throw new Error("--approval must be ask, auto, or off");
   }
   const attach = readOption(args, "--attach");
   const verbose = args.includes("--verbose");
@@ -415,7 +190,7 @@ async function headlessRunCommand(args: string[]): Promise<void> {
   const session = await createOpenCrowdSession({
     workspaceRoot,
     budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
-    permissionMode: "yolo",
+    approvalMode: approval,
     shellEnabled: !args.includes("--disable-shell")
   });
   let task = prompt;
@@ -468,7 +243,59 @@ async function headlessRunCommand(args: string[]): Promise<void> {
   }
 }
 
-async function ledgerCommand(args: string[], currentSession?: SessionState): Promise<void> {
+/**
+ * Persistent defaults with explicit future-session semantics: `config set`
+ * never mutates an already running session.
+ */
+async function configCommand(args: string[]): Promise<void> {
+  const [action, key, value] = args;
+  if (action === "show" || action === undefined) {
+    const config = await loadConfig();
+    printValue("Config (future sessions)", config, { pretty: renderKeyValues(asRecord(config as unknown as Record<string, unknown>)) });
+    return;
+  }
+  if (action !== "set" || !key || value === undefined) {
+    throw new Error("config supports: show | set provider|model|submodel|budget|approval <value>");
+  }
+  const config = await loadConfig();
+  switch (key) {
+    case "provider": {
+      if (!isProviderId(value)) {
+        throw new Error("provider must be venice or openrouter");
+      }
+      await updateConfig({ provider: value });
+      break;
+    }
+    case "model": {
+      await updateConfig({
+        [config.provider]: { ...config[config.provider], model: value }
+      } as Partial<OpenCrowdConfig>);
+      break;
+    }
+    case "submodel": {
+      await updateConfig({
+        [config.provider]: { ...config[config.provider], submodel: value }
+      } as Partial<OpenCrowdConfig>);
+      break;
+    }
+    case "budget": {
+      await updateConfig({ defaultBudgetCents: parseUsd(value) });
+      break;
+    }
+    case "approval": {
+      if (!isApprovalMode(value)) {
+        throw new Error("approval must be ask, auto, or off");
+      }
+      await updateConfig({ approval: value });
+      break;
+    }
+    default:
+      throw new Error(`unknown config key: ${key} (supported: provider, model, submodel, budget, approval)`);
+  }
+  console.log(`set ${key} = ${value} (applies to future sessions; running sessions are unchanged)`);
+}
+
+async function ledgerCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
   args = args.filter((arg) => arg !== "--json");
   const [action] = args;
@@ -476,15 +303,11 @@ async function ledgerCommand(args: string[], currentSession?: SessionState): Pro
     throw new Error("ledger supports show");
   }
   const explicitSessionId = readOption(args, "--session");
-  const ledgerPath = explicitSessionId
-    ? join(process.cwd(), "sessions", explicitSessionId, "ledger.csv")
-    : currentSession?.ledgerPath;
-  const fallbackSessionId = ledgerPath ? undefined : await latestSessionId(process.cwd());
-  const resolvedLedgerPath = ledgerPath ?? (fallbackSessionId ? join(process.cwd(), "sessions", fallbackSessionId, "ledger.csv") : undefined);
-  if (!resolvedLedgerPath) {
+  const sessionId = explicitSessionId ?? await latestSessionId(process.cwd());
+  if (!sessionId) {
     throw new Error("no local sessions found");
   }
-  const rows = await readLedger(resolvedLedgerPath);
+  const rows = await readLedger(join(process.cwd(), "sessions", sessionId, "ledger.csv"));
   printValue("Ledger", rows, {
     json,
     pretty: renderTable(rows.map(asRecord), [
@@ -522,11 +345,10 @@ async function walletCommand(args: string[]): Promise<void> {
   throw new Error("wallet supports address, balance");
 }
 
-
 async function modelsCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
   args = args.filter((arg) => arg !== "--json");
-  const [action, value] = args;
+  const [action] = args;
   const config = await loadConfig();
   if (action === "list" || action === undefined) {
     const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs });
@@ -548,19 +370,7 @@ async function modelsCommand(args: string[]): Promise<void> {
     });
     return;
   }
-  if (action === "set" && value) {
-    await updateConfig({
-      [config.provider]: { ...config[config.provider], model: value }
-    } as Partial<OpenCrowdConfig>);
-    const result = { provider: config.provider, model: value };
-    printValue("Model", result, { json, pretty: renderKeyValues(asRecord(result)) });
-    return;
-  }
-  throw new Error("models supports list, set <model|auto>");
-}
-
-function defaultModelLabel(config: OpenCrowdConfig): string {
-  return `${config.provider}/${config[config.provider].model}`;
+  throw new Error("models supports list; set defaults with `opencrowd config set model <id|auto>`");
 }
 
 async function evalsCommand(args: string[]): Promise<void> {
@@ -607,15 +417,19 @@ async function evalsCommand(args: string[]): Promise<void> {
 
 function printHelp(): void {
   console.log(`Usage:
-  opencrowd                       interactive agent UI (first run walks you through wallet setup)
-  opencrowd --demo                try the full loop with a mock wallet, mock services, and no real money
-  opencrowd [--test-mode [--test-seed <seed>]]
-  opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--mode ask_first|yolo|blocked] [--test-mode] [--test-seed <seed>] [--disable-shell] [--verbose] "<task>"
-  opencrowd run --headless --prompt "<text>" [--attach <file>] [--output json|text] [--auto] [--model <model>] [--subagent-model <model>] [--budget <usd>] [--max-turns <n>] [--workspace <dir>] [--verbose]
+  opencrowd                       interactive agent UI
+  opencrowd --demo                try the full loop with mock money, mock services, and a scripted agent
+  opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--approval ask|auto|off] [--test-mode] [--disable-shell] [--verbose] "<task>"
+  opencrowd run --headless --prompt "<text>" [--attach <file>] [--output json|text] [--approval ask|auto|off] [--auto] [--model <model>] [--subagent-model <model>] [--budget <usd>] [--max-turns <n>] [--workspace <dir>] [--verbose]
+  opencrowd config show
+  opencrowd config set provider|model|submodel|budget|approval <value>
   opencrowd ledger [--json] show [--session <id>]
   opencrowd wallet [--json] address|balance
-  opencrowd models [--json] list|set <model>
-  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]`);
+  opencrowd models [--json] list
+  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]
+
+Interactive commands (also /help inside the UI):
+${renderCommandHelp()}`);
 }
 
 function printValue(label: string, value: unknown, options: { pretty?: string; json?: boolean } = {}): void {
@@ -623,7 +437,7 @@ function printValue(label: string, value: unknown, options: { pretty?: string; j
     console.log(JSON.stringify(value, null, 2));
     return;
   }
-  console.log(`${style(label, "muted")}\n${options.pretty}`);
+  console.log(`${label}\n${options.pretty}`);
 }
 
 main(process.argv.slice(2))

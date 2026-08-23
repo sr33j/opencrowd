@@ -17,7 +17,7 @@ export async function saveArtifact(
     session_id: state.sessionId,
     type: "artifact",
     status: "ok",
-    permission_mode: state.permissionMode,
+    approval_mode: state.approvalMode,
     artifact_path: rel,
     notes: metadata ? JSON.stringify(metadata) : undefined
   });

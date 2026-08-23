@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
+import type { ApprovalMode } from "./types.js";
 
 export interface McpServerConfig {
   command: string;
@@ -30,6 +31,8 @@ export interface OpenCrowdConfig {
   veniceMaxTopUpCents: number;
   /** Default cumulative session spend cap in cents; local policy, not funds. */
   defaultBudgetCents: number;
+  /** Default external-service approval mode for new sessions. */
+  approval: ApprovalMode;
 }
 
 const DEFAULT_CONFIG: OpenCrowdConfig = {
@@ -45,7 +48,8 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   llmTimeoutMs: 600_000,
   llmMaxCostCentsPerCall: 100,
   veniceMaxTopUpCents: 1000,
-  defaultBudgetCents: 2000
+  defaultBudgetCents: 2000,
+  approval: "ask"
 };
 
 export function configDir(): string {

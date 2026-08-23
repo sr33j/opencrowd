@@ -55,12 +55,13 @@ prepaid credit topped up with USDC — no API keys, no subscriptions.
 
 Real money demands real guardrails. The defaults:
 
-- **`ask_first` permission mode** — the agent must show you the service URL,
-  reason, and cost caps before its first payment to any service. Approve with
-  one key. Shift+tab toggles to `yolo` (auto-approve) when you want speed.
-- **Session budgets** — default `min($20, wallet balance)`, enforced locally
-  with reserve/finalize accounting around every paid call. Unused budget never
-  leaves the wallet.
+- **`ask` approval mode** — the agent must show you the service URL, method,
+  cost ceiling, and CrowdCode reputation before its first payment to any
+  service. Approve once, always-allow with caps, deny, or block with one key.
+  Shift+tab toggles to `auto` when you want speed; `off` prohibits purchases.
+- **Session budgets** — a configurable local cap (default $20), enforced with
+  reserve/finalize accounting around every LLM call and paid service call.
+  Unused budget never leaves the wallet.
 - **Burner-wallet design** — the agent has its own low-value wallet, never
   your main one. Worst case is bounded by what you deposited.
 - **Full ledger** — every LLM call, service payment, and top-up lands in
@@ -76,12 +77,12 @@ Inside the interactive UI (`/help` shows this live):
 
 | Command | What it does |
 | --- | --- |
+| `/status` | Session, provider, models, wallet, budget, approval |
 | `/budget <usd>` | Set the local session spend cap |
-| `/mode ask_first\|yolo\|blocked` | Set permission mode (shift+tab toggles) |
-| `/wallet address\|balance` | Show the shared AgentCash wallet |
-| `/models list\|set <model>` | Pick the x402 LLM model |
-| `/ledger show` | Show this session's spend ledger |
-| `/summary` | Spend and artifacts so far |
+| `/approval ask\|auto\|off` | Control purchase approval (shift+tab toggles) |
+| `/provider` `/model` `/submodel` | Select this session's provider and models |
+| `/wallet` `/fund` | Show the shared AgentCash wallet and funding links |
+| `/ledger` `/summary` | Spend, receipts, and artifacts so far |
 
 One-shot and scripting forms:
 
@@ -127,7 +128,7 @@ outgrow the model's context window (archives kept under `sessions/<id>/context/`
   `mcpServers` in config with pinned versions. Their tools are ingested
   verbatim (`agentcash_fetch`, `crowdcode_get_service_score`, ...) and their
   own instructions become prompt context.
-- **Env overrides**: `OPENCROWD_BUDGET_CENTS`, `OPENCROWD_PERMISSION_MODE`,
+- **Env overrides**: `OPENCROWD_BUDGET_CENTS`, `OPENCROWD_APPROVAL_MODE`,
   `OPENCROWD_SHELL_ENABLED`, `OPENCROWD_CONFIG_DIR`, `OPENCROWD_TEST_MODE`.
 
 ## Development

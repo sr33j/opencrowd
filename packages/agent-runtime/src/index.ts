@@ -341,7 +341,7 @@ export class BudgetedLlmProvider implements LlmProvider {
         quoted_cost_cents: this.options.maxCostCentsPerCall,
         charged_cost_cents: charged,
         status: "charged",
-        permission_mode: this.session.permissionMode,
+        approval_mode: this.session.approvalMode,
         latency_ms: Date.now() - started,
         input_tokens: completion.usage.inputTokens,
         output_tokens: completion.usage.outputTokens,
@@ -363,7 +363,7 @@ export class BudgetedLlmProvider implements LlmProvider {
         quoted_cost_cents: this.options.maxCostCentsPerCall,
         charged_cost_cents: 0,
         status: "failed",
-        permission_mode: this.session.permissionMode,
+        approval_mode: this.session.approvalMode,
         latency_ms: Date.now() - started,
         notes: (error as Error).message
       });
@@ -401,7 +401,7 @@ export class BudgetedLlmProvider implements LlmProvider {
       quoted_cost_cents: amountCents,
       charged_cost_cents: amountCents,
       status: "charged",
-      permission_mode: this.session.permissionMode,
+      approval_mode: this.session.approvalMode,
       notes: "automatic bounded provider credit top-up (cash flow; usage is billed against the budget)"
     });
   }
@@ -1063,7 +1063,7 @@ async function completeMockLlmCall(
       quoted_cost_cents: costCents,
       charged_cost_cents: costCents,
       status: "charged",
-      permission_mode: session.permissionMode,
+      approval_mode: session.approvalMode,
       payment_id: `mock-llm-${turn}`,
       latency_ms: Date.now() - started,
       notes: "mock test mode LLM call"
@@ -1080,7 +1080,7 @@ async function completeMockLlmCall(
       quoted_cost_cents: costCents,
       charged_cost_cents: 0,
       status: "failed",
-      permission_mode: session.permissionMode,
+      approval_mode: session.approvalMode,
       latency_ms: Date.now() - started,
       notes: (error as Error).message
     });

@@ -13,7 +13,7 @@ export const LEDGER_COLUMNS = [
   "quoted_cost_cents",
   "charged_cost_cents",
   "status",
-  "permission_mode",
+  "approval_mode",
   "payment_id",
   "tx_hash",
   "latency_ms",

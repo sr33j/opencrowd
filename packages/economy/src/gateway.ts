@@ -318,7 +318,7 @@ export class EconomyGateway {
       quoted_cost_cents: quotedCostCents,
       charged_cost_cents: outcome === "free" || outcome === "siwx" ? 0 : chargedCents,
       status: outcome === "paid_success" ? "charged" : outcome === "unknown" ? "unknown" : outcome === "paid_failure" ? "failed" : "ok",
-      permission_mode: session.permissionMode,
+      approval_mode: session.approvalMode,
       artifact_path: artifact?.path,
       notes: `purchase ${purchaseId}: ${outcome}`
     });
@@ -500,7 +500,7 @@ export class EconomyGateway {
       quoted_cost_cents: Math.round(amountUsd * 100),
       charged_cost_cents: 0,
       status: result.ok ? "ok" : "failed",
-      permission_mode: this.options.session.permissionMode,
+      approval_mode: this.options.session.approvalMode,
       notes: result.ok ? "USDC bridge between own networks (not budget spend)" : result.error
     });
     return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };

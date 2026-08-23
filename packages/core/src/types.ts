@@ -1,4 +1,10 @@
-export type PermissionMode = "ask_first" | "yolo" | "blocked";
+/**
+ * External-service purchase approval policy for a session.
+ * - ask: require approval unless a stored rule authorizes the service.
+ * - auto: skip prompts; blocks, caps, reputation, lifecycle, budget still apply.
+ * - off: prohibit external-service purchases entirely.
+ */
+export type ApprovalMode = "ask" | "auto" | "off";
 
 export type LedgerType =
   | "service_call"
@@ -22,7 +28,7 @@ export interface SessionOptions {
   workspaceRoot?: string;
   sessionId?: string;
   budgetCents?: number;
-  permissionMode?: PermissionMode;
+  approvalMode?: ApprovalMode;
   shellEnabled?: boolean;
 }
 
@@ -35,7 +41,7 @@ export interface SessionState {
   budgetCents: number;
   reservedCents: number;
   spentCents: number;
-  permissionMode: PermissionMode;
+  approvalMode: ApprovalMode;
   shellEnabled: boolean;
   /**
    * Provider and exact model IDs resolved at session start; persisted so
@@ -59,7 +65,7 @@ export interface BudgetStatus {
   spent_cents: number;
   reserved_cents: number;
   remaining_cents: number;
-  permission_mode: PermissionMode;
+  approval_mode: ApprovalMode;
 }
 
 export interface LedgerEntry {
@@ -73,7 +79,7 @@ export interface LedgerEntry {
   quoted_cost_cents?: number;
   charged_cost_cents?: number;
   status: LedgerStatus;
-  permission_mode: PermissionMode;
+  approval_mode: ApprovalMode;
   payment_id?: string;
   tx_hash?: string;
   latency_ms?: number;

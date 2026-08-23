@@ -99,7 +99,7 @@ const openCrowdHarness: GaiaHarness = {
   async run(question, context) {
     const session = await createOpenCrowdSession({
       workspaceRoot: context.runDir,
-      permissionMode: "yolo",
+      approvalMode: "auto",
       shellEnabled: true
     });
     let prompt = context.prompt;

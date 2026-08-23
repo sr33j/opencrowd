@@ -11,8 +11,7 @@ import {
   MockAgentCashAdapter,
   MockCrowdCodeAdapter,
   sharedEconomyRuntime,
-  type ApprovalHandler,
-  type ApprovalMode
+  type ApprovalHandler
 } from "@opencrowd/economy";
 import {
   createMockToolExecutor,
@@ -32,7 +31,6 @@ import {
 } from "@opencrowd/agent-runtime";
 
 export interface ReplState {
-  model?: string;
   testMode: boolean;
   testSeed?: string;
   mockProvider?: LlmProvider;
@@ -45,17 +43,7 @@ export function ensureMockRuntime(state: ReplState): ReplState {
   return state;
 }
 
-/** Session permission mode mapped onto the economy approval policy. */
-export function approvalModeFor(session: SessionState): ApprovalMode {
-  switch (session.permissionMode) {
-    case "yolo":
-      return "auto";
-    case "blocked":
-      return "off";
-    default:
-      return "ask";
-  }
-}
+
 
 export interface PersistentAgentTaskOptions {
   model?: string;
@@ -175,7 +163,7 @@ async function buildGateway(
       session,
       agentcash: demoAgentCashAdapter(),
       crowdcode: new MockCrowdCodeAdapter(),
-      approvalMode: approvalModeFor(session),
+      approvalMode: session.approvalMode,
       // Demo without a UI auto-allows: no real money exists to protect.
       approvalHandler: options.approvalHandler ?? (async () => ({ decision: "allow_once" })),
       onProgress: options.onProgress
@@ -190,7 +178,7 @@ async function buildGateway(
       session,
       agentcash: runtime.agentcash,
       crowdcode: runtime.crowdcode,
-      approvalMode: approvalModeFor(session),
+      approvalMode: session.approvalMode,
       approvalHandler: options.approvalHandler,
       onProgress: options.onProgress
     });

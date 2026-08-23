@@ -1,6 +1,6 @@
 import { loadConfig } from "./config.js";
 import { createSession } from "./session.js";
-import type { PermissionMode, SessionOptions, SessionState } from "./types.js";
+import type { ApprovalMode, SessionOptions, SessionState } from "./types.js";
 
 export type OpenCrowdSessionOptions = SessionOptions;
 
@@ -9,23 +9,24 @@ export type OpenCrowdSessionOptions = SessionOptions;
  * configuration, never from a live wallet-balance lookup.
  */
 export async function createOpenCrowdSession(options: OpenCrowdSessionOptions = {}): Promise<SessionState> {
+  const config = await loadConfig();
   const budgetCents = options.budgetCents
     ?? envCents("OPENCROWD_BUDGET_CENTS")
-    ?? (await loadConfig()).defaultBudgetCents;
+    ?? config.defaultBudgetCents;
   return createSession({
     ...options,
     budgetCents,
-    permissionMode: options.permissionMode ?? defaultPermissionMode(),
+    approvalMode: options.approvalMode ?? envApprovalMode() ?? config.approval,
     shellEnabled: options.shellEnabled ?? defaultShellEnabled()
   });
 }
 
-function defaultPermissionMode(): PermissionMode {
-  const value = process.env.OPENCROWD_PERMISSION_MODE;
-  if (value === "ask_first" || value === "yolo" || value === "blocked") {
+function envApprovalMode(): ApprovalMode | undefined {
+  const value = process.env.OPENCROWD_APPROVAL_MODE;
+  if (value === "ask" || value === "auto" || value === "off") {
     return value;
   }
-  return "ask_first";
+  return undefined;
 }
 
 function defaultShellEnabled(): boolean {

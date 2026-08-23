@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import type { BudgetStatus, PermissionMode, SessionOptions, SessionState } from "./types.js";
+import type { BudgetStatus, ApprovalMode, SessionOptions, SessionState } from "./types.js";
 import { ensureLedger } from "./ledger.js";
 
 const STATE_FILE = "session.json";
@@ -22,7 +22,7 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
     budgetCents: options.budgetCents ?? 0,
     reservedCents: 0,
     spentCents: 0,
-    permissionMode: options.permissionMode ?? "ask_first",
+    approvalMode: options.approvalMode ?? "ask",
     shellEnabled: options.shellEnabled ?? false,
     createdAt: now,
     updatedAt: now
@@ -53,7 +53,7 @@ export function budgetStatus(state: SessionState): BudgetStatus {
     spent_cents: state.spentCents,
     reserved_cents: state.reservedCents,
     remaining_cents: Math.max(0, state.budgetCents - state.spentCents - state.reservedCents),
-    permission_mode: state.permissionMode
+    approval_mode: state.approvalMode
   };
 }
 
@@ -61,13 +61,18 @@ export async function setSessionBudget(state: SessionState, budgetCents: number)
   if (!Number.isInteger(budgetCents) || budgetCents < 0) {
     throw new Error("budget must be a non-negative integer number of cents");
   }
+  // The budget is a cumulative cap on value already consumed; it can never
+  // drop below what the session has finalized as spent.
+  if (budgetCents < state.spentCents) {
+    throw new Error(`budget cannot be set below already-spent ${state.spentCents} cents`);
+  }
   state.budgetCents = budgetCents;
   await saveSession(state);
   return state;
 }
 
-export async function setPermissionMode(state: SessionState, mode: PermissionMode): Promise<SessionState> {
-  state.permissionMode = mode;
+export async function setApprovalMode(state: SessionState, mode: ApprovalMode): Promise<SessionState> {
+  state.approvalMode = mode;
   await saveSession(state);
   return state;
 }

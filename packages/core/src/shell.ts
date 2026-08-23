@@ -42,7 +42,7 @@ export async function runShell(
     session_id: state.sessionId,
     type: "shell",
     status: result.exit_code === 0 ? "ok" : "failed",
-    permission_mode: state.permissionMode,
+    approval_mode: state.approvalMode,
     notes: JSON.stringify({ command, cwd: resolvedCwd, exit_code: result.exit_code, timed_out: result.timed_out })
   });
   return result;

@@ -6,9 +6,9 @@ import {
   createOpenCrowdSession,
   loadConfig,
   readAgentCashWallet,
-  setPermissionMode,
+  setApprovalMode,
   setSessionBudget,
-  type PermissionMode,
+  type ApprovalMode,
   type ProgressEvent,
   type SessionState
 } from "@opencrowd/core";
@@ -17,7 +17,13 @@ import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } f
 import { buildSessionSummary } from "@opencrowd/agent-runtime";
 import { walletSummary } from "../wallet.js";
 import { ensureMockRuntime, runPersistentAgentTask, warmStartEconomy, type ReplState } from "../agent-task.js";
-import { COMMANDS, matchCommands, runSlashCommand, type CommandResult } from "./commands.js";
+import {
+  matchCommands,
+  renderCommandHelp,
+  runSlashCommand,
+  sessionHasPendingReviews,
+  type CommandResult
+} from "../registry.js";
 import { envFlag, formatCents, shortUrl, truncateMiddle } from "../shared.js";
 
 let nextItemId = 1;
@@ -60,12 +66,14 @@ interface WalletInfo {
   balanceCents?: number;
 }
 
-function App({ session, initialTestMode, initialTestSeed, defaultModel, onboarding }: AppProps): React.ReactElement {
+function App({ session: initialSession, initialTestMode, initialTestSeed, defaultModel, onboarding }: AppProps): React.ReactElement {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const width = Math.max(60, Math.min(140, stdout?.columns ?? 100));
 
+  const [session, setSession] = useState(initialSession);
   const stateRef = useRef<ReplState>({ testMode: initialTestMode, testSeed: initialTestSeed });
+  const forceQuitRef = useRef(false);
   const historyRef = useRef<string[]>([]);
   const lastServiceUrlRef = useRef<string>("");
   const ctrlCArmedRef = useRef(false);
@@ -173,6 +181,14 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
     if (exiting) {
       return;
     }
+    if (!forceQuitRef.current && await sessionHasPendingReviews(session).catch(() => false)) {
+      forceQuitRef.current = true;
+      push({
+        kind: "note",
+        text: "a confirmed paid purchase still needs its CrowdCode review — ask the agent to submit it, or /quit again to exit with the review pending"
+      });
+      return;
+    }
     setExiting(true);
     try {
       const summary = await buildSessionSummary(session, reason, { compact: false });
@@ -231,9 +247,9 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
     }
   }, [push]);
 
-  const submitTask = useCallback(async (task: string, overrides: { model?: string; testMode?: boolean; testSeed?: string } = {}) => {
+  const submitTask = useCallback(async (task: string) => {
     const state = stateRef.current;
-    const testMode = overrides.testMode ?? state.testMode;
+    const testMode = state.testMode;
     if (testMode) {
       ensureMockRuntime(state);
     }
@@ -242,9 +258,8 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
     setActivity("starting…");
     try {
       const outputText = await runPersistentAgentTask(session, task, {
-        model: overrides.model ?? state.model,
         testMode,
-        testSeed: overrides.testSeed ?? state.testSeed,
+        testSeed: state.testSeed,
         mockProvider: testMode ? state.mockProvider : undefined,
         mockToolExecutor: testMode ? state.mockToolExecutor : undefined,
         compactOutput: true,
@@ -273,12 +288,10 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
   const handleCommandResult = useCallback(async (result: CommandResult) => {
     switch (result.kind) {
       case "text":
-        push({ kind: "block", label: result.label, text: result.body.startsWith("__summary__")
-          ? indent(await buildSessionSummary(session, "Interactive summary.", { compact: !result.body.endsWith("verbose") }))
-          : result.body });
+        push({ kind: "block", label: result.label, text: result.body });
         return;
       case "help":
-        push({ kind: "block", label: "Commands", text: renderHelp() });
+        push({ kind: "block", label: "Commands", text: renderCommandHelp() });
         return;
       case "clear": {
         const cleared = await clearConversation(session);
@@ -298,14 +311,18 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
       case "exit":
         await finalize("Interactive session ended.");
         return;
-      case "run-task":
-        if (result.overrides.budgetCents !== undefined) {
-          await setSessionBudget(session, result.overrides.budgetCents);
-        }
-        await submitTask(result.task, result.overrides);
+      case "new-session": {
+        const next = await createOpenCrowdSession({ workspaceRoot: process.cwd() });
+        setSession(next);
+        forceQuitRef.current = false;
+        stdout?.write("\x1b[2J\x1b[3J\x1b[H");
+        push({ kind: "banner", text: "" });
+        push({ kind: "note", text: `new session ${next.sessionId}` });
+        setTick((value) => value + 1);
         return;
+      }
     }
-  }, [finalize, push, session, stdout, submitTask]);
+  }, [finalize, push, session, stdout]);
 
   const handleSubmit = useCallback(async (line: string) => {
     const trimmed = line.trim();
@@ -319,11 +336,12 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
     if (trimmed.startsWith("/")) {
       push({ kind: "command", text: trimmed });
       try {
-        const result = await runSlashCommand(session, stateRef.current, trimmed.slice(1));
+        const result = await runSlashCommand({ session, state: stateRef.current }, trimmed.slice(1));
         await handleCommandResult(result);
       } catch (error) {
         push({ kind: "error", text: (error as Error).message });
       }
+      setTick((value) => value + 1);
       void refreshWallet();
       return;
     }
@@ -335,8 +353,8 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
   }, [finalize, handleCommandResult, push, refreshWallet, session, submitTask]);
 
   const toggleMode = useCallback(() => {
-    const next: PermissionMode = session.permissionMode === "yolo" ? "ask_first" : "yolo";
-    void setPermissionMode(session, next).then(() => {
+    const next: ApprovalMode = session.approvalMode === "auto" ? "ask" : "auto";
+    void setApprovalMode(session, next).then(() => {
       push({ kind: "note", text: `permission mode → ${next}` });
       setTick((value) => value + 1);
     });
@@ -486,8 +504,8 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
 
   const budget = budgetStatus(session);
   const state = stateRef.current;
-  const modeLabel = session.permissionMode;
-  const modelLabel = state.model ?? defaultModel;
+  const modeLabel = session.approvalMode;
+  const modelLabel = session.models ? `${session.models.provider}/${session.models.main}` : defaultModel;
 
   return (
     <Box flexDirection="column">
@@ -572,7 +590,7 @@ function TranscriptLine({ item, width, sessionId, modeLabel, modelLabel, testMod
             </Text>
             <Text dimColor>session {sessionId.slice(0, 8)}…{sessionId.slice(-6)} · mode {modeLabel} · model {modelLabel}{testMode ? " · DEMO — mock wallet, no real money" : ""}</Text>
           </Box>
-          <Text dimColor>  type a task and press enter · /help for commands · shift+tab toggles ask_first/yolo · ctrl+c to quit</Text>
+          <Text dimColor>  type a task and press enter · /help for commands · shift+tab toggles ask/auto approval · ctrl+c to quit</Text>
         </Box>
       );
     case "user":
@@ -687,7 +705,7 @@ function StatusBar({ walletLabel, walletBalanceCents, spentCents, remainingCents
     <Box marginTop={1}>
       <Text dimColor>{truncateMiddle(left, Math.max(20, width - modeBadge.length - hint.length - 3))}</Text>
       <Text>{" ".repeat(padding)}</Text>
-      <Text color={mode === "yolo" ? "red" : "green"} bold>{modeBadge}</Text>
+      <Text color={mode === "auto" ? "red" : "green"} bold>{modeBadge}</Text>
       <Text dimColor>{hint}</Text>
     </Box>
   );
@@ -700,10 +718,6 @@ function splitChunk(chunk: string): [string, boolean] {
     return [normalized, false];
   }
   return [normalized.slice(0, newlineIndex), true];
-}
-
-function renderHelp(): string {
-  return COMMANDS.map((command) => `  ${command.usage.padEnd(50)} ${command.summary}`).join("\n");
 }
 
 function indent(text: string): string {

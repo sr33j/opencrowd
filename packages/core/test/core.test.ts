@@ -51,13 +51,13 @@ describe("budget accounting", () => {
 });
 
 describe("OpenCrowd session defaults", () => {
-  it("defaults to ask_first mode, shell access, and the configured budget cap without any network lookup", async () => {
+  it("defaults to ask mode, shell access, and the configured budget cap without any network lookup", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
 
     const session = await createOpenCrowdSession({ workspaceRoot: root });
 
-    expect(session.permissionMode).toBe("ask_first");
+    expect(session.approvalMode).toBe("ask");
     expect(session.shellEnabled).toBe(true);
     expect(session.budgetCents).toBe(2000);
   });

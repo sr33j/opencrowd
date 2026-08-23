@@ -438,7 +438,7 @@ describe("model resolution", () => {
 describe("agent loop transcript", () => {
   it("advertises the gateway lifecycle when paid tools exist, and says paid services are unavailable otherwise", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     let systemPrompt = "";
     const capture: LlmProvider = {
       async complete(messages): Promise<LlmResponse> {
@@ -451,7 +451,7 @@ describe("agent loop transcript", () => {
     expect(systemPrompt).toContain("personal machine");
     expect(systemPrompt).toContain("Paid external services are unavailable in this run");
 
-    const session2 = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session2 = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     await runAgentTask(session2, "host an app", {
       provider: capture,
       dynamicTools: { definitions: [], execute: async () => ({ ok: true, data: {} }) }
@@ -463,7 +463,7 @@ describe("agent loop transcript", () => {
 
   it("includes budget snapshots on every tool result message", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const persisted: LlmMessage[] = [];
     const provider: LlmProvider = {
       async complete(messages): Promise<LlmResponse> {
@@ -532,7 +532,7 @@ describe("terminal rendering", () => {
 describe("connector dynamic tools", () => {
   it("advertises connector tools, dispatches to their executor, and retires the legacy surface", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const executed: Array<{ name: string; args: Record<string, unknown> }> = [];
     let systemPrompt = "";
     const provider: LlmProvider = {
@@ -616,7 +616,7 @@ describe("completion gating", () => {
 describe("subagent delegation", () => {
   it("runs spawn_subagent locally, persists the trajectory, and preserves assistant text with tool calls", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const persisted: LlmMessage[] = [];
     let mainSystemPrompt = "";
     let subagentSystemPrompt = "";
@@ -676,7 +676,7 @@ describe("subagent delegation", () => {
 
   it("rejects spawn_subagent when subagents are not enabled and paid tools inside subagents", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const mainScript: LlmProvider = {
       async complete(messages): Promise<LlmResponse> {
         const toolResult = messages.find((message) => message.role === "tool");
@@ -714,7 +714,7 @@ describe("subagent delegation", () => {
         return { content: "", toolCalls: [{ id: "call_2", name: "complete_session", arguments: { final_message: "done" } }] };
       }
     };
-    const session2 = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session2 = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const result = await runAgentTaskDetailed(session2, "delegate a search", {
       provider: mainWithSubagent,
       subagent: { model: "cheap-model", provider: subagentScript }
@@ -737,7 +737,7 @@ describe("parallel and background subagents", () => {
 
   it("runs spawns from one reply concurrently and namespaces their writes", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const events: string[] = [];
     let subagentCalls = 0;
     const subagentProvider: LlmProvider = {
@@ -789,7 +789,7 @@ describe("parallel and background subagents", () => {
 
   it("supports background spawns joined via check_subagents", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50, permissionMode: "yolo" });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     const events: string[] = [];
     const mainProvider: LlmProvider = {
       async complete(messages): Promise<LlmResponse> {

@@ -49,7 +49,7 @@ export async function completeSession(session: SessionState, finalMessage: strin
     session_id: session.sessionId,
     type: "session",
     status: "ok",
-    permission_mode: session.permissionMode,
+    approval_mode: session.approvalMode,
     notes: finalMessage
   });
   const rows = await readLedger(session.ledgerPath);

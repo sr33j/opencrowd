@@ -1,17 +1,8 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { configDir } from "@opencrowd/core";
+import { configDir, type ApprovalMode } from "@opencrowd/core";
 
-/**
- * External-service approval policy. Approval governs external service
- * purchases only; LLM inference is governed by the session budget.
- *
- * - `ask`: require approval unless a stored rule authorizes the service.
- * - `auto`: skip prompts, while still enforcing blocks, caps, reputation
- *   checks, the payment lifecycle, and the session budget.
- * - `off`: prohibit external-service purchases entirely.
- */
-export type ApprovalMode = "ask" | "auto" | "off";
+export type { ApprovalMode };
 
 export function isApprovalMode(value: unknown): value is ApprovalMode {
   return value === "ask" || value === "auto" || value === "off";
