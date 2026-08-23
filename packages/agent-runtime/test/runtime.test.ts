@@ -6,6 +6,7 @@ import { createSession, readLedger } from "../../core/src/index.js";
 import { VeniceError } from "venice-x402-client";
 import {
   BudgetedLlmProvider,
+  createOpenCrowdRuntime,
   createMockToolExecutor,
   MOCK_X402_SERVICES,
   MockLlmProvider,
@@ -565,6 +566,81 @@ describe("connector dynamic tools", () => {
     expect(executed).toEqual([{ name: "agentcash_fetch", args: { url: "https://api.paid.dev/x" } }]);
     expect(systemPrompt).toContain("HOUSE RULES MARKER");
     expect(systemPrompt).not.toContain("search_services");
+  });
+});
+
+describe("dependency-injected runtime", () => {
+  it("runs a task through injected storage, provider, and economy port", async () => {
+    const root = await tempRoot();
+    const persisted: LlmMessage[] = [];
+    const executed: string[] = [];
+    const runtime = createOpenCrowdRuntime({
+      workspace: root,
+      storage: {
+        createSession: (options) => createSession({ ...options, budgetCents: 100 }),
+        loadSession: async () => {
+          throw new Error("not used");
+        },
+        appendMessage: async (_session, message) => {
+          persisted.push(message);
+        },
+        history: async () => []
+      },
+      llmProvider: async () => ({
+        kind: "scripted",
+        provider: {
+          async complete(messages: LlmMessage[]): Promise<LlmResponse> {
+            const toolResult = messages.find((message) => message.role === "tool");
+            if (!toolResult) {
+              return { content: "", toolCalls: [{ id: "c1", name: "injected_tool", arguments: { a: 1 } }] };
+            }
+            return { content: "", toolCalls: [{ id: "c2", name: "complete_session", arguments: { final_message: "runtime done" } }] };
+          }
+        }
+      }),
+      economy: async () => ({
+        definitions: () => [{ name: "injected_tool", description: "test", parameters: { type: "object", properties: {} } }],
+        execute: async (name) => {
+          executed.push(name);
+          return { ok: true, data: { done: true } };
+        },
+        hasPendingRequiredReviews: async () => false
+      })
+    });
+
+    const session = await runtime.createSession();
+    expect(session.workspaceRoot).toBe(root);
+    const result = await runtime.runTask(session, "do the thing");
+
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("runtime done");
+    expect(executed).toEqual(["injected_tool"]);
+    // Persistence went through the injected storage, not terminal globals.
+    expect(persisted.some((message) => message.role === "assistant")).toBe(true);
+  });
+
+  it("blocks completion through the injected economy port's pending reviews", async () => {
+    const root = await tempRoot();
+    const runtime = createOpenCrowdRuntime({
+      workspace: root,
+      llmProvider: async () => ({
+        kind: "scripted",
+        provider: {
+          async complete(): Promise<LlmResponse> {
+            return { content: "finished", toolCalls: [] };
+          }
+        }
+      }),
+      economy: async () => ({
+        definitions: () => [],
+        execute: async () => ({ ok: true }),
+        hasPendingRequiredReviews: async () => true
+      })
+    });
+    const session = await runtime.createSession({ budgetCents: 100 });
+    const result = await runtime.runTask(session, "finish");
+    expect(result.outcome).toBe("stopped");
+    expect(String(result.summary.final_message)).toContain("required review");
   });
 });
 

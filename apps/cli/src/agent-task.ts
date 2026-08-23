@@ -15,17 +15,15 @@ import {
 } from "@opencrowd/economy";
 import {
   createMockToolExecutor,
+  createOpenCrowdRuntime,
   fallbackContextWindowTokens,
-  MockLlmProvider,
   resolveLlmRuntime,
-  runAgentTask,
-  runAgentTaskDetailed,
-  type AgentRunOptions,
   type AgentTaskResult,
   type LlmMessage,
   type LlmProvider,
   type LlmResponse,
   type LlmRuntimeSelection,
+  type RuntimeLlm,
   type SubagentOptions,
   type ToolExecutor
 } from "@opencrowd/agent-runtime";
@@ -67,8 +65,12 @@ export async function runPersistentAgentTask(
   task: string,
   options: PersistentAgentTaskOptions = {}
 ): Promise<string> {
-  const runOptions = await preparePersistentRun(session, options);
-  return runAgentTask(session, task, runOptions);
+  const runtime = cliRuntime(session, options);
+  return runtime.runTaskRendered(session, task, {
+    maxTurns: options.maxTurns,
+    compactOutput: options.compactOutput ?? options.testMode ?? false,
+    onProgress: options.onProgress
+  });
 }
 
 export async function runPersistentAgentTaskDetailed(
@@ -76,77 +78,58 @@ export async function runPersistentAgentTaskDetailed(
   task: string,
   options: PersistentAgentTaskOptions = {}
 ): Promise<AgentTaskResult> {
-  const runOptions = await preparePersistentRun(session, options);
-  return runAgentTaskDetailed(session, task, runOptions);
+  const runtime = cliRuntime(session, options);
+  return runtime.runTask(session, task, {
+    maxTurns: options.maxTurns,
+    compactOutput: options.compactOutput ?? options.testMode ?? false,
+    onProgress: options.onProgress
+  });
 }
 
-async function preparePersistentRun(
-  session: SessionState,
-  options: PersistentAgentTaskOptions
-): Promise<AgentRunOptions> {
-  const gateway = await buildGateway(session, options);
-  const gatewayOptions = gateway
-    ? {
-      dynamicTools: {
-        definitions: gateway.definitions(),
-        execute: (name: string, args: Record<string, unknown>) => gateway.execute(name, args)
-      },
-      completionGate: async () => {
-        return (await gateway.hasPendingRequiredReviews())
-          ? "a confirmed paid purchase still needs its required review; submit it with review_paid_service"
-          : undefined;
+/**
+ * The CLI adapter around the dependency-injected runtime: it supplies the
+ * typed provider wiring (or demo mocks), the economy gateway factory, and
+ * default local-filesystem storage.
+ */
+function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) {
+  return createOpenCrowdRuntime({
+    workspace: session.workspaceRoot,
+    llmProvider: async (current) => {
+      if (options.testMode) {
+        return {
+          kind: "scripted",
+          provider: options.mockProvider ?? createDemoLlmProvider(),
+          toolExecutor: options.mockToolExecutor ?? createMockToolExecutor(),
+          contextWindowTokens: fallbackContextWindowTokens("mock-test-mode")
+        } satisfies RuntimeLlm;
       }
-    }
-    : {};
-
-  if (options.testMode) {
-    const contextWindowTokens = fallbackContextWindowTokens("mock-test-mode");
-    const history = await compactedHistory(session, contextWindowTokens, options.onProgress);
-    return {
-      maxTurns: options.maxTurns,
-      contextWindowTokens,
-      onProgress: options.onProgress,
-      provider: options.mockProvider ?? createDemoLlmProvider(),
-      toolExecutor: options.mockToolExecutor ?? createMockToolExecutor(),
-      compactOutput: options.compactOutput ?? true,
-      history,
-      ...gatewayOptions,
-      onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
-    };
-  }
-
-  const promptSections = await vendorInstructions();
-  const llm = await resolveLlmRuntime(session, {
-    model: options.model,
-    subagentModel: options.subagentModel,
-    auto: options.forceAutoPolicy
-  });
-  const contextWindowTokens = llm.catalog.find((model) => model.id === llm.models.main)?.contextWindowTokens
-    ?? fallbackContextWindowTokens(llm.models.main);
-  const history = await compactedHistory(session, contextWindowTokens, options.onProgress);
-  return {
-    maxTurns: options.maxTurns,
-    contextWindowTokens,
-    onProgress: options.onProgress,
-    llm: {
-      provider: llm.provider,
-      model: llm.models.main,
-      maxCostCentsPerCall: llm.maxCostCentsPerCall,
-      maxTopUpCentsPerAction: llm.maxTopUpCentsPerAction,
-      promptCacheKey: session.sessionId,
-      catalog: llm.catalog,
-      // Stream deltas so time-to-first-token is visible in the UI.
-      onTextDelta: options.onProgress
-        ? (delta) => options.onProgress?.({ type: "assistant_delta", message: delta })
-        : undefined
+      const llm = await resolveLlmRuntime(current, {
+        model: options.model,
+        subagentModel: options.subagentModel,
+        auto: options.forceAutoPolicy
+      });
+      return {
+        kind: "typed",
+        main: {
+          provider: llm.provider,
+          model: llm.models.main,
+          maxCostCentsPerCall: llm.maxCostCentsPerCall,
+          maxTopUpCentsPerAction: llm.maxTopUpCentsPerAction,
+          promptCacheKey: current.sessionId,
+          catalog: llm.catalog,
+          // Stream deltas so time-to-first-token is visible in the UI.
+          onTextDelta: options.onProgress
+            ? (delta) => options.onProgress?.({ type: "assistant_delta", message: delta })
+            : undefined
+        },
+        subagent: subagentOptionsFor(current, llm),
+        contextWindowTokens: llm.catalog.find((model) => model.id === llm.models.main)?.contextWindowTokens
+          ?? fallbackContextWindowTokens(llm.models.main),
+        promptSections: await vendorInstructions()
+      } satisfies RuntimeLlm;
     },
-    compactOutput: options.compactOutput ?? false,
-    subagent: subagentOptionsFor(session, llm),
-    promptSections,
-    history,
-    ...gatewayOptions,
-    onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
-  };
+    economy: (current) => buildGateway(current, options)
+  });
 }
 
 /**
