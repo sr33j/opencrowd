@@ -5,6 +5,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@opencrowd/core": resolve(__dirname, "packages/core/src/index.ts"),
+      "@opencrowd/economy": resolve(__dirname, "packages/economy/src/index.ts"),
       "@opencrowd/agent-runtime": resolve(__dirname, "packages/agent-runtime/src/index.ts")
     }
   }

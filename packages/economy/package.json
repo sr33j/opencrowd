@@ -1,0 +1,44 @@
+{
+  "name": "@opencrowd/economy",
+  "version": "0.1.0",
+  "description": "OpenCrowd economy: typed AgentCash/CrowdCode adapters and the enforced paid-capability lifecycle",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/economy"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@opencrowd/core": "0.1.0"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "zod": "^3.25.17"
+  }
+}
