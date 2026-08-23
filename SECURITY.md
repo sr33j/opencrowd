@@ -1,7 +1,7 @@
 # Security
 
-OpenCrowd is a local agent that holds a real USDC wallet and spends real money.
-Read this before pointing it at funds you care about.
+OpenCrowd is a local agent that spends real USDC. Read this before pointing
+it at funds you care about.
 
 ## Reporting a vulnerability
 
@@ -11,61 +11,67 @@ with a description and reproduction steps. Do not open a public issue for
 anything that could put user funds at risk. You should receive a response
 within 72 hours.
 
-## Threat model
+## Security model: enforcement in code, not prompt trust
 
-### The agent wallet is a blast radius, not a bank account
+Economic safety never depends on the model following instructions. Every
+guardrail below runs in ordinary code on every paid call, regardless of what
+the model asks for:
 
-OpenCrowd is designed around a dedicated, low-value wallet:
-
-- The wizard creates a **fresh wallet** that exists only on your machine.
-  Fund it with what you are willing to let an autonomous agent spend.
-- Session budgets default to **min($20, wallet balance)** and are enforced
-  locally with reserve/finalize accounting before every paid call.
-- **Never** point OpenCrowd at a primary wallet. Budgets are a local policy
-  gate; if the machine or key is compromised, the entire wallet is exposed.
+- **A stable gateway is the only paid surface.** The model sees six tools
+  (`get_wallet_status`, `find_paid_service`, `inspect_paid_service`,
+  `call_paid_service`, `review_paid_service`, `bridge_usdc`). Raw vendor
+  tools are never exposed to it.
+- **The enforced purchase lifecycle** runs for every potentially paid call:
+  inspect → CrowdCode reputation pre-check → approval policy → local budget
+  reservation → AgentCash execution → outcome reconciliation → immutable
+  receipt → required review → audit entry. A CrowdCode outage blocks new
+  payments. Only rails CrowdCode verifies end-to-end (x402 USDC on Base,
+  MPP USDC on Tempo) may pay automatically.
+- **Approval policy** (`ask` by default) requires a human decision — allow
+  once, always-allow with caps, deny, or block — before the first payment to
+  any service. `auto` skips prompts but still enforces blocks, caps,
+  reputation checks, the lifecycle, and the budget. `off` prohibits
+  purchases entirely.
+- **Session budgets** are a local cumulative cap on LLM and service spend,
+  enforced with reserve/finalize accounting. A budget change never moves
+  money, and the budget can never be set below already-finalized spend.
+- **Payment evidence is quarantined.** Payment proofs, payer identity, and
+  transaction hashes are captured by adapters into immutable receipts; they
+  never enter prompts, model-visible tool results, or normal CLI output. The
+  model cannot supply or forge review evidence — reviews are built from the
+  stored receipt.
+- **Ambiguous outcomes are never retried.** A transport failure on a
+  state-changing call is recorded as `unknown`, conservatively charged at
+  the quoted ceiling, and requires human attention before any retry.
+- **Subagents structurally cannot pay**: they get local read/write tools
+  only, cannot approve anything, and cannot spawn deeper subagents.
 
 ### Untrusted marketplace content (prompt injection)
 
-The agent reads service titles, descriptions, and responses from public x402
-marketplaces (Coinbase Bazaar by default). That content is **untrusted input
-to an LLM that controls a funded wallet**. A malicious listing could try to
-talk the agent into paying for it.
+Service listings, schemas, and responses are untrusted input to an LLM. A
+malicious listing can try to talk the agent into paying for it — which is
+why approval, reputation, caps, and budgets are enforced in code, not left
+to the model's judgment.
 
-Mitigations:
+### The wallet
 
-- The default permission mode is **`ask_first`**: the agent must ask you
-  before paying any service it has not been granted, and the approval prompt
-  shows the service URL, the stated reason, and cost caps.
-- Per-service caps (`max_cost_cents`, `session_max_cents`) and the session
-  budget bound the damage of any single bad decision.
-- `yolo` mode (auto-approve unless blocked) is an explicit opt-in via
-  shift+tab or `--mode yolo`. Use it with budgets you can afford to lose.
-
-### Key storage
-
-- Seed phrases are stored in the **OS credential store** (e.g. macOS
-  Keychain) when available. They are never written to `config.json` or
-  `wallets.json`.
-- `OPENCROWD_WALLET_SECRET_STORE=file` switches to a plaintext
-  `wallet-secrets.json` with `0600` permissions. This exists for headless
-  environments and tests; treat it as unencrypted key material on disk.
-- `OPENCROWD_WALLET_PRIVATE_KEY` / `WALLET_PRIVATE_KEY` env vars (and `.env`)
-  are supported as an escape hatch. Shell history, process listings, and
-  committed `.env` files are common leak paths — prefer the managed wallet,
-  and only use burner keys here.
-- `opencrowd wallet export` reveals the seed phrase after an explicit
-  interactive confirmation. Anyone with the phrase can spend the wallet.
+AgentCash owns wallet creation and custody (`~/.agentcash/wallet.json`).
+OpenCrowd reads the key at signing time for Venice SIWX authentication and
+never copies, exports, or stores it elsewhere. There is no OpenCrowd wallet
+registry, no seed-phrase export, and no key material under
+`~/.config/opencrowd/`. Treat the AgentCash wallet as a dedicated, low-value
+agent wallet: budgets are local policy, and a compromised machine exposes
+whatever the wallet holds.
 
 ### Shell access
 
-The CLI agent has a gated shell tool (enabled by default in the interactive
-CLI, disabled by default for the MCP server and local API). Commands run with
-your user's privileges in the workspace. Disable it with `--disable-shell` or
-`OPENCROWD_SHELL_ENABLED=0` if you do not want the model running commands.
+The agent has a gated shell tool (enabled by default in the interactive
+CLI). Commands run with your user's privileges in the workspace. Disable it
+with `--disable-shell` or `OPENCROWD_SHELL_ENABLED=0`.
 
 ### What OpenCrowd does not do
 
-- No telemetry; nothing is phoned home. Sessions, ledgers, and artifacts stay
-  in `./sessions/` and config stays in `~/.config/opencrowd/`.
-- No custodial service: there is no server holding your keys, and no way to
-  recover a wallet without the seed phrase backup.
+- No telemetry; nothing is phoned home. Sessions, ledgers, receipts, and
+  artifacts stay in `./sessions/`, and config stays in
+  `~/.config/opencrowd/`.
+- No custodial service: no server holds keys or funds on your behalf.

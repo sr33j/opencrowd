@@ -63,10 +63,6 @@ export function configPath(): string {
   return join(configDir(), "config.json");
 }
 
-export function permissionsPath(): string {
-  return join(configDir(), "permissions.json");
-}
-
 export async function loadConfig(): Promise<OpenCrowdConfig> {
   try {
     const text = await readFile(configPath(), "utf8");

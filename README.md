@@ -1,14 +1,14 @@
 # OpenCrowd
 
-**A CLI agent with its own wallet.** Give it a task and a budget; it finds paid
-[x402](https://www.x402.org/) services on the open market, pays for them in
-USDC on Base, and gets the job done — asking you before it spends on anything
-new, and writing every cent to a local ledger.
+**A local CLI agent with its own USDC wallet.** Give it a task and a local
+spend cap; it uses local tools when it can, buys external capabilities
+through one enforced purchase lifecycle when it can't, and records work,
+costs, receipts, and reviews on your machine.
 
 [![CI](https://github.com/sr33j/opencrowd/actions/workflows/ci.yml/badge.svg)](https://github.com/sr33j/opencrowd/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-![OpenCrowd demo: the agent asks permission, pays an x402 service, and accounts for every cent](docs/demo.gif)
+![OpenCrowd demo: the agent asks approval, pays a service, and accounts for every cent](docs/demo.gif)
 
 ## Try it in 60 seconds (no crypto required)
 
@@ -16,25 +16,33 @@ new, and writing every cent to a local ledger.
 npx opencrowd --demo
 ```
 
-Demo mode runs the full loop — service discovery, payment, artifacts, ledger —
-against a mock wallet, mock x402 services, and a mock LLM. No real money moves.
+Demo mode runs the real enforced lifecycle — discovery, inspection,
+reputation check, approval, payment, receipt, required review — over
+in-memory mock adapters. No real money moves and nothing touches the
+network.
 
-## Run it for real
+## Installation and startup
 
 ```sh
-npx opencrowd
+npm install -g opencrowd   # or: npx opencrowd
+opencrowd
 ```
+
+The TUI renders immediately from local state; the AgentCash and CrowdCode
+vendors, wallet balance, and model catalog initialize concurrently in the
+background. `opencrowd doctor` diagnoses local dependencies, provider
+authentication, the wallet, vendor connections, and the network explicitly.
 
 First launch is two steps — there is no wallet setup:
 
-1. **Fund the wallet** — it already exists (created automatically, shared
-   with the AgentCash and CrowdCode tools so everything draws one balance).
-   Scan the QR or tap the MetaMask link to send a few dollars of USDC on
-   Base. The wallet is the agent's entire blast radius: it can never spend
-   more than you put in.
+1. **Fund the wallet** — it already exists (AgentCash creates it
+   automatically at `~/.agentcash/wallet.json`; OpenCrowd, AgentCash, and
+   CrowdCode all draw one balance). Scan the QR or tap the MetaMask link to
+   send a few dollars of USDC on Base. The wallet is the agent's entire
+   blast radius: it can never spend more than you put in.
 2. **Give it a task** — type what you want. The agent discovers paid
-   x402/MPP services through its connectors, checks their CrowdCode
-   reputation, and pays per call.
+   x402/MPP services, checks their CrowdCode reputation, and pays per call
+   through the enforced lifecycle.
 
 ```text
 ❯ find a service that returns live weather and get today's forecast
@@ -48,99 +56,115 @@ First launch is two steps — there is no wallet setup:
   summary: spent $0.05, remaining $19.95, services 1, artifacts 1
 ```
 
-The LLM itself is paid from the same wallet: Venice inference runs on
-prepaid credit topped up with USDC — no API keys, no subscriptions.
+## Providers
 
-## Safety model
+Venice is the default LLM provider: it authenticates with the shared
+AgentCash wallet (SIWX) and runs on prepaid Venice credit topped up with
+USDC — no API keys. Steady-state turns make exactly one network inference
+request (streamed, with a stable per-session prompt cache key); when credit
+runs out, OpenCrowd performs at most one bounded automatic top-up within the
+session budget and retries once.
 
-Real money demands real guardrails. The defaults:
+OpenRouter is optional: set `OPENROUTER_API_KEY` and
+`opencrowd config set provider openrouter`. It bills your OpenRouter account
+credit directly. There is no automatic fallback between providers — a
+provider failure surfaces with a remediation message.
 
-- **`ask` approval mode** — the agent must show you the service URL, method,
-  cost ceiling, and CrowdCode reputation before its first payment to any
-  service. Approve once, always-allow with caps, deny, or block with one key.
-  Shift+tab toggles to `auto` when you want speed; `off` prohibits purchases.
-- **Session budgets** — a configurable local cap (default $20), enforced with
-  reserve/finalize accounting around every LLM call and paid service call.
-  Unused budget never leaves the wallet.
-- **Burner-wallet design** — the agent has its own low-value wallet, never
-  your main one. Worst case is bounded by what you deposited.
-- **Full ledger** — every LLM call, service payment, and top-up lands in
-  `sessions/<id>/ledger.csv` with costs, tx hashes, and artifacts.
-- **No telemetry** — everything stays on your machine.
+Model preferences are per provider (`auto` resolves from the live catalog at
+session start; resolved IDs are recorded on the session so `run --session`
+reproduces them exactly). Change the running session with `/provider`,
+`/model`, and `/submodel`; change future-session defaults with
+`opencrowd config set`.
 
-Read [SECURITY.md](SECURITY.md) for the full threat model, including how we
-treat marketplace content as prompt-injection input.
+## Wallet
+
+There is one wallet: AgentCash's. OpenCrowd shows public addresses,
+balances, and funding links (`/wallet`, `/fund`) and never manages, copies,
+or exports keys. See [SECURITY.md](SECURITY.md) for the enforcement model.
+
+## Budget
+
+The session budget is a local cumulative cap on value consumed — LLM
+inference and paid services both count against it. Reservations are local,
+a budget change never moves money, and the cap can never drop below already
+finalized spend. Defaults come from configuration
+(`opencrowd config set budget 20`); session creation never needs a network
+lookup.
+
+## Approval
+
+Approval governs external service purchases only (LLM calls are governed by
+the budget):
+
+- `ask` (default) — a human approves each new service: allow once,
+  always-allow with per-call/session caps, deny, or block.
+- `auto` — no prompts; blocks, caps, reputation checks, the payment
+  lifecycle, and the budget still apply.
+- `off` — external purchases are prohibited; local tools and inference keep
+  working.
+
+Stored rules are managed with `/approvals`. Every confirmed paid call —
+success or failure — requires a signed CrowdCode review before the next
+purchase; pending reviews survive restarts.
 
 ## Commands
 
-Inside the interactive UI (`/help` shows this live):
-
-| Command | What it does |
-| --- | --- |
-| `/status` | Session, provider, models, wallet, budget, approval |
-| `/budget <usd>` | Set the local session spend cap |
-| `/approval ask\|auto\|off` | Control purchase approval (shift+tab toggles) |
-| `/provider` `/model` `/submodel` | Select this session's provider and models |
-| `/wallet` `/fund` | Show the shared AgentCash wallet and funding links |
-| `/ledger` `/summary` | Spend, receipts, and artifacts so far |
-
-One-shot and scripting forms:
+The generated, drift-checked reference is [docs/commands.md](docs/commands.md)
+(`/help` and `opencrowd --help` render the same registry). One-shot and
+scripting forms:
 
 ```sh
 opencrowd run --budget 1.00 "Find a service and summarize options"
 opencrowd run --session <session-id> "Follow up on the previous result"
-opencrowd run --headless --prompt "..." --output json   # programmatic run contract
+opencrowd config show
 opencrowd wallet balance
+opencrowd doctor
 opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
 ```
 
-`evals gaia` runs the GAIA validation split
-against OpenCrowd — and optionally Claude Code and Codex with the same prompt
-template and scorer — reporting accuracy and cost per question (OpenCrowd's
-cost is measured on-chain spend; comparators are estimates).
+## Headless runs
+
+```sh
+opencrowd run --headless --prompt "..." --output json
+```
+
+Headless execution never waits for UI input: the approval mode comes from
+`--approval ask|auto|off` (or the configured default), and in `ask` mode
+un-ruled purchases are denied with a clear error instead of hanging. The
+JSON output includes the outcome, final message, spend split, turn count,
+resolved model policy, artifacts, and service calls — the same contract the
+eval runner uses.
 
 ## Local state
 
 | What | Where |
 | --- | --- |
-| Config | `~/.config/opencrowd/config.json` |
+| Config (defaults for future sessions) | `~/.config/opencrowd/config.json` |
 | Wallet | `~/.agentcash/wallet.json` (owned by AgentCash; never copied) |
-| Service permissions | `~/.config/opencrowd/permissions.json` |
-| Sessions, ledger, artifacts | `./sessions/<session-id>/` |
+| Approval rules | `~/.config/opencrowd/approvals.json` |
+| Sessions, conversation, ledger, artifacts | `./sessions/<session-id>/` |
+| Purchase receipts (append-only) | `./sessions/<session-id>/purchases.jsonl` |
 
 Conversations persist per session and are automatically compacted when they
-outgrow the model's context window (archives kept under `sessions/<id>/context/`).
-
-## Configuration notes
-
-- **Provider**: Venice is the default LLM provider, authenticated with the
-  shared AgentCash wallet (SIWX) and paid from prepaid Venice credit.
-  OpenRouter is optional via `OPENROUTER_API_KEY`. There is no automatic
-  fallback between providers.
-- **Models**: per-provider `model`/`submodel` preferences in config
-  (`"venice": {"model": "auto", "submodel": "auto"}`). `auto` resolves from
-  the live catalog at session start; the resolved IDs are recorded on the
-  session for reproducibility. The main loop gets
-  `spawn_subagent`/`check_subagents` tools (local tools only, one level deep,
-  parallel with background mode).
-- **Connectors**: paid capability comes from vendor MCP servers (AgentCash
-  for wallet/payments, CrowdCode for reputation), configured under
-  `mcpServers` in config with pinned versions. Their tools are ingested
-  verbatim (`agentcash_fetch`, `crowdcode_get_service_score`, ...) and their
-  own instructions become prompt context.
-- **Env overrides**: `OPENCROWD_BUDGET_CENTS`, `OPENCROWD_APPROVAL_MODE`,
-  `OPENCROWD_SHELL_ENABLED`, `OPENCROWD_CONFIG_DIR`, `OPENCROWD_TEST_MODE`.
+outgrow the model's context window (archives kept under
+`sessions/<id>/context/`). `/clear` archives context while keeping the
+session's spend, models, and policy; `/new` starts fresh.
 
 ## Development
 
 ```sh
 npm install
-npm run build
+npm run typecheck
 npm test
+npm run smoke        # build + bundle + demo + headless smoke tests
+npm run deadcode     # knip: unused files, exports, dependencies
 ```
 
-Monorepo layout: `packages/core` (wallets, x402, sessions, budgets, ledger),
-`packages/agent-runtime` (LLM loop + tools + subagents), `packages/evals`
-(GAIA benchmark runner), `apps/cli` (the `opencrowd` binary and TUI).
+Package layout (see [docs/architecture.md](docs/architecture.md) for the
+full contract): `packages/core` (vendor-neutral sessions, budget, storage,
+tool contracts), `packages/economy` (typed AgentCash/CrowdCode adapters and
+the enforced purchase lifecycle), `packages/agent-runtime` (LLM loop,
+providers, subagents, DI runtime), `packages/evals` (GAIA benchmark
+runner), `apps/cli` (the `opencrowd` binary, TUI, and command registry).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed [MIT](LICENSE).

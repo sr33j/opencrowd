@@ -33,6 +33,16 @@
         "@modelcontextprotocol/sdk",
         "venice-x402-client"
       ]
+    },
+    ".": {
+      "entry": [
+        "test/architecture.test.ts",
+        "scripts/*.mjs"
+      ],
+      "project": [
+        "test/**/*.ts",
+        "scripts/**/*.mjs"
+      ]
     }
   }
 }
