@@ -53,13 +53,13 @@ export async function sharedConnectorManager(log?: (message: string) => void): P
   return sharedManagerPromise;
 }
 
+/**
+ * Live balance/timestamp facts stay OUT of these sections: they land in the
+ * stable prompt prefix, and any churn there breaks provider prompt caching.
+ * The model reads balances through its wallet tool instead.
+ */
 export async function buildEconomyContext(manager: ConnectorManager): Promise<EconomyContext> {
-  const promptSections: string[] = [];
-  const balances = await liveBalances(manager);
-  if (balances) {
-    promptSections.push(`Current wallet state (live): ${balances}`);
-  }
-  promptSections.push(HOUSE_RULES);
+  const promptSections: string[] = [HOUSE_RULES];
   for (const { server, text } of manager.instructions()) {
     promptSections.push(`Instructions from the ${server} MCP server:\n${truncate(text, INSTRUCTIONS_CHAR_CAP)}`);
   }
@@ -80,17 +80,6 @@ const HOUSE_RULES = [
   "Only x402 USDC on Base and MPP USDC on Tempo are review-verifiable rails.",
   "Never request, display, or invent wallet secrets or payment proof."
 ].join(" ");
-
-async function liveBalances(manager: ConnectorManager): Promise<string | undefined> {
-  if (!manager.hasTool("agentcash_get_balance")) {
-    return undefined;
-  }
-  const result = await manager.execute("agentcash_get_balance", {});
-  if (!result.ok) {
-    return undefined;
-  }
-  return typeof result.data === "string" ? result.data : JSON.stringify(result.data);
-}
 
 function truncate(value: string, maxLength: number): string {
   return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;

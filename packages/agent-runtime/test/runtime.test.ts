@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSession, readLedger } from "../../core/src/index.js";
+import { VeniceError } from "venice-x402-client";
 import {
   BudgetedLlmProvider,
   createMockToolExecutor,
@@ -16,6 +17,7 @@ import {
   runAgentTask,
   runAgentTaskDetailed,
   toWireChatMessage,
+  VeniceProvider,
   type LlmMessage,
   type LlmProvider,
   type LlmResponse,
@@ -152,6 +154,169 @@ describe("typed providers and budget accounting", () => {
 
     const response = await provider.complete([{ role: "user", content: "hi" }]);
     expect(response.toolCalls).toEqual([{ id: "a", name: "get_budget_status", arguments: {} }]);
+  });
+});
+
+describe("Venice provider", () => {
+  interface FakeVeniceCall {
+    path: string;
+    body: Record<string, unknown>;
+  }
+
+  function fakeVeniceClient(options: {
+    responses?: Array<Response | Error>;
+    balances?: number[];
+  } = {}) {
+    const calls: FakeVeniceCall[] = [];
+    const topUps: number[] = [];
+    let balanceCalls = 0;
+    let requestIndex = 0;
+    const balances = options.balances ?? [];
+    const client = {
+      get balance() {
+        return balances[Math.min(requestIndex, Math.max(balances.length - 1, 0))] ?? 0;
+      },
+      async requestRaw(path: string, init?: RequestInit): Promise<Response> {
+        calls.push({ path, body: init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {} });
+        const scripted = options.responses?.[requestIndex];
+        requestIndex += 1;
+        if (scripted instanceof Error) {
+          throw scripted;
+        }
+        return scripted ?? new Response(JSON.stringify({
+          choices: [{ message: { content: "done" } }],
+          usage: { prompt_tokens: 5, completion_tokens: 2 }
+        }), { status: 200 });
+      },
+      async getBalance() {
+        balanceCalls += 1;
+        return { balanceUsd: 1, canConsume: true, minimumTopUpUsd: 1, suggestedTopUpUsd: 5 };
+      },
+      async topUp(amountUsd: number) {
+        topUps.push(amountUsd);
+      }
+    };
+    return { client, calls, topUps, remoteBalanceCalls: () => balanceCalls };
+  }
+
+  it("reuses one long-lived client and never checks remote balance per call", async () => {
+    let built = 0;
+    const fake = fakeVeniceClient();
+    const provider = new VeniceProvider({
+      clientFactory: async () => {
+        built += 1;
+        return fake.client;
+      }
+    });
+
+    await provider.complete({ model: "m", messages: [{ role: "user", content: "one" }], tools: [] });
+    await provider.complete({ model: "m", messages: [{ role: "user", content: "two" }], tools: [] });
+
+    expect(built).toBe(1);
+    expect(fake.remoteBalanceCalls()).toBe(0);
+    // Steady state: one network inference request per turn, nothing else.
+    expect(fake.calls).toHaveLength(2);
+    expect(fake.calls.every((call) => call.path.endsWith("/chat/completions"))).toBe(true);
+  });
+
+  it("keeps the per-session prompt_cache_key stable across turns", async () => {
+    const fake = fakeVeniceClient();
+    const provider = new VeniceProvider({ clientFactory: async () => fake.client });
+
+    await provider.complete({ model: "m", messages: [], tools: [], promptCacheKey: "session-1" });
+    await provider.complete({ model: "m", messages: [], tools: [], promptCacheKey: "session-1" });
+
+    expect(fake.calls.map((call) => call.body.prompt_cache_key)).toEqual(["session-1", "session-1"]);
+  });
+
+  it("streams deltas, surfaces time-to-first-token, and normalizes cached token metrics", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"Hel"}}]}',
+      'data: {"choices":[{"delta":{"content":"lo"}}]}',
+      'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"get_budget_status","arguments":"{}"}}]}}]}',
+      'data: {"usage":{"prompt_tokens":9,"completion_tokens":4,"prompt_tokens_details":{"cached_tokens":7}}}',
+      "data: [DONE]"
+    ].join("\n") + "\n";
+    const fake = fakeVeniceClient({ responses: [new Response(sse, { status: 200 })] });
+    const provider = new VeniceProvider({ clientFactory: async () => fake.client });
+    const deltas: string[] = [];
+
+    const completion = await provider.complete({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      onTextDelta: (delta) => deltas.push(delta)
+    });
+
+    expect(fake.calls[0].body.stream).toBe(true);
+    expect(deltas.join("")).toBe("Hello");
+    expect(completion.content).toBe("Hello");
+    expect(completion.toolCalls).toEqual([{ id: "call_1", name: "get_budget_status", arguments: {} }]);
+    expect(completion.usage).toMatchObject({ inputTokens: 9, outputTokens: 4, cachedInputTokens: 7 });
+    expect(completion.firstTokenMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("performs at most one bounded top-up and one retry on insufficient credit", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 500 });
+    const insufficient = new VeniceError("INSUFFICIENT_BALANCE", "Insufficient balance", { minimumTopUpUsd: 1 });
+    const fake = fakeVeniceClient({
+      responses: [insufficient, new Response(JSON.stringify({
+        choices: [{ message: { content: "recovered" } }],
+        usage: { prompt_tokens: 5, completion_tokens: 2 }
+      }), { status: 200 })]
+    });
+    const provider = new VeniceProvider({ clientFactory: async () => fake.client });
+    const budgeted = new BudgetedLlmProvider(session, provider, {
+      model: "m",
+      maxCostCentsPerCall: 10,
+      maxTopUpCentsPerAction: 200
+    });
+
+    const response = await budgeted.complete([{ role: "user", content: "hi" }]);
+
+    expect(response.content).toBe("recovered");
+    // Bounded by the per-top-up ceiling ($2), not the session allowance ($5).
+    expect(fake.topUps).toEqual([2]);
+    const rows = await readLedger(session.ledgerPath);
+    expect(rows).toContainEqual(expect.objectContaining({ type: "wallet_top_up", status: "charged", charged_cost_cents: "200" }));
+    // Top-ups are cash flow, not budget spend: only usage enters spentCents.
+    expect(session.spentCents).toBe(0);
+  });
+
+  it("never loops: a second insufficient-credit failure propagates", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 500 });
+    const insufficient = () => new VeniceError("INSUFFICIENT_BALANCE", "Insufficient balance", {});
+    const fake = fakeVeniceClient({ responses: [insufficient(), insufficient()] });
+    const provider = new VeniceProvider({ clientFactory: async () => fake.client });
+    const budgeted = new BudgetedLlmProvider(session, provider, {
+      model: "m",
+      maxCostCentsPerCall: 10,
+      maxTopUpCentsPerAction: 200
+    });
+
+    await expect(budgeted.complete([{ role: "user", content: "hi" }])).rejects.toThrow("credit is exhausted");
+    expect(fake.topUps).toHaveLength(1);
+    expect(session.reservedCents).toBe(0);
+  });
+
+  it("refuses a top-up beyond the remaining session allowance", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const fake = fakeVeniceClient({
+      responses: [new VeniceError("INSUFFICIENT_BALANCE", "Insufficient balance", { minimumTopUpUsd: 1 })]
+    });
+    const provider = new VeniceProvider({ clientFactory: async () => fake.client });
+    // Reservation of 10 leaves a 40-cent allowance; the $1 minimum cannot fit.
+    const budgeted = new BudgetedLlmProvider(session, provider, {
+      model: "m",
+      maxCostCentsPerCall: 10,
+      maxTopUpCentsPerAction: 1000
+    });
+
+    await expect(budgeted.complete([{ role: "user", content: "hi" }])).rejects.toThrow("session allowance");
+    expect(fake.topUps).toHaveLength(0);
   });
 });
 

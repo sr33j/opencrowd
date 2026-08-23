@@ -129,6 +129,7 @@ export interface ProgressEvent {
     | "reserving_spend"
     | "signing_with_ows"
     | "calling_llm"
+    | "assistant_delta"
     | "calling_tool"
     | "tool_result"
     | "calling_service"

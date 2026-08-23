@@ -109,8 +109,13 @@ async function preparePersistentRun(
       provider: llm.provider,
       model: llm.models.main,
       maxCostCentsPerCall: llm.maxCostCentsPerCall,
+      maxTopUpCentsPerAction: llm.maxTopUpCentsPerAction,
       promptCacheKey: session.sessionId,
-      catalog: llm.catalog
+      catalog: llm.catalog,
+      // Stream deltas so time-to-first-token is visible in the UI.
+      onTextDelta: options.onProgress
+        ? (delta) => options.onProgress?.({ type: "assistant_delta", message: delta })
+        : undefined
     },
     compactOutput: options.compactOutput ?? false,
     subagent: subagentOptionsFor(session, llm),
@@ -151,6 +156,7 @@ function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): Su
       provider: llm.provider,
       model: llm.models.subagent,
       maxCostCentsPerCall: llm.maxCostCentsPerCall,
+      maxTopUpCentsPerAction: llm.maxTopUpCentsPerAction,
       promptCacheKey: session.sessionId,
       catalog: llm.catalog
     }

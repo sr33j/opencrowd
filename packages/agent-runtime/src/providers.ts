@@ -66,6 +66,8 @@ export interface ProviderCompletion {
   content: string;
   toolCalls: WireToolCall[];
   usage: LlmUsage;
+  /** Milliseconds until the first streamed token, when streaming. */
+  firstTokenMs?: number;
 }
 
 export interface TypedLlmProvider {
@@ -73,6 +75,16 @@ export interface TypedLlmProvider {
   /** Model catalog; cached per instance with an explicit refresh path. */
   listModels(options?: { refresh?: boolean }): Promise<ProviderModel[]>;
   complete(request: CompletionRequest): Promise<ProviderCompletion>;
+  /** Optional credit top-up (Venice). Bounded and invoked by the budget layer only. */
+  topUpCredit?(amountUsd: number): Promise<void>;
+}
+
+/** Venice signals exhausted prepaid credit; the budget layer may perform one bounded top-up. */
+export class InsufficientCreditError extends Error {
+  constructor(message: string, readonly minimumTopUpUsd?: number, readonly suggestedTopUpUsd?: number) {
+    super(message);
+    this.name = "InsufficientCreditError";
+  }
 }
 
 export interface VeniceProviderOptions {
@@ -135,8 +147,14 @@ export class VeniceProvider implements TypedLlmProvider {
     return this.modelsCache;
   }
 
+  /**
+   * One network inference request per steady-state turn: no balance
+   * preflight, streaming when a delta callback is provided. Balance facts
+   * come from response headers via the client's cached balance.
+   */
   async complete(request: CompletionRequest): Promise<ProviderCompletion> {
     const client = await this.getClient();
+    const streaming = request.onTextDelta !== undefined;
     const body: Record<string, unknown> = {
       model: request.model,
       messages: request.messages.map(toWireChatMessage),
@@ -146,7 +164,13 @@ export class VeniceProvider implements TypedLlmProvider {
     if (request.promptCacheKey) {
       body.prompt_cache_key = request.promptCacheKey;
     }
+    if (streaming) {
+      body.stream = true;
+      body.stream_options = { include_usage: true };
+    }
+    const balanceBefore = client.balance;
     let response: Response;
+    const started = Date.now();
     try {
       response = await client.requestRaw("/api/v1/chat/completions", {
         method: "POST",
@@ -156,22 +180,140 @@ export class VeniceProvider implements TypedLlmProvider {
     } catch (error) {
       throw veniceRemediationError(error);
     }
-    const parsed = await response.json().catch(() => undefined);
-    return parseChatCompletionResponse(parsed);
+    const completion = streaming
+      ? await readSseCompletion(response, request.onTextDelta, started)
+      : parseChatCompletionResponse(await response.json().catch(() => undefined));
+    // Actual cost from the credit-balance delta the response headers carry.
+    const balanceAfter = client.balance;
+    if (completion.usage.costCents === undefined && balanceBefore > 0 && balanceAfter > 0 && balanceBefore > balanceAfter) {
+      completion.usage.costCents = (balanceBefore - balanceAfter) * 100;
+    }
+    return completion;
+  }
+
+  async topUpCredit(amountUsd: number): Promise<void> {
+    const client = await this.getClient();
+    await client.topUp(amountUsd);
   }
 }
 
 function veniceRemediationError(error: unknown): Error {
   if (error instanceof VeniceError) {
     if (error.code === "INSUFFICIENT_BALANCE") {
-      return new Error(
-        "Venice credit is exhausted. Fund the AgentCash wallet with USDC on Base, then retry — " +
-        "OpenCrowd tops up Venice credit automatically within the session budget. (venice: INSUFFICIENT_BALANCE)"
+      const details = (error.details ?? {}) as Record<string, unknown>;
+      const minimum = typeof details.minimumTopUpUsd === "number" ? details.minimumTopUpUsd : undefined;
+      const suggested = typeof details.suggestedTopUpUsd === "number" ? details.suggestedTopUpUsd : undefined;
+      return new InsufficientCreditError(
+        "Venice prepaid credit is exhausted. Fund the AgentCash wallet with USDC on Base; " +
+        "OpenCrowd performs one bounded automatic top-up within the session budget.",
+        minimum,
+        suggested
       );
     }
     return new Error(`Venice inference failed (${error.code}): ${error.message}. Run \`opencrowd doctor\` to diagnose.`);
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+/** Accumulate an OpenAI-compatible SSE stream into one completion. */
+export async function readSseCompletion(
+  response: Response,
+  onTextDelta: ((delta: string) => void) | undefined,
+  startedAtMs: number
+): Promise<ProviderCompletion> {
+  if (!response.body) {
+    throw new Error("streaming response has no body");
+  }
+  const decoder = new TextDecoder();
+  const reader = response.body.getReader();
+  let buffered = "";
+  let content = "";
+  let usage: LlmUsage = {};
+  let firstTokenMs: number | undefined;
+  const toolCallsByIndex = new Map<number, { id?: string; name?: string; argumentsText: string }>();
+
+  const consumeChunk = (chunk: unknown) => {
+    const record = chunk && typeof chunk === "object" ? chunk as Record<string, unknown> : {};
+    if (record.usage) {
+      usage = normalizeUsage(record.usage);
+    }
+    const choice = Array.isArray(record.choices) ? record.choices[0] as Record<string, unknown> | undefined : undefined;
+    const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta as Record<string, unknown> : undefined;
+    if (!delta) {
+      return;
+    }
+    if (typeof delta.content === "string" && delta.content.length > 0) {
+      if (firstTokenMs === undefined) {
+        firstTokenMs = Date.now() - startedAtMs;
+      }
+      content += delta.content;
+      onTextDelta?.(delta.content);
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const item of delta.tool_calls) {
+        const toolDelta = item && typeof item === "object" ? item as Record<string, unknown> : {};
+        const index = typeof toolDelta.index === "number" ? toolDelta.index : 0;
+        const entry = toolCallsByIndex.get(index) ?? { argumentsText: "" };
+        if (typeof toolDelta.id === "string") {
+          entry.id = toolDelta.id;
+        }
+        const fn = toolDelta.function && typeof toolDelta.function === "object" ? toolDelta.function as Record<string, unknown> : {};
+        if (typeof fn.name === "string") {
+          entry.name = (entry.name ?? "") + fn.name;
+        }
+        if (typeof fn.arguments === "string") {
+          entry.argumentsText += fn.arguments;
+        }
+        toolCallsByIndex.set(index, entry);
+        if (firstTokenMs === undefined) {
+          firstTokenMs = Date.now() - startedAtMs;
+        }
+      }
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffered += decoder.decode(value, { stream: true });
+    let newlineIndex: number;
+    while ((newlineIndex = buffered.indexOf("\n")) >= 0) {
+      const line = buffered.slice(0, newlineIndex).trim();
+      buffered = buffered.slice(newlineIndex + 1);
+      if (!line.startsWith("data:")) {
+        continue;
+      }
+      const payload = line.slice(5).trim();
+      if (payload === "[DONE]") {
+        continue;
+      }
+      try {
+        consumeChunk(JSON.parse(payload));
+      } catch {
+        // Ignore malformed keep-alive fragments.
+      }
+    }
+  }
+
+  const toolCalls = [...toolCallsByIndex.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([index, entry]) => {
+      let parsedArguments: Record<string, unknown> = {};
+      try {
+        parsedArguments = entry.argumentsText ? JSON.parse(entry.argumentsText) as Record<string, unknown> : {};
+      } catch {
+        parsedArguments = {};
+      }
+      return {
+        id: entry.id ?? `call-${index}`,
+        name: entry.name ?? "",
+        arguments: parsedArguments
+      };
+    })
+    .filter((toolCall) => toolCall.name !== "");
+  return { content, toolCalls, usage, firstTokenMs };
 }
 
 export interface OpenRouterProviderOptions {

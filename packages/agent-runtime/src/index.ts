@@ -8,6 +8,7 @@ import {
   finalizeReservation,
   readLedger,
   releaseReservation,
+  remainingBudgetCents,
   reserveBudget,
   OPEN_CROWD_TOOLS,
   SUBAGENT_TOOL_NAMES,
@@ -21,7 +22,9 @@ import {
   type ToolName
 } from "@opencrowd/core";
 import {
+  InsufficientCreditError,
   type LlmUsage,
+  type ProviderCompletion,
   type ProviderModel,
   type TypedLlmProvider,
   type WireToolDefinition
@@ -429,6 +432,12 @@ export interface BudgetedLlmOptions {
   catalog?: ProviderModel[];
   /** Streaming text callback (time-to-first-token). */
   onTextDelta?: (delta: string) => void;
+  /**
+   * Ceiling for one automatic credit top-up when the provider signals
+   * exhausted prepaid credit. The actual amount is further bounded by the
+   * remaining session allowance; at most one top-up and one retry happen.
+   */
+  maxTopUpCentsPerAction?: number;
 }
 
 /**
@@ -449,13 +458,24 @@ export class BudgetedLlmProvider implements LlmProvider {
     const reservation = await reserveBudget(this.session, this.options.maxCostCentsPerCall);
     const started = Date.now();
     try {
-      const completion = await this.provider.complete({
+      const request = {
         model: this.options.model,
         messages,
         tools: definitions,
         promptCacheKey: this.options.promptCacheKey,
         onTextDelta: this.options.onTextDelta
-      });
+      };
+      let completion: ProviderCompletion;
+      try {
+        completion = await this.provider.complete(request);
+      } catch (error) {
+        // Exhausted prepaid credit: exactly one bounded top-up, one retry.
+        if (!(error instanceof InsufficientCreditError) || !this.provider.topUpCredit) {
+          throw error;
+        }
+        await this.performBoundedTopUp(error);
+        completion = await this.provider.complete(request);
+      }
       const charged = chargedCostCents(completion.usage, this.options);
       await finalizeReservation(this.session, reservation, charged);
       await appendLedgerEntry(this.session.ledgerPath, {
@@ -471,7 +491,7 @@ export class BudgetedLlmProvider implements LlmProvider {
         latency_ms: Date.now() - started,
         input_tokens: completion.usage.inputTokens,
         output_tokens: completion.usage.outputTokens,
-        notes: cacheMetricsNote(completion.usage)
+        notes: usageMetricsNote(completion)
       });
       const valid = validToolNames(this.options.tools, this.options.extraTools);
       return {
@@ -496,6 +516,41 @@ export class BudgetedLlmProvider implements LlmProvider {
       throw error;
     }
   }
+
+  /**
+   * One credit top-up bounded by the per-action ceiling and the remaining
+   * session allowance. The top-up is recorded as a cash-flow fact
+   * (wallet_top_up ledger row) and does not enter session spend: LLM usage
+   * consumes the credit and is what counts against the budget, so the two
+   * are never double-counted.
+   */
+  private async performBoundedTopUp(error: InsufficientCreditError): Promise<void> {
+    const ceilingCents = this.options.maxTopUpCentsPerAction ?? 0;
+    if (ceilingCents <= 0) {
+      throw error;
+    }
+    const allowanceCents = remainingBudgetCents(this.session);
+    const amountCents = Math.min(ceilingCents, allowanceCents);
+    const minimumCents = error.minimumTopUpUsd !== undefined ? Math.ceil(error.minimumTopUpUsd * 100) : 0;
+    if (amountCents <= 0 || amountCents < minimumCents) {
+      throw new Error(
+        `${error.message} An automatic top-up needs at least ${formatCents(Math.max(minimumCents, 1))} ` +
+        `but only ${formatCents(Math.max(allowanceCents, 0))} of session allowance remains (per-top-up cap ${formatCents(ceilingCents)}). ` +
+        "Raise the session budget with /budget or top up manually."
+      );
+    }
+    await this.provider.topUpCredit!(amountCents / 100);
+    await appendLedgerEntry(this.session.ledgerPath, {
+      session_id: this.options.ledgerSessionId ?? this.session.sessionId,
+      type: "wallet_top_up",
+      endpoint: this.provider.id,
+      quoted_cost_cents: amountCents,
+      charged_cost_cents: amountCents,
+      status: "charged",
+      permission_mode: this.session.permissionMode,
+      notes: "automatic bounded provider credit top-up (cash flow; usage is billed against the budget)"
+    });
+  }
 }
 
 /** Actual cost: provider-reported, else estimated from catalog pricing, else 0. */
@@ -513,14 +568,19 @@ function chargedCostCents(usage: LlmUsage, options: BudgetedLlmOptions): number 
   return 0;
 }
 
-/** Cache hit/write metrics recorded so repeated-turn hit rates can be verified. */
-function cacheMetricsNote(usage: LlmUsage): string | undefined {
-  if (usage.cachedInputTokens === undefined && usage.cacheWriteTokens === undefined) {
+/**
+ * Cache hit/write metrics and time-to-first-token, recorded so repeated-turn
+ * hit rates and streaming latency can be verified from the ledger.
+ */
+function usageMetricsNote(completion: ProviderCompletion): string | undefined {
+  const usage = completion.usage;
+  if (usage.cachedInputTokens === undefined && usage.cacheWriteTokens === undefined && completion.firstTokenMs === undefined) {
     return undefined;
   }
   return JSON.stringify({
     cached_input_tokens: usage.cachedInputTokens,
-    cache_write_tokens: usage.cacheWriteTokens
+    cache_write_tokens: usage.cacheWriteTokens,
+    first_token_ms: completion.firstTokenMs
   });
 }
 
@@ -550,6 +610,7 @@ export interface TypedLlmRuntime {
   provider: TypedLlmProvider;
   model: string;
   maxCostCentsPerCall: number;
+  maxTopUpCentsPerAction?: number;
   promptCacheKey?: string;
   catalog?: ProviderModel[];
   onTextDelta?: (delta: string) => void;
@@ -649,6 +710,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     ? new BudgetedLlmProvider(session, options.llm.provider, {
       model: options.llm.model,
       maxCostCentsPerCall: options.llm.maxCostCentsPerCall,
+      maxTopUpCentsPerAction: options.llm.maxTopUpCentsPerAction,
       tools: enabledTools,
       extraTools: dynamicDefinitions,
       promptCacheKey: options.llm.promptCacheKey,
@@ -1048,6 +1110,7 @@ function subagentProvider(
     return new BudgetedLlmProvider(session, subagent.llm.provider, {
       model: subagent.llm.model,
       maxCostCentsPerCall: subagent.llm.maxCostCentsPerCall,
+      maxTopUpCentsPerAction: subagent.llm.maxTopUpCentsPerAction,
       tools: SUBAGENT_TOOL_NAMES,
       promptCacheKey: subagent.llm.promptCacheKey,
       catalog: subagent.llm.catalog,
@@ -1270,6 +1333,10 @@ export interface RenderProgressOptions {
 
 export function renderProgress(event: ProgressEvent, options: RenderProgressOptions = {}): string {
   const style = options.style ?? (options.compact ? "compact" : "plain");
+  // Streaming deltas are for live UIs; line-oriented renderers skip them.
+  if (event.type === "assistant_delta") {
+    return "";
+  }
   if (style === "plain") {
     return event.message;
   }

@@ -67,6 +67,7 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
   const historyRef = useRef<string[]>([]);
   const lastServiceUrlRef = useRef<string>("");
   const ctrlCArmedRef = useRef(false);
+  const streamedTextRef = useRef("");
 
   const [items, setItems] = useState<Item[]>([]);
   const [input, setInput] = useState("");
@@ -178,7 +179,12 @@ function App({ session, initialTestMode, initialTestSeed, defaultModel, onboardi
   const handleProgress = useCallback((event: ProgressEvent) => {
     switch (event.type) {
       case "calling_llm":
+        streamedTextRef.current = "";
         setActivity(event.message.replace(/^Calling LLM provider \(turn /, "thinking… (turn ").replace(/\)$/, ")"));
+        return;
+      case "assistant_delta":
+        streamedTextRef.current += event.message;
+        setActivity(streamedTextRef.current.slice(-120).replace(/\s+/g, " "));
         return;
       case "calling_tool": {
         const summary = event.message.replace(/^Tool call: /, "");

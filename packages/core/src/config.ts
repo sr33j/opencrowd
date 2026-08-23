@@ -27,6 +27,8 @@ export interface OpenCrowdConfig {
   llmTimeoutMs: number;
   /** Local budget reservation ceiling per LLM request, reconciled to actual cost. */
   llmMaxCostCentsPerCall: number;
+  /** Ceiling for one automatic Venice credit top-up; also bounded by session allowance. */
+  veniceMaxTopUpCents: number;
   /** Default cumulative session spend cap in cents; local policy, not funds. */
   defaultBudgetCents: number;
   x402PaymentAsset: string;
@@ -49,6 +51,7 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   openrouter: { model: "auto", submodel: "auto" },
   llmTimeoutMs: 600_000,
   llmMaxCostCentsPerCall: 100,
+  veniceMaxTopUpCents: 1000,
   defaultBudgetCents: 2000,
   x402PaymentAsset: "USDC",
   x402PaymentNetwork: "base"

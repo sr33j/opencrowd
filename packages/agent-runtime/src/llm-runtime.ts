@@ -20,6 +20,7 @@ export interface LlmRuntimeSelection {
   models: ResolvedSessionModels;
   catalog: ProviderModel[];
   maxCostCentsPerCall: number;
+  maxTopUpCentsPerAction: number;
 }
 
 const providerCache = new Map<ProviderId, TypedLlmProvider>();
@@ -69,7 +70,8 @@ export async function resolveLlmRuntime(
       provider,
       models: { ...recorded, provider: providerId },
       catalog,
-      maxCostCentsPerCall: config.llmMaxCostCentsPerCall
+      maxCostCentsPerCall: config.llmMaxCostCentsPerCall,
+      maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0
     };
   }
 
@@ -82,5 +84,11 @@ export async function resolveLlmRuntime(
   const models = resolveSessionModels(providerId, catalog, preferences);
   session.models = models;
   await saveSession(session);
-  return { provider, models, catalog, maxCostCentsPerCall: config.llmMaxCostCentsPerCall };
+  return {
+    provider,
+    models,
+    catalog,
+    maxCostCentsPerCall: config.llmMaxCostCentsPerCall,
+    maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0
+  };
 }

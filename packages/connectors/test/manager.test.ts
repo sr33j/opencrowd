@@ -74,12 +74,13 @@ describe("ConnectorManager", () => {
     await manager.close();
   });
 
-  it("builds economy context with live balances, house rules, and vendor instructions", async () => {
+  it("builds economy context with house rules and vendor instructions but no live balances in the stable prefix", async () => {
     const manager = await connectManager();
     const economy = await buildEconomyContext(manager);
     expect(economy.dynamicTools.definitions.map((tool) => tool.name)).toContain("agentcash_fetch");
     const prompt = economy.promptSections.join("\n");
-    expect(prompt).toContain("12.34");
+    // Live balance facts would churn the cached prompt prefix every turn.
+    expect(prompt).not.toContain("12.34");
     expect(prompt).toContain("crowdcode_get_service_score");
     expect(prompt).toContain("Instructions from the agentcash MCP server");
     const result = await economy.dynamicTools.execute("agentcash_get_balance", {});
