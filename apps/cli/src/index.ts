@@ -46,8 +46,6 @@ import {
   renderProgress,
   type RenderProgressOptions
 } from "@opencrowd/agent-runtime";
-import { startMcpServer } from "@opencrowd/mcp";
-import { startLocalApi } from "@opencrowd/local-api";
 import {
   asRecord,
   envFlag,
@@ -117,12 +115,6 @@ async function main(argv: string[]): Promise<void> {
     case "evals":
       await evalsCommand(rest);
       return;
-    case "mcp":
-      await startMcpServer({ workspaceRoot: process.cwd() });
-      return;
-    case "api":
-      await apiCommand(rest);
-      return;
     case "--help":
     case "-h":
     case "help":
@@ -142,7 +134,6 @@ async function repl(options: { testMode?: boolean; testSeed?: string } = {}): Pr
   }
   const session = await createOpenCrowdSession({
     workspaceRoot: process.cwd(),
-    surface: "cli",
     useWalletBalanceBudget: true
   });
   const rl = createInterface({ input, output });
@@ -303,11 +294,6 @@ async function replCommand(session: SessionState, state: ReplState, inputLine: s
     case "models":
       await modelsCommand(rest);
       return false;
-    case "api":
-      await apiCommand(rest);
-      return false;
-    case "mcp":
-      throw new Error("Run `opencrowd mcp` outside the interactive REPL because MCP uses stdio.");
     default:
       throw new Error(`unknown slash command: /${command}`);
   }
@@ -417,7 +403,6 @@ async function runCommand(args: string[]): Promise<void> {
       budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
       permissionMode: mode,
       shellEnabled,
-      surface: "cli",
       useWalletBalanceBudget: true
     });
   if (sessionId) {
@@ -474,7 +459,6 @@ async function headlessRunCommand(args: string[]): Promise<void> {
     budgetCents: budgetArg === undefined ? undefined : parseUsd(budgetArg),
     permissionMode: "yolo",
     shellEnabled: !args.includes("--disable-shell"),
-    surface: "cli",
     useWalletBalanceBudget: true
   });
   let task = prompt;
@@ -940,12 +924,6 @@ async function confirmSeedPhraseExport(): Promise<void> {
   }
 }
 
-async function apiCommand(args: string[]): Promise<void> {
-  const port = Number(readOption(args, "--port") ?? 8787);
-  const server = await startLocalApi({ port, workspaceRoot: process.cwd() });
-  console.log(`OpenCrowd local API listening on ${server.url}`);
-}
-
 function printHelp(): void {
   console.log(`Usage:
   opencrowd                       interactive agent UI (first run walks you through wallet setup)
@@ -959,9 +937,7 @@ function printHelp(): void {
   opencrowd wallet [--json] list|status|address|balance|use <label|agentcash>|send <address> <usd>|export <label|address>
   opencrowd wallet --test-mode [--json] new [label]|list|status|address|balance|use <label|address>|fund <usd>
   opencrowd models [--json] list|set <model>
-  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]
-  opencrowd mcp
-  opencrowd api --port <port>`);
+  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]`);
 }
 
 function printValue(label: string, value: unknown, options: { pretty?: string; json?: boolean } = {}): void {

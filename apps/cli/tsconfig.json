@@ -18,12 +18,6 @@
     },
     {
       "path": "../../packages/evals"
-    },
-    {
-      "path": "../../packages/mcp"
-    },
-    {
-      "path": "../../packages/local-api"
     }
   ],
   "include": [

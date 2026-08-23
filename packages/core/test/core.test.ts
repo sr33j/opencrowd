@@ -77,7 +77,7 @@ describe("OpenCrowd session defaults", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await createTestWallet("mango", 1234);
 
-    const session = await createOpenCrowdSession({ workspaceRoot: root, surface: "cli" });
+    const session = await createOpenCrowdSession({ workspaceRoot: root});
 
     expect(session.permissionMode).toBe("ask_first");
     expect(session.shellEnabled).toBe(true);
@@ -89,7 +89,7 @@ describe("OpenCrowd session defaults", () => {
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
     await createTestWallet("papaya", 50_000);
 
-    const session = await createOpenCrowdSession({ workspaceRoot: root, surface: "cli" });
+    const session = await createOpenCrowdSession({ workspaceRoot: root});
 
     expect(session.budgetCents).toBe(2000);
   });

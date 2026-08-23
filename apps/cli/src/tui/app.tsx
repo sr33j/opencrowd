@@ -786,7 +786,6 @@ export async function startTui(options: { testMode?: boolean; testSeed?: string 
   }
   const session = await createOpenCrowdSession({
     workspaceRoot: process.cwd(),
-    surface: "cli",
     useWalletBalanceBudget: true
   });
   const config = await loadConfig();

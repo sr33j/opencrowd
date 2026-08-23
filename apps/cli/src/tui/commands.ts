@@ -240,8 +240,6 @@ export async function runSlashCommand(
     }
     case "wallet":
       return walletSlashCommand(session, state, rest);
-    case "mcp":
-      throw new Error("Run `opencrowd mcp` outside the interactive UI because MCP uses stdio.");
     default:
       throw new Error(`unknown slash command: /${command} (try /help)`);
   }

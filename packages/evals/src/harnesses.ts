@@ -98,7 +98,6 @@ const openCrowdHarness: GaiaHarness = {
       workspaceRoot: context.runDir,
       permissionMode: "yolo",
       shellEnabled: true,
-      surface: "cli",
       useWalletBalanceBudget: !context.testMode
     });
     let prompt = context.prompt;

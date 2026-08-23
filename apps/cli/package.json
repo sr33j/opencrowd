@@ -39,16 +39,13 @@
     "react": "^19.2.7",
     "siwe": "^2.3.2",
     "venice-x402-client": "^0.2.0",
-    "viem": "^2.51.3",
-    "zod": "^3.25.17"
+    "viem": "^2.51.3"
   },
   "devDependencies": {
     "@opencrowd/agent-runtime": "0.1.0",
     "@opencrowd/connectors": "0.1.0",
     "@opencrowd/core": "0.1.0",
-    "@opencrowd/evals": "0.1.0",
-    "@opencrowd/local-api": "0.1.0",
-    "@opencrowd/mcp": "0.1.0"
+    "@opencrowd/evals": "0.1.0"
   },
   "scripts": {
     "build": "tsc -b && chmod +x dist/index.js",

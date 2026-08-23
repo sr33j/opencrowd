@@ -22,8 +22,6 @@ export interface OpenCrowdConfig {
   modelPolicy: ModelPolicy;
   x402PaymentAsset: string;
   x402PaymentNetwork: string;
-  mcpShellEnabled: boolean;
-  localApiShellEnabled: boolean;
 }
 
 const COINBASE_BAZAAR_URL = "https://api.cdp.coinbase.com/platform/v2/x402/discovery/search";
@@ -43,9 +41,7 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
   x402LlmTimeoutMs: 600_000,
   modelPolicy: DEFAULT_MODEL_POLICY,
   x402PaymentAsset: "USDC",
-  x402PaymentNetwork: "base",
-  mcpShellEnabled: false,
-  localApiShellEnabled: false
+  x402PaymentNetwork: "base"
 };
 
 export function configDir(): string {

@@ -14,12 +14,6 @@
       "path": "./packages/evals"
     },
     {
-      "path": "./packages/mcp"
-    },
-    {
-      "path": "./packages/local-api"
-    },
-    {
       "path": "./apps/cli"
     }
   ]

@@ -31,8 +31,6 @@ LLM — you never need real funds to develop or test.
 | --- | --- |
 | `packages/core` | Wallets, x402 payments, sessions, budgets, permissions, ledger |
 | `packages/agent-runtime` | LLM loop, tool execution, progress events |
-| `packages/mcp` | MCP server exposing the tool surface |
-| `packages/local-api` | Localhost HTTP API |
 | `apps/cli` | The `opencrowd` binary: TUI, one-shot commands |
 
 ## Pull requests

@@ -70,32 +70,6 @@ Real money demands real guardrails. The defaults:
 Read [SECURITY.md](SECURITY.md) for the full threat model, including how we
 treat marketplace content as prompt-injection input.
 
-## Use it from Claude, Codex, or any MCP client
-
-OpenCrowd doubles as an MCP server, so your existing coding agent can search
-the bazaar, make x402 payments, and manage budgets using OpenCrowd's wallet:
-
-```sh
-claude mcp add opencrowd -- npx -y opencrowd mcp
-```
-
-Or in any MCP client config:
-
-```json
-{
-  "mcpServers": {
-    "opencrowd": { "command": "npx", "args": ["-y", "opencrowd", "mcp"] }
-  }
-}
-```
-
-There's also a localhost HTTP API: `opencrowd api --port 8787`.
-
-Here's Claude Code discovering a live weather service on the Bazaar and paying
-it 0.001 USDC on Base through OpenCrowd — real money, real on-chain settlement:
-
-![Claude Code paying a real x402 service through the OpenCrowd MCP server](docs/mcp-demo.gif)
-
 ## Commands
 
 Inside the interactive UI (`/help` shows this live):
@@ -178,7 +152,6 @@ npm test
 
 Monorepo layout: `packages/core` (wallets, x402, sessions, budgets, ledger),
 `packages/agent-runtime` (LLM loop + tools + subagents), `packages/evals`
-(GAIA benchmark runner), `packages/mcp`, `packages/local-api`, `apps/cli`
-(the `opencrowd` binary and TUI).
+(GAIA benchmark runner), `apps/cli` (the `opencrowd` binary and TUI).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md). Licensed [MIT](LICENSE).
