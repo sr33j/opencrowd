@@ -6,6 +6,14 @@ export interface Reservation {
   amountCents: number;
 }
 
+/** The session's cumulative cap is exhausted — a deterministic stop, not a fault. */
+export class BudgetExhaustedError extends Error {
+  constructor(neededCents: number, remainingCents: number) {
+    super(`budget exceeded: need ${neededCents} cents, remaining ${remainingCents} cents`);
+    this.name = "BudgetExhaustedError";
+  }
+}
+
 // Serialize budget mutations per session so concurrent callers (parallel
 // subagents and the main loop) can't interleave check/mutate/save cycles.
 const sessionLocks = new Map<string, Promise<unknown>>();
@@ -25,7 +33,7 @@ export async function reserveBudget(state: SessionState, amountCents: number): P
   return withSessionLock(state.sessionId, async () => {
     assertCents(amountCents, "reservation");
     if (remainingBudgetCents(state) < amountCents) {
-      throw new Error(`budget exceeded: need ${amountCents} cents, remaining ${remainingBudgetCents(state)} cents`);
+      throw new BudgetExhaustedError(amountCents, remainingBudgetCents(state));
     }
     state.reservedCents += amountCents;
     await saveSession(state);

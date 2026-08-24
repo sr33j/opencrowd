@@ -41,11 +41,13 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
   },
   provider: "venice",
-  // Provider catalogs change; "auto" resolves from the live catalog at
-  // session start and the resolved IDs are persisted for reproducibility.
-  venice: { model: "auto", submodel: "auto" },
+  // Venice defaults are benchmark-informed (GAIA smoke, 2026-08): sonnet led
+  // answered-accuracy at 4-11c/question; deepseek-v4-flash subagents were
+  // near-free with high cache-hit rates. "auto" stays available and resolves
+  // from the live catalog; resolved IDs persist per session either way.
+  venice: { model: "claude-sonnet-4-6", submodel: "deepseek-v4-flash" },
   openrouter: { model: "auto", submodel: "auto" },
-  llmTimeoutMs: 600_000,
+  llmTimeoutMs: 300_000,
   llmMaxCostCentsPerCall: 100,
   veniceMaxTopUpCents: 1000,
   defaultBudgetCents: 2000,

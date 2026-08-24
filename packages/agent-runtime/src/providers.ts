@@ -106,6 +106,8 @@ export class VeniceProvider implements TypedLlmProvider {
   private client?: VeniceLikeClient;
   private clientPromise?: Promise<VeniceLikeClient>;
   private modelsCache?: ProviderModel[];
+  /** Concurrent completions in flight; balance-delta cost needs an exclusive window. */
+  private inFlight = 0;
 
   constructor(private readonly options: VeniceProviderOptions = {}) {}
 
@@ -169,23 +171,34 @@ export class VeniceProvider implements TypedLlmProvider {
       body.stream_options = { include_usage: true };
     }
     const balanceBefore = client.balance;
-    let response: Response;
-    const started = Date.now();
+    const exclusiveWindow = this.inFlight === 0;
+    this.inFlight += 1;
+    let completion: ProviderCompletion;
     try {
-      response = await client.requestRaw("/api/v1/chat/completions", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body)
-      });
-    } catch (error) {
-      throw veniceRemediationError(error);
+      let response: Response;
+      const started = Date.now();
+      try {
+        response = await client.requestRaw("/api/v1/chat/completions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body)
+        });
+      } catch (error) {
+        throw veniceRemediationError(error);
+      }
+      completion = streaming
+        ? await readSseCompletion(response, request.onTextDelta, started)
+        : parseChatCompletionResponse(await response.json().catch(() => undefined));
+    } finally {
+      this.inFlight -= 1;
     }
-    const completion = streaming
-      ? await readSseCompletion(response, request.onTextDelta, started)
-      : parseChatCompletionResponse(await response.json().catch(() => undefined));
-    // Actual cost from the credit-balance delta the response headers carry.
+    // Actual cost from the credit-balance delta the response headers carry —
+    // but only when this call had the client to itself: with concurrent
+    // requests the delta includes other lanes' spend and would double-count.
+    // Callers fall back to usage x catalog pricing otherwise.
     const balanceAfter = client.balance;
-    if (completion.usage.costCents === undefined && balanceBefore > 0 && balanceAfter > 0 && balanceBefore > balanceAfter) {
+    if (completion.usage.costCents === undefined && exclusiveWindow && this.inFlight === 0
+      && balanceBefore > 0 && balanceAfter > 0 && balanceBefore > balanceAfter) {
       completion.usage.costCents = (balanceBefore - balanceAfter) * 100;
     }
     return completion;
@@ -456,7 +469,13 @@ function autoSubagentModel(models: ProviderModel[]): string {
   const toolCapable = models.filter((model) => model.supportsTools !== false);
   const pool = toolCapable.length > 0 ? toolCapable : models;
   const aboveFloor = pool.filter((model) => contextWindow(model) >= SUBAGENT_CONTEXT_FLOOR_TOKENS);
-  const candidates = aboveFloor.length > 0 ? aboveFloor : pool;
+  let candidates = aboveFloor.length > 0 ? aboveFloor : pool;
+  // Zero/unpriced entries are usually stealth or experimental routes;
+  // prefer the cheapest PRICED model so subagents stay dependable.
+  const priced = candidates.filter((model) => blendedCostPer1k(model) > 0);
+  if (priced.length > 0) {
+    candidates = priced;
+  }
   return candidates.reduce((cheapest, model) => blendedCostPer1k(model) < blendedCostPer1k(cheapest) ? model : cheapest).id;
 }
 

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   appendLedgerEntry,
   budgetStatus,
+  BudgetExhaustedError,
   completeSession,
   executeTool,
   finalizeReservation,
@@ -310,12 +311,18 @@ export class BudgetedLlmProvider implements LlmProvider {
       try {
         completion = await this.provider.complete(request);
       } catch (error) {
-        // Exhausted prepaid credit: exactly one bounded top-up, one retry.
-        if (!(error instanceof InsufficientCreditError) || !this.provider.topUpCredit) {
+        if (error instanceof InsufficientCreditError && this.provider.topUpCredit) {
+          // Exhausted prepaid credit: exactly one bounded top-up, one retry.
+          await this.performBoundedTopUp(error);
+          completion = await this.provider.complete(request);
+        } else if (isTransientProviderError(error)) {
+          // One retry for transient faults (timeouts, rate limits, dropped
+          // connections). Anything else — and a second transient failure —
+          // surfaces unchanged; there is no retry loop.
+          completion = await this.provider.complete(request);
+        } else {
           throw error;
         }
-        await this.performBoundedTopUp(error);
-        completion = await this.provider.complete(request);
       }
       const charged = chargedCostCents(completion.usage, this.options);
       await finalizeReservation(this.session, reservation, charged);
@@ -392,6 +399,15 @@ export class BudgetedLlmProvider implements LlmProvider {
       notes: "automatic bounded provider credit top-up (cash flow; usage is billed against the budget)"
     });
   }
+}
+
+/** Timeouts, rate limits, and dropped connections merit exactly one retry. */
+function isTransientProviderError(error: unknown): boolean {
+  if (error instanceof InsufficientCreditError || error instanceof BudgetExhaustedError) {
+    return false;
+  }
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return /TIMEOUT|timed out|429|rate limit|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated/i.test(message);
 }
 
 /** Actual cost: provider-reported, else estimated from catalog pricing, else 0. */
@@ -605,9 +621,20 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       }
     }
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
-    const response = provider instanceof MockLlmProvider
-      ? await completeMockLlmCall(session, provider, messages, turn + 1)
-      : await provider.complete(messages);
+    let response: LlmResponse;
+    try {
+      response = provider instanceof MockLlmProvider
+        ? await completeMockLlmCall(session, provider, messages, turn + 1)
+        : await provider.complete(messages);
+    } catch (error) {
+      if (error instanceof BudgetExhaustedError) {
+        // Budget exhaustion is a deterministic stop, not a fault: finish
+        // with what the session accomplished so far.
+        const summary = await completeSession(session, `Stopped: the session budget is exhausted (${error.message}).`);
+        return { outcome: "stopped", summary, turns: turn + 1 };
+      }
+      throw error;
+    }
     if (response.content || response.toolCalls.length > 0) {
       const assistantMessage = assistantMessageFromResponse(response);
       messages.push(assistantMessage);
@@ -876,9 +903,17 @@ async function runSubagentTask(
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
       forwardProgress({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
-      const response = provider instanceof MockLlmProvider
-        ? await completeMockLlmCall(session, provider, messages, turn + 1)
-        : await provider.complete(messages);
+      let response: LlmResponse;
+      try {
+        response = provider instanceof MockLlmProvider
+          ? await completeMockLlmCall(session, provider, messages, turn + 1)
+          : await provider.complete(messages);
+      } catch (error) {
+        if (error instanceof BudgetExhaustedError) {
+          return finish("stopped", "Subagent stopped: the shared session budget is exhausted.", turn + 1);
+        }
+        throw error;
+      }
       if (response.content || response.toolCalls.length > 0) {
         const assistantMessage = assistantMessageFromResponse(response);
         messages.push(assistantMessage);

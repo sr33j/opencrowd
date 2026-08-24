@@ -385,6 +385,116 @@ describe("OpenRouter provider", () => {
   });
 });
 
+describe("failure hardening", () => {
+  it("retries a transient provider failure exactly once", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    let attempts = 0;
+    const flaky: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("Venice inference failed (TIMEOUT): Request timed out after 180000ms");
+        }
+        return { content: "recovered", toolCalls: [], usage: { costCents: 2 } };
+      }
+    };
+    const provider = new BudgetedLlmProvider(session, flaky, { model: "m", maxCostCentsPerCall: 10 });
+
+    await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toMatchObject({ content: "recovered" });
+    expect(attempts).toBe(2);
+    expect(session.spentCents).toBe(2);
+  });
+
+  it("does not retry twice or on non-transient failures", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    let attempts = 0;
+    const dead: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        attempts += 1;
+        throw new Error("Venice inference failed (TIMEOUT): still down");
+      }
+    };
+    const provider = new BudgetedLlmProvider(session, dead, { model: "m", maxCostCentsPerCall: 10 });
+    await expect(provider.complete([{ role: "user", content: "hi" }])).rejects.toThrow("TIMEOUT");
+    expect(attempts).toBe(2);
+
+    attempts = 0;
+    const badRequest: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        attempts += 1;
+        throw new Error("model `nope` is not in the venice catalog");
+      }
+    };
+    const provider2 = new BudgetedLlmProvider(session, badRequest, { model: "m", maxCostCentsPerCall: 10 });
+    await expect(provider2.complete([{ role: "user", content: "hi" }])).rejects.toThrow("catalog");
+    expect(attempts).toBe(1);
+  });
+
+  it("stops the loop gracefully when the budget is exhausted instead of erroring the run", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 5 });
+    const typed: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        return { content: "unreachable", toolCalls: [], usage: {} };
+      }
+    };
+    // Reservation ceiling exceeds the budget: the first reserve throws
+    // BudgetExhaustedError, and the loop must stop deterministically.
+    const provider = new BudgetedLlmProvider(session, typed, { model: "m", maxCostCentsPerCall: 10 });
+    const result = await runAgentTaskDetailed(session, "do something", { provider });
+    expect(result.outcome).toBe("stopped");
+    expect(String(result.summary.final_message)).toContain("budget is exhausted");
+  });
+
+  it("only attributes balance-delta cost to calls with an exclusive client window", async () => {
+    let balance = 10;
+    let concurrent = 0;
+    const client = {
+      get balance() { return balance; },
+      async requestRaw() {
+        concurrent += 1;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        balance -= 0.01;
+        concurrent -= 1;
+        return new Response(JSON.stringify({ choices: [{ message: { content: "ok" } }] }), { status: 200 });
+      },
+      async getBalance() { return { balanceUsd: balance, canConsume: true, minimumTopUpUsd: 5, suggestedTopUpUsd: 10 }; },
+      async topUp() {}
+    };
+    const provider = new VeniceProvider({ clientFactory: async () => client });
+
+    const [a, b] = await Promise.all([
+      provider.complete({ model: "m", messages: [], tools: [] }),
+      provider.complete({ model: "m", messages: [], tools: [] })
+    ]);
+    // Concurrent lanes must not claim each other's spend.
+    expect(a.usage.costCents).toBeUndefined();
+    expect(b.usage.costCents).toBeUndefined();
+
+    const solo = await provider.complete({ model: "m", messages: [], tools: [] });
+    expect(solo.usage.costCents).toBeCloseTo(1, 5);
+  });
+
+  it("auto subagent resolution skips zero-priced stealth models when priced ones exist", () => {
+    const resolved = resolveSessionModels("venice", [
+      { id: "stealth-free", inputCostCentsPer1k: 0, outputCostCentsPer1k: 0, contextWindowTokens: 1_000_000, supportsTools: true },
+      { id: "cheap-priced", inputCostCentsPer1k: 0.01, outputCostCentsPer1k: 0.02, contextWindowTokens: 256_000, supportsTools: true },
+      { id: "frontier", inputCostCentsPer1k: 2, outputCostCentsPer1k: 8, contextWindowTokens: 200_000, supportsTools: true }
+    ], { main: "auto", subagent: "auto" });
+    expect(resolved.subagent).toBe("cheap-priced");
+  });
+});
+
 describe("model resolution", () => {
   const catalog: ProviderModel[] = [
     { id: "frontier", inputCostCentsPer1k: 2, outputCostCentsPer1k: 8, contextWindowTokens: 200_000, supportsTools: true },
