@@ -114,7 +114,9 @@ const openCrowdHarness: GaiaHarness = {
       auto: context.auto
     });
     const gateway = await buildEvalGateway(session, context);
+    const promptSections = await vendorInstructions(context);
     const result = await runAgentTaskDetailed(session, prompt, {
+      promptSections,
       llm: llm ? {
         provider: llm.provider,
         model: llm.models.main,
@@ -249,6 +251,18 @@ function subagentOptions(sessionId: string, llm: LlmRuntimeSelection): SubagentO
       catalog: llm.catalog
     }
   };
+}
+
+/** Vendor-published capability instructions; same prompt parity as the CLI. */
+async function vendorInstructions(context: HarnessContext): Promise<string[] | undefined> {
+  if (context.testMode || process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true") {
+    return undefined;
+  }
+  try {
+    return (await sharedEconomyRuntime()).instructions();
+  } catch {
+    return undefined;
+  }
 }
 
 /**
