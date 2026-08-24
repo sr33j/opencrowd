@@ -42,7 +42,6 @@ const FORBIDDEN_IDENTIFIERS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\byolo\b/, reason: "approval modes are ask|auto|off" },
   { pattern: /OPENCROWD_PERMISSION_MODE/, reason: "renamed to OPENCROWD_APPROVAL_MODE" },
   { pattern: /x402LlmBaseUrl|x402LlmModel|x402LlmMaxCostCents/, reason: "replaced by the typed provider abstraction" },
-  { pattern: /x402-tokens\.fly\.dev/, reason: "the x402 LLM proxy route is retired" },
   { pattern: /OPENCROWD_LLM_PROVIDER/, reason: "hidden provider branches are deleted" },
   { pattern: /[Bb]azaar/, reason: "the Bazaar fallback is retired" },
   { pattern: /\bsearch_services\b|\bcall_service\b|\badd_allowed_service\b|\brequest_service_permission\b/, reason: "legacy economy tools are retired" },

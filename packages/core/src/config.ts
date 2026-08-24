@@ -20,9 +20,12 @@ export interface OpenCrowdConfig {
   /** Vendor MCP servers (AgentCash, CrowdCode). Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
   /** Default LLM provider for new sessions. */
-  provider: "venice" | "openrouter";
+  provider: "x402" | "venice" | "openrouter";
+  x402: ProviderModelDefaults;
   venice: ProviderModelDefaults;
   openrouter: ProviderModelDefaults;
+  /** OpenAI-compatible x402-metered proxy route for the `x402` provider. */
+  x402ProxyUrl: string;
   /** Per-request LLM timeout; reasoning models can think for minutes. */
   llmTimeoutMs: number;
   /** Local budget reservation ceiling per LLM request, reconciled to actual cost. */
@@ -40,13 +43,17 @@ const DEFAULT_CONFIG: OpenCrowdConfig = {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
   },
-  provider: "venice",
+  // Owner decision (2026-08-24): the x402 token proxy is the default for its
+  // OpenRouter-grade serving latency; Venice stays as the wallet-native,
+  // explicitly selectable backup (no automatic fallback between them).
+  provider: "x402",
+  x402: { model: "openai/gpt-5.6-sol", submodel: "openai/gpt-5.6-luna" },
   // Venice defaults are benchmark-informed (GAIA smoke, 2026-08): sonnet led
   // answered-accuracy at 4-11c/question; deepseek-v4-flash subagents were
-  // near-free with high cache-hit rates. "auto" stays available and resolves
-  // from the live catalog; resolved IDs persist per session either way.
+  // near-free with high cache-hit rates.
   venice: { model: "claude-sonnet-4-6", submodel: "deepseek-v4-flash" },
   openrouter: { model: "auto", submodel: "auto" },
+  x402ProxyUrl: "https://x402-tokens.fly.dev/v1",
   llmTimeoutMs: 300_000,
   llmMaxCostCentsPerCall: 100,
   veniceMaxTopUpCents: 1000,

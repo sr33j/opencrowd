@@ -151,7 +151,27 @@ A provider supplies:
 - cache-read/cache-write metrics when supplied;
 - provider-specific health/authentication errors.
 
-### Venice (default)
+### x402 token proxy (default)
+
+Owner decision (2026-08-24), superseding the original brief's removal of the
+proxy route:
+
+- Calls an OpenAI-compatible, x402-metered proxy (`x402ProxyUrl`, default
+  `https://x402-tokens.fly.dev/v1`) fronting OpenRouter-grade serving
+  capacity.
+- Pays per request only when challenged: an HTTP 402 challenge is signed
+  with the AgentCash wallet key (upto-style — the challenge quotes a
+  ceiling, the service settles actual usage). Unchallenged requests carry no
+  payment overhead; after the first challenge the requirement is cached and
+  the payment header attached preemptively, keeping steady state at one
+  round trip per turn.
+- Streams output; actual cost comes from settled-cost response headers, else
+  the body's usage cost, else catalog pricing.
+- Trust caveat: the proxy is third-party infrastructure that sees prompts
+  and holds the upstream key. It is a deliberate latency/robustness
+  trade-off; Venice remains the wallet-native alternative.
+
+### Venice (backup, explicitly selectable — never automatic)
 
 - Authenticates using the AgentCash wallet/SIWX path.
 - Uses prepaid Venice credit.
@@ -176,8 +196,9 @@ preflight is not.
 - Consumes OpenRouter account credit.
 - Uses returned usage/cost/cache fields without a separate balance query.
 
-There is no automatic provider fallback. A provider failure is returned to the
-user with a remediation message.
+There is no automatic provider fallback — "backup" means user-selectable via
+`/provider` or `opencrowd config set provider`, never silent failover. A
+provider failure is returned to the user with a remediation message.
 
 ### Model policy
 

@@ -31,10 +31,12 @@ Breaking removals:
 
 New architecture:
 
-- Typed LLM providers: Venice (default; AgentCash-wallet SIWX auth, prepaid
-  credit, streaming, stable per-session `prompt_cache_key`, one bounded
-  automatic credit top-up with one retry) and direct OpenRouter
-  (`OPENROUTER_API_KEY`). No automatic provider fallback.
+- Typed LLM providers: the x402 token proxy (default; OpenAI-compatible
+  route, pay-per-request via wallet-signed upto challenges only when the
+  route demands payment, streaming, cached-challenge pre-signing), Venice
+  (wallet-native backup; SIWX auth, prepaid credit, one bounded automatic
+  top-up with one retry), and direct OpenRouter (`OPENROUTER_API_KEY`). No
+  automatic provider fallback — switching providers is always explicit.
 - One enforced paid-capability lifecycle behind a stable six-tool gateway:
   discover → inspect → CrowdCode pre-check → approval → budget reservation →
   AgentCash execution → reconciliation → immutable receipt → required

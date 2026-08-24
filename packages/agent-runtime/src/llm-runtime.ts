@@ -1,13 +1,15 @@
 import { loadConfig, saveSession, type SessionState } from "@opencrowd/core";
 import {
-  createTypedProvider,
   isProviderId,
+  OpenRouterProvider,
   resolveSessionModels,
+  VeniceProvider,
   type ProviderId,
   type ProviderModel,
   type ResolvedSessionModels,
   type TypedLlmProvider
 } from "./providers.js";
+import { X402ProxyProvider } from "./x402-proxy.js";
 
 /**
  * Session-facing provider/model resolution. Resolved model IDs are persisted
@@ -25,8 +27,25 @@ export interface LlmRuntimeSelection {
 
 const providerCache = new Map<ProviderId, TypedLlmProvider>();
 
+export interface TypedProviderOptions {
+  timeoutMs?: number;
+  openrouterApiKey?: string;
+  x402ProxyUrl?: string;
+}
+
+/** Build a provider for a provider ID. */
+export function createTypedProvider(id: ProviderId, options: TypedProviderOptions = {}): TypedLlmProvider {
+  if (id === "x402") {
+    return new X402ProxyProvider({ baseUrl: options.x402ProxyUrl, timeoutMs: options.timeoutMs });
+  }
+  if (id === "venice") {
+    return new VeniceProvider({ timeoutMs: options.timeoutMs });
+  }
+  return new OpenRouterProvider({ apiKey: options.openrouterApiKey, timeoutMs: options.timeoutMs });
+}
+
 /** One long-lived provider (and underlying client) per process. */
-export function sharedTypedProvider(id: ProviderId, options: { timeoutMs?: number } = {}): TypedLlmProvider {
+export function sharedTypedProvider(id: ProviderId, options: TypedProviderOptions = {}): TypedLlmProvider {
   let provider = providerCache.get(id);
   if (!provider) {
     provider = createTypedProvider(id, options);
@@ -58,7 +77,7 @@ export async function resolveLlmRuntime(
     throw new Error(`unknown LLM provider \`${requested}\`; supported: venice, openrouter`);
   }
   const providerId: ProviderId = requested;
-  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs });
+  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
 
   // Reuse the session's recorded resolution when nothing overrides it, so a
   // resumed session keeps its exact provider and models.

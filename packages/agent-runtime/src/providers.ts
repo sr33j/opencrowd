@@ -9,9 +9,9 @@ import { requireAgentCashWallet } from "@opencrowd/core";
  * user with remediation.
  */
 
-export type ProviderId = "venice" | "openrouter";
+export type ProviderId = "x402" | "venice" | "openrouter";
 
-export const PROVIDER_IDS: ProviderId[] = ["venice", "openrouter"];
+export const PROVIDER_IDS: ProviderId[] = ["x402", "venice", "openrouter"];
 
 export interface ProviderModel {
   id: string;
@@ -403,16 +403,8 @@ export class OpenRouterProvider implements TypedLlmProvider {
   }
 }
 
-/** Build the process-wide provider for a provider ID. */
-export function createTypedProvider(id: ProviderId, options: { timeoutMs?: number; openrouterApiKey?: string } = {}): TypedLlmProvider {
-  if (id === "venice") {
-    return new VeniceProvider({ timeoutMs: options.timeoutMs });
-  }
-  return new OpenRouterProvider({ apiKey: options.openrouterApiKey, timeoutMs: options.timeoutMs });
-}
-
 export function isProviderId(value: unknown): value is ProviderId {
-  return value === "venice" || value === "openrouter";
+  return value === "x402" || value === "venice" || value === "openrouter";
 }
 
 /** Resolved per-session model selection, persisted for reproducibility. */

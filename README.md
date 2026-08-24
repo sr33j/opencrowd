@@ -58,17 +58,20 @@ First launch is two steps — there is no wallet setup:
 
 ## Providers
 
-Venice is the default LLM provider: it authenticates with the shared
-AgentCash wallet (SIWX) and runs on prepaid Venice credit topped up with
-USDC — no API keys. Steady-state turns make exactly one network inference
-request (streamed, with a stable per-session prompt cache key); when credit
-runs out, OpenCrowd performs at most one bounded automatic top-up within the
-session budget and retries once.
+The default provider is the **x402 token proxy** (`x402ProxyUrl`, an
+OpenAI-compatible route metered with x402 micropayments): requests pass
+through unchallenged, and when the route demands payment (HTTP 402) the
+challenge is signed with the shared AgentCash wallet — upto-style, so the
+service settles actual usage against a quoted ceiling. No API keys, no
+prepaid balance, OpenRouter-grade serving latency.
 
-OpenRouter is optional: set `OPENROUTER_API_KEY` and
-`opencrowd config set provider openrouter`. It bills your OpenRouter account
-credit directly. There is no automatic fallback between providers — a
-provider failure surfaces with a remediation message.
+**Venice** is the wallet-native backup (`opencrowd config set provider
+venice` or `/provider venice`): SIWX authentication, prepaid Venice credit
+topped up with USDC, at most one bounded automatic top-up per exhausted
+call. **OpenRouter** direct is also available with `OPENROUTER_API_KEY`.
+There is no automatic fallback between providers — switching is always an
+explicit choice, and a provider failure surfaces with a remediation
+message.
 
 Model preferences are per provider (`auto` resolves from the live catalog at
 session start; resolved IDs are recorded on the session so `run --session`

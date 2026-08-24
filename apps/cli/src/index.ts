@@ -269,7 +269,7 @@ async function configCommand(args: string[]): Promise<void> {
   switch (key) {
     case "provider": {
       if (!isProviderId(value)) {
-        throw new Error("provider must be venice or openrouter");
+        throw new Error("provider must be x402, venice, or openrouter");
       }
       await updateConfig({ provider: value });
       break;
@@ -359,7 +359,7 @@ async function modelsCommand(args: string[]): Promise<void> {
   const [action] = args;
   const config = await loadConfig();
   if (action === "list" || action === undefined) {
-    const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs });
+    const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
     const models = await provider.listModels();
     const rows = models.map((model) => ({
       id: model.id,

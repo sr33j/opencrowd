@@ -32,6 +32,7 @@ import {
 export * from "./providers.js";
 export * from "./llm-runtime.js";
 export * from "./runtime.js";
+export * from "./x402-proxy.js";
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";

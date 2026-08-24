@@ -19,6 +19,7 @@ import {
   runAgentTaskDetailed,
   toWireChatMessage,
   VeniceProvider,
+  X402ProxyProvider,
   type LlmMessage,
   type LlmProvider,
   type LlmResponse,
@@ -492,6 +493,97 @@ describe("failure hardening", () => {
       { id: "frontier", inputCostCentsPer1k: 2, outputCostCentsPer1k: 8, contextWindowTokens: 200_000, supportsTools: true }
     ], { main: "auto", subagent: "auto" });
     expect(resolved.subagent).toBe("cheap-priced");
+  });
+});
+
+describe("x402 proxy provider", () => {
+  const TEST_KEY = "0x59c6995e998f97a5a0044966f094538f89d8f907357e22278c4cfeabf7c5d1c6";
+  const CHALLENGE = {
+    x402Version: 2,
+    resource: { url: "https://proxy.test/v1/chat/completions", method: "POST" },
+    accepts: [{
+      scheme: "exact",
+      network: "eip155:8453",
+      amount: "5000",
+      asset: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+      payTo: "0x06dFF3c8380b5D1799874adA903fc3422882FD6f",
+      maxTimeoutSeconds: 300,
+      extra: { name: "USD Coin", version: "2" }
+    }]
+  };
+  const COMPLETION = { choices: [{ message: { content: "paid ok" } }], usage: { prompt_tokens: 4, completion_tokens: 2, cost: 0.0002 } };
+
+  it("passes unchallenged requests through with no payment overhead and reads usage cost", async () => {
+    const seen: Array<{ headers: Record<string, string> }> = [];
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push({ headers: Object.fromEntries(new Headers(init?.headers).entries()) });
+        return new Response(JSON.stringify(COMPLETION), { status: 200 });
+      }) as typeof fetch
+    });
+
+    const completion = await provider.complete({ model: "openai/gpt-5.6-sol", messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(completion.content).toBe("paid ok");
+    expect(completion.usage.costCents).toBeCloseTo(0.02, 5);
+    expect(seen).toHaveLength(1);
+    expect(seen[0].headers["x-payment"]).toBeUndefined();
+  });
+
+  it("signs a 402 challenge, retries once, and pre-signs subsequent calls", async () => {
+    const calls: Array<{ paid: boolean }> = [];
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        const paid = headers.has("x-payment");
+        calls.push({ paid });
+        if (!paid) {
+          return new Response(JSON.stringify(CHALLENGE), { status: 402 });
+        }
+        const decoded = JSON.parse(Buffer.from(headers.get("x-payment") ?? "", "base64").toString("utf8"));
+        expect(decoded).toMatchObject({ x402Version: 2, accepted: { amount: "5000", network: "eip155:8453" } });
+        expect(decoded.payload?.authorization?.to).toBe("0x06dFF3c8380b5D1799874adA903fc3422882FD6f");
+        return new Response(JSON.stringify(COMPLETION), { status: 200, headers: { "x402-charged-cost-cents": "3" } });
+      }) as typeof fetch
+    });
+
+    const first = await provider.complete({ model: "m", messages: [{ role: "user", content: "a" }], tools: [] });
+    expect(first.content).toBe("paid ok");
+    // Settled-cost header wins over body usage.
+    expect(first.usage.costCents).toBe(3);
+    // unpaid probe -> 402 -> paid retry
+    expect(calls.map((call) => call.paid)).toEqual([false, true]);
+
+    const second = await provider.complete({ model: "m", messages: [{ role: "user", content: "b" }], tools: [] });
+    expect(second.content).toBe("paid ok");
+    // Cached challenge: the payment header is attached preemptively, no extra round trip.
+    expect(calls.map((call) => call.paid)).toEqual([false, true, true]);
+  });
+
+  it("streams SSE responses with deltas", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"to"}}]}',
+      'data: {"choices":[{"delta":{"content":"kens"}}]}',
+      'data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"cost":0.0001}}',
+      "data: [DONE]"
+    ].join("\n") + "\n";
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async () => new Response(sse, { status: 200 })) as typeof fetch
+    });
+    const deltas: string[] = [];
+    const completion = await provider.complete({
+      model: "m",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+      onTextDelta: (delta) => deltas.push(delta)
+    });
+    expect(deltas.join("")).toBe("tokens");
+    expect(completion.usage.costCents).toBeCloseTo(0.01, 5);
   });
 });
 

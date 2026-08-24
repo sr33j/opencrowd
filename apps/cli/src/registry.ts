@@ -90,7 +90,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   },
   {
     name: "provider",
-    usage: "/provider [venice|openrouter]",
+    usage: "/provider [x402|venice|openrouter]",
     summary: "Show or select this session's LLM provider (validated immediately)",
     execute: async (rest, { session, state }) => {
       const config = await loadConfig();
@@ -102,12 +102,12 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
         throw new Error("provider selection is unavailable in demo mode");
       }
       if (!isProviderId(rest[0])) {
-        throw new Error("/provider supports venice or openrouter");
+        throw new Error("/provider supports x402, venice, or openrouter");
       }
       const providerId: ProviderId = rest[0];
       // Validate configuration immediately: this connects/authenticates and
       // fetches the catalog, then re-resolves this session's models.
-      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs });
+      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
       const catalog = await provider.listModels();
       const defaults = config[providerId];
       session.models = resolveSessionModels(providerId, catalog, {
@@ -136,7 +136,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
       }
       const config = await loadConfig();
       const providerId = activeProviderId(session, config.provider);
-      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs });
+      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
       const models = await provider.listModels({ refresh: rest[0] === "refresh" });
       const rows = models.map((model) => ({
         id: model.id,
@@ -406,7 +406,7 @@ async function updateSessionModels(
 ): Promise<void> {
   const config = await loadConfig();
   const providerId = activeProviderId(session, config.provider);
-  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs });
+  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
   const catalog = await provider.listModels();
   const defaults = config[providerId];
   const currentSubagent = session.models ? session.models.subagent ?? "off" : defaults.submodel;
