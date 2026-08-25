@@ -38,7 +38,7 @@ New architecture:
   top-up with one retry), and direct OpenRouter (`OPENROUTER_API_KEY`).
   Sessions never silently migrate providers; switching is always explicit.
 - Tail-latency hardening: every proxy call streams with liveness watching —
-  a stream silent for 25s aborts as a transient timeout instead of waiting
+  a stream silent for 90s aborts as a transient timeout instead of waiting
   out the full deadline; transient faults ride a bounded ladder (one retry,
   then one ledgered rescue call on the paired backup provider, with the
   primary parked after three consecutive rescues); headless/eval runs cap

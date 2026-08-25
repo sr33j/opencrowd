@@ -168,9 +168,10 @@ proxy route:
 - Streams output; actual cost comes from settled-cost response headers, else
   the body's usage cost, else catalog pricing.
 - Always requests a stream and watches liveness: if the stream goes silent
-  (no bytes — keep-alives count) for the stall window (default 25s), the
-  request aborts as a transient timeout instead of waiting out the full
-  deadline. Slow-but-alive generations are never cut.
+  for the stall window (default 90s), the request aborts as a transient
+  timeout instead of waiting out the full deadline. The window is sized
+  above measured silent-reasoning gaps (~37s observed) because the proxy
+  forwards no bytes at all while the upstream model thinks.
 - Trust caveat: the proxy is third-party infrastructure that sees prompts
   and holds the upstream key. It is a deliberate latency/robustness
   trade-off; Venice remains the wallet-native alternative.
@@ -212,9 +213,10 @@ transient faults (timeouts, stalls, rate limits, 5xx, dropped connections):
 3. after three consecutive rescues the primary is parked for the rest of the
    process and calls go straight to the backup (a fresh run probes again).
 
-Non-transient failures skip the ladder and surface with remediation. If the
-backup's configured model is `auto`, no rescue is wired (resolving a catalog
-mid-outage is exactly the wrong moment). Headless and eval runs additionally
+Non-transient failures skip the ladder and surface with remediation. Rescue
+uses exact model IDs only — an `auto` backup preference falls back to the
+shipped default model, because resolving a catalog mid-outage is exactly the
+wrong moment. Headless and eval runs additionally
 cap the per-request deadline at 240s (`NON_INTERACTIVE_LLM_TIMEOUT_MS`);
 interactive sessions keep the configured `llmTimeoutMs`.
 

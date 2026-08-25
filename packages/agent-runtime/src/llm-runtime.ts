@@ -1,4 +1,4 @@
-import { loadConfig, saveSession, type OpenCrowdConfig, type SessionState } from "@opencrowd/core";
+import { DEFAULT_CONFIG, loadConfig, saveSession, type OpenCrowdConfig, type SessionState } from "@opencrowd/core";
 import {
   isProviderId,
   OpenRouterProvider,
@@ -141,9 +141,10 @@ export async function resolveLlmRuntime(
 
 /**
  * Pair each primary with its rescue provider: Venice for the x402 proxy (and
- * OpenRouter), the x402 proxy for Venice. Only exact configured model IDs
- * qualify — "auto" would need a live catalog fetch on the rescue path, which
- * is exactly when the network is already misbehaving.
+ * OpenRouter), the x402 proxy for Venice. Rescue needs an exact model ID —
+ * "auto" would need a live catalog fetch on the rescue path, which is
+ * exactly when the network is already misbehaving — so an "auto" preference
+ * falls back to the shipped default model for that provider.
  */
 function resolveFallbackRuntime(
   primary: ProviderId,
@@ -151,16 +152,13 @@ function resolveFallbackRuntime(
   timeoutMs: number
 ): LlmFallbackRuntime | undefined {
   const backupId: ProviderId = primary === "venice" ? "x402" : "venice";
-  const defaults = config[backupId];
-  if (defaults.model === "auto" || defaults.model === "off") {
-    return undefined;
-  }
-  const subagentModel = defaults.submodel === "auto" || defaults.submodel === "off"
-    ? defaults.model
-    : defaults.submodel;
+  const exact = (preferred: string, shipped: string): string =>
+    preferred === "auto" || preferred === "off" ? shipped : preferred;
+  const mainModel = exact(config[backupId].model, DEFAULT_CONFIG[backupId].model);
+  const subagentModel = exact(config[backupId].submodel, mainModel);
   return {
     provider: sharedTypedProvider(backupId, { timeoutMs, x402ProxyUrl: config.x402ProxyUrl }),
-    mainModel: defaults.model,
+    mainModel,
     subagentModel
   };
 }

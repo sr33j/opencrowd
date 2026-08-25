@@ -26,10 +26,11 @@ export interface X402ProxyProviderOptions {
   baseUrl?: string;
   timeoutMs?: number;
   /**
-   * Abort when the completion stream goes silent for this long. Any bytes —
-   * SSE keep-alives, reasoning deltas — count as liveness, so a slow but
-   * alive generation is never cut; only a dead connection is. A stalled
-   * request surfaces as a transient timeout, which the budget layer retries.
+   * Abort when the completion stream goes silent for this long. Any bytes
+   * count as liveness, but the proxy forwards NOTHING while the upstream
+   * model reasons — measured silent-reasoning gaps reach ~37s on hard tasks
+   * — so this must stay well above legitimate think time. A stalled request
+   * surfaces as a transient timeout, which the budget layer retries.
    */
   stallTimeoutMs?: number;
   fetchImpl?: typeof fetch;
@@ -37,7 +38,7 @@ export interface X402ProxyProviderOptions {
   privateKey?: string;
 }
 
-const DEFAULT_STALL_TIMEOUT_MS = 25_000;
+const DEFAULT_STALL_TIMEOUT_MS = 90_000;
 
 /** One abort signal covering a total deadline plus an inter-byte idle deadline. */
 class StreamLiveness {

@@ -38,7 +38,7 @@ export interface OpenCrowdConfig {
   approval: ApprovalMode;
 }
 
-const DEFAULT_CONFIG: OpenCrowdConfig = {
+export const DEFAULT_CONFIG: OpenCrowdConfig = {
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
