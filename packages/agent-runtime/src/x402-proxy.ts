@@ -137,8 +137,11 @@ export class X402ProxyProvider implements TypedLlmProvider {
         ? { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) }
         : init);
       liveness.bump();
-      if (response.status === 402) {
-        // Fresh (or changed) challenge: sign it and retry exactly once.
+      // Sign the fresh (or changed) challenge and retry. Two signed attempts:
+      // the proxy's payment validation measurably flakes (~25%) and a fresh
+      // signature on the very next attempt recovers, so absorbing one
+      // rejection here is far cheaper than escalating to the rescue ladder.
+      for (let signedAttempts = 0; response.status === 402 && signedAttempts < 2; signedAttempts += 1) {
         this.cachedChallenge = await challengeFromResponse(response);
         if (!x402Challenge(this.cachedChallenge)?.accepts.length) {
           this.cachedChallenge = undefined;
@@ -147,10 +150,10 @@ export class X402ProxyProvider implements TypedLlmProvider {
         liveness.bump();
         response = await this.fetchImpl()(url, { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) });
         liveness.bump();
-        if (response.status === 402) {
-          this.cachedChallenge = undefined;
-          throw new Error("the x402 proxy rejected a signed payment; check the wallet's USDC balance on Base and retry");
-        }
+      }
+      if (response.status === 402) {
+        this.cachedChallenge = undefined;
+        throw new Error("the x402 proxy rejected a signed payment; check the wallet's USDC balance on Base and retry");
       }
       if (!response.ok) {
         const detail = await response.text().catch(() => "");

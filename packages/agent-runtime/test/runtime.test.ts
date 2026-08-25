@@ -665,6 +665,27 @@ describe("x402 proxy provider", () => {
     expect(completion.usage.costCents).toBeCloseTo(0.01, 5);
   });
 
+  it("absorbs one flaky payment rejection by re-signing a fresh challenge", async () => {
+    const calls: Array<{ paid: boolean }> = [];
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const paid = new Headers(init?.headers).has("x-payment");
+        calls.push({ paid });
+        // Probe 402, first signed attempt flakily rejected with a fresh
+        // challenge, second signed attempt accepted.
+        if (calls.length <= 2) {
+          return new Response(JSON.stringify(CHALLENGE), { status: 402 });
+        }
+        return new Response(JSON.stringify(COMPLETION), { status: 200 });
+      }) as typeof fetch
+    });
+    const completion = await provider.complete({ model: "m", messages: [{ role: "user", content: "a" }], tools: [] });
+    expect(completion.content).toBe("paid ok");
+    expect(calls.map((call) => call.paid)).toEqual([false, true, true]);
+  });
+
   it("always requests a stream so liveness is observable", async () => {
     let requestedBody: Record<string, unknown> = {};
     const provider = new X402ProxyProvider({
