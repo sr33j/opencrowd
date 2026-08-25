@@ -37,6 +37,8 @@ export interface HarnessContext {
   testMode?: boolean;
   testSeed?: string;
   model?: string;
+  /** Explicit subagent model, or "off" to disable delegation entirely. */
+  subagentModel?: string;
   auto?: boolean;
   log: (message: string) => void;
 }
@@ -111,6 +113,7 @@ const openCrowdHarness: GaiaHarness = {
     }
     const llm = context.testMode ? undefined : await resolveLlmRuntime(session, {
       model: context.model,
+      subagentModel: context.subagentModel,
       auto: context.auto,
       nonInteractive: true
     });

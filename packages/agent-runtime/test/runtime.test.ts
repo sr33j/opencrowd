@@ -686,6 +686,28 @@ describe("x402 proxy provider", () => {
     expect(calls.map((call) => call.paid)).toEqual([false, true, true]);
   });
 
+  it("caps concurrent in-flight completions and queues the rest client-side", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      maxConcurrent: 2,
+      fetchImpl: (async () => {
+        inFlight += 1;
+        peak = Math.max(peak, inFlight);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        inFlight -= 1;
+        return new Response(JSON.stringify(COMPLETION), { status: 200 });
+      }) as typeof fetch
+    });
+    const results = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+      provider.complete({ model: "m", messages: [{ role: "user", content: `q${i}` }], tools: [] })));
+    expect(results).toHaveLength(6);
+    expect(results.every((completion) => completion.content === "paid ok")).toBe(true);
+    expect(peak).toBe(2);
+  });
+
   it("always requests a stream so liveness is observable", async () => {
     let requestedBody: Record<string, unknown> = {};
     const provider = new X402ProxyProvider({

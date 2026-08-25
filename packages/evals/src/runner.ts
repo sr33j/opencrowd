@@ -11,6 +11,8 @@ export interface GaiaRunOptions {
   workspaceRoot: string;
   hfToken?: string;
   model?: string;
+  /** Explicit subagent model, or "off" to disable delegation entirely. */
+  subagentModel?: string;
   auto?: boolean;
   testMode?: boolean;
   testSeed?: string;
@@ -153,6 +155,7 @@ async function runOneQuestion(
       testMode: options.testMode,
       testSeed: options.testSeed,
       model: options.model,
+      subagentModel: options.subagentModel,
       auto: options.auto,
       log: options.log ?? (() => undefined)
     });

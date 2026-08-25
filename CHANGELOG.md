@@ -43,7 +43,13 @@ New architecture:
   then one ledgered rescue call on the paired backup provider, with the
   primary parked after three consecutive rescues); headless/eval runs cap
   the per-request deadline at 240s; sub-cent LLM costs keep fractional
-  cents in the ledger instead of rounding to zero.
+  cents in the ledger instead of rounding to zero; in-flight proxy
+  completions are capped (default 6) so excess concurrency queues
+  client-side instead of inflating the proxy's time-to-first-token.
+- Delegation policy: subagents are for parallel fan-out only — the prompt
+  now requires two or more independent subagents per delegation and keeps
+  sequential work in the main loop; `evals gaia` accepts
+  `--subagent-model <model|off>`.
 - One enforced paid-capability lifecycle behind a stable six-tool gateway:
   discover → inspect → CrowdCode pre-check → approval → budget reservation →
   AgentCash execution → reconciliation → immutable receipt → required

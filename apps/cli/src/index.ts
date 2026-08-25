@@ -385,7 +385,7 @@ async function modelsCommand(args: string[]): Promise<void> {
 async function evalsCommand(args: string[]): Promise<void> {
   const [dataset, ...rest] = args;
   if (dataset !== "gaia") {
-    throw new Error("evals supports: gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--model <model>] [--yes]");
+    throw new Error("evals supports: gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]");
   }
   const { runGaiaBenchmark, renderGaiaReport, GAIA_TIERS } = await import("@opencrowd/evals");
   const tier = readOption(rest, "--tier") ?? "smoke";
@@ -400,6 +400,7 @@ async function evalsCommand(args: string[]): Promise<void> {
     hfToken: readOption(rest, "--hf-token") ?? process.env.HF_TOKEN,
     workspaceRoot: process.cwd(),
     model: readOption(rest, "--model"),
+    subagentModel: readOption(rest, "--subagent-model"),
     auto: rest.includes("--auto"),
     limit: readOption(rest, "--limit") === undefined ? undefined : Number(readOption(rest, "--limit")),
     parallel: readOption(rest, "--parallel") === undefined ? undefined : Number(readOption(rest, "--parallel")),
@@ -436,7 +437,7 @@ function printHelp(): void {
   opencrowd wallet [--json] address|balance
   opencrowd models [--json] list
   opencrowd doctor
-  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--yes]
+  opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]
 
 Interactive commands (also /help inside the UI):
 ${renderCommandHelp()}`);

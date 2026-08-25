@@ -649,12 +649,12 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (options.subagent) {
     systemPromptParts.push(
       `Delegation: spawn_subagent runs a cheaper, faster model (${options.subagent.model}${options.subagent.costHint ? `, ${options.subagent.costHint}` : ""}) with local file and shell tools only.`,
-      "Multiple spawn_subagent calls in one reply run in parallel, so batch independent subtasks into a single reply; a single subagent working through a list serially is the slowest possible shape — split the list across 2-4 parallel subagents instead.",
+      "Delegate ONLY when you can spawn two or more INDEPENDENT subagents in the same reply — parallel fan-out is the entire benefit; multiple spawn_subagent calls in one reply run concurrently (2-4 is the sweet spot).",
+      "If the work is one sequential thread where each step depends on the previous result, do it yourself in this main loop: a chain of single subagents is strictly slower than working directly and adds spawn/read overhead on top.",
       "Give each subagent an objective, expected output format, and clear boundaries so parallel subagents cannot make conflicting decisions; they see none of this conversation, so pass explicit context (file paths, constraints).",
       "Each subagent's files land under artifacts/subagents/<n>/ and its completion lists what it wrote.",
-      "Delegate bounded, low-judgment work such as summarizing, extracting, mechanical edits, or reading specific already-known URLs (subagents can curl free URLs via run_shell); keep planning, paid-service decisions, and final answers in this main loop.",
-      "For web research: first buy one paid web search here in the main loop, then fan the returned URLs out to parallel subagents in a single reply. Never send a subagent off to guess URLs with curl.",
-      "Prefer delegating whenever a subtask does not need your judgment: the subagent model is an order of magnitude cheaper and faster, so offloading easy legwork cuts both cost and wall-clock time."
+      "Suitable subagent work: summarizing, extracting, mechanical edits, or reading specific already-known URLs (subagents can curl free URLs via run_shell); keep planning, paid-service decisions, and final answers in this main loop.",
+      "For web research: first buy one paid web search here in the main loop, then fan the returned URLs out to parallel subagents in a single reply. Never send a subagent off to guess URLs with curl."
     );
   }
   const messages: LlmMessage[] = [

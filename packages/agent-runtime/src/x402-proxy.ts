@@ -33,12 +33,46 @@ export interface X402ProxyProviderOptions {
    * surfaces as a transient timeout, which the budget layer retries.
    */
   stallTimeoutMs?: number;
+  /**
+   * Cap on simultaneous in-flight completions per provider instance. The
+   * proxy's serving capacity is fixed: beyond ~6 concurrent requests it
+   * queues server-side, inflating time-to-first-token for everyone. Queueing
+   * client-side instead is free — a parked call has not signed a payment or
+   * started its stall/timeout clocks yet.
+   */
+  maxConcurrent?: number;
   fetchImpl?: typeof fetch;
   /** Test hook: sign challenges without a real wallet. */
   privateKey?: string;
 }
 
 const DEFAULT_STALL_TIMEOUT_MS = 90_000;
+const DEFAULT_MAX_CONCURRENT = 6;
+
+/** FIFO counting semaphore; a released slot passes directly to the next waiter. */
+class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private readonly limit: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.active < this.limit) {
+      this.active += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  release(): void {
+    const next = this.waiters.shift();
+    if (next) {
+      next();
+      return;
+    }
+    this.active -= 1;
+  }
+}
 
 /** One abort signal covering a total deadline plus an inter-byte idle deadline. */
 class StreamLiveness {
@@ -69,12 +103,14 @@ class StreamLiveness {
 export class X402ProxyProvider implements TypedLlmProvider {
   readonly id = "x402" as const;
   private readonly baseUrl: string;
+  private readonly slots: Semaphore;
   private modelsCache?: ProviderModel[];
   /** Last observed 402 challenge for the completions endpoint. */
   private cachedChallenge?: unknown;
 
   constructor(private readonly options: X402ProxyProviderOptions = {}) {
     this.baseUrl = (options.baseUrl ?? "https://x402-tokens.fly.dev/v1").replace(/\/$/, "");
+    this.slots = new Semaphore(options.maxConcurrent ?? DEFAULT_MAX_CONCURRENT);
   }
 
   private fetchImpl(): typeof fetch {
@@ -102,6 +138,17 @@ export class X402ProxyProvider implements TypedLlmProvider {
   }
 
   async complete(request: CompletionRequest): Promise<ProviderCompletion> {
+    // Queue locally past the concurrency cap; signing and the stall/timeout
+    // clocks only start once a slot is held and the request actually goes out.
+    await this.slots.acquire();
+    try {
+      return await this.completeNow(request);
+    } finally {
+      this.slots.release();
+    }
+  }
+
+  private async completeNow(request: CompletionRequest): Promise<ProviderCompletion> {
     // Always stream: liveness is only observable on a streamed response, and
     // a silent stall is then distinguishable from a long generation.
     const body: Record<string, unknown> = {

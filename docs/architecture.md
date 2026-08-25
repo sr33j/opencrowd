@@ -172,6 +172,11 @@ proxy route:
   timeout instead of waiting out the full deadline. The window is sized
   above measured silent-reasoning gaps (~37s observed) because the proxy
   forwards no bytes at all while the upstream model thinks.
+- Caps in-flight completions per provider instance (default 6): the proxy's
+  serving capacity is fixed, so excess concurrency just queues server-side
+  and inflates time-to-first-token for every request. Queueing client-side
+  is free — a parked call has not signed a payment or started its
+  stall/timeout clocks yet.
 - Trust caveat: the proxy is third-party infrastructure that sees prompts
   and holds the upstream key. It is a deliberate latency/robustness
   trade-off; Venice remains the wallet-native alternative.
