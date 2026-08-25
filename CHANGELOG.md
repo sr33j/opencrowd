@@ -50,6 +50,11 @@ New architecture:
   now requires two or more independent subagents per delegation and keeps
   sequential work in the main loop; `evals gaia` accepts
   `--subagent-model <model|off>`.
+- Provider money/routing actions respect approval mode: in `ask` mode a
+  backup-provider rescue call and an automatic Venice credit top-up each
+  require explicit confirmation through the purchase-approval surface, and
+  `off` mode disables automatic top-ups (Venice deposits are
+  non-withdrawable); the default per-top-up cap drops from $10 to $5.
 - One enforced paid-capability lifecycle behind a stable six-tool gateway:
   discover → inspect → CrowdCode pre-check → approval → budget reservation →
   AgentCash execution → reconciliation → immutable receipt → required

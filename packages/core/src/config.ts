@@ -56,7 +56,9 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   x402ProxyUrl: "https://x402-tokens.fly.dev/v1",
   llmTimeoutMs: 300_000,
   llmMaxCostCentsPerCall: 100,
-  veniceMaxTopUpCents: 1000,
+  // Venice credit is deposit-only (no withdrawals), so keep single top-ups
+  // small; in ask mode each top-up additionally requires user confirmation.
+  veniceMaxTopUpCents: 500,
   defaultBudgetCents: 2000,
   approval: "ask"
 };

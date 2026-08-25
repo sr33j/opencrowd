@@ -8,6 +8,7 @@ import {
   BudgetedLlmProvider,
   createOpenCrowdRuntime,
   createMockToolExecutor,
+  InsufficientCreditError,
   MOCK_X402_SERVICES,
   MockLlmProvider,
   normalizeProviderModels,
@@ -260,7 +261,7 @@ describe("Venice provider", () => {
 
   it("performs at most one bounded top-up and one retry on insufficient credit", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 500 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 500 , approvalMode: "auto" });
     const insufficient = new VeniceError("INSUFFICIENT_BALANCE", "Insufficient balance", { minimumTopUpUsd: 1 });
     const fake = fakeVeniceClient({
       responses: [insufficient, new Response(JSON.stringify({
@@ -288,7 +289,7 @@ describe("Venice provider", () => {
 
   it("never loops: a second insufficient-credit failure propagates", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 500 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 500 , approvalMode: "auto" });
     const insufficient = () => new VeniceError("INSUFFICIENT_BALANCE", "Insufficient balance", {});
     const fake = fakeVeniceClient({ responses: [insufficient(), insufficient()] });
     const provider = new VeniceProvider({ clientFactory: async () => fake.client });
@@ -305,7 +306,7 @@ describe("Venice provider", () => {
 
   it("refuses a top-up beyond the remaining session allowance", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     const fake = fakeVeniceClient({
       responses: [new VeniceError("INSUFFICIENT_BALANCE", "Insufficient balance", { minimumTopUpUsd: 1 })]
     });
@@ -389,7 +390,7 @@ describe("OpenRouter provider", () => {
 describe("failure hardening", () => {
   it("retries a transient provider failure exactly once", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let attempts = 0;
     const flaky: TypedLlmProvider = {
       id: "venice",
@@ -411,7 +412,7 @@ describe("failure hardening", () => {
 
   it("does not retry twice or on non-transient failures", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let attempts = 0;
     const dead: TypedLlmProvider = {
       id: "venice",
@@ -441,7 +442,7 @@ describe("failure hardening", () => {
 
   it("fails over to the backup provider after two consecutive transient failures", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let primaryAttempts = 0;
     const primary: TypedLlmProvider = {
       id: "x402",
@@ -477,7 +478,7 @@ describe("failure hardening", () => {
 
   it("does not fail over on non-transient errors and marks a repeatedly rescued primary degraded", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 100 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100 , approvalMode: "auto" });
     let primaryAttempts = 0;
     const primary: TypedLlmProvider = {
       id: "x402",
@@ -516,6 +517,76 @@ describe("failure hardening", () => {
     await new BudgetedLlmProvider(session, primary, options).complete([{ role: "user", content: "hi" }]);
     expect(primaryAttempts).toBe(6);
     expect(backupCalls).toBe(4);
+  });
+
+  it("ask mode gates the rescue call behind explicit confirmation and denies it without a handler", async () => {
+    const root = await tempRoot();
+    const stalling: TypedLlmProvider = {
+      id: "x402",
+      async listModels() { return []; },
+      async complete() {
+        throw new Error("x402 proxy stream stalled: no bytes for 90000ms (timed out)");
+      }
+    };
+    let backupCalls = 0;
+    const backup: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        backupCalls += 1;
+        return { content: "rescued", toolCalls: [], usage: { costCents: 1 } };
+      }
+    };
+
+    // No handler in ask mode: the rescue is denied and the original error surfaces.
+    const askSession = await createSession({ workspaceRoot: root, budgetCents: 100 });
+    await expect(new BudgetedLlmProvider(askSession, stalling, {
+      model: "m", maxCostCentsPerCall: 10, fallback: { provider: backup, model: "b" }
+    }).complete([{ role: "user", content: "hi" }])).rejects.toThrow("stalled");
+    expect(backupCalls).toBe(0);
+
+    // With a handler, the confirmed request carries the action details.
+    const seen: Array<{ action: string; providerId: string }> = [];
+    await expect(new BudgetedLlmProvider(askSession, stalling, {
+      model: "m",
+      maxCostCentsPerCall: 10,
+      fallback: { provider: backup, model: "b" },
+      confirmProviderAction: async (request) => {
+        seen.push({ action: request.action, providerId: request.providerId });
+        return true;
+      }
+    }).complete([{ role: "user", content: "hi" }])).resolves.toMatchObject({ content: "rescued" });
+    expect(seen).toEqual([{ action: "rescue_call", providerId: "venice" }]);
+    expect(backupCalls).toBe(1);
+  });
+
+  it("ask mode gates the automatic top-up and off mode disables it", async () => {
+    const root = await tempRoot();
+    const insufficient: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        throw new InsufficientCreditError("Venice prepaid credit is exhausted.", 1, 5);
+      },
+      async topUpCredit() {
+        throw new Error("top-up must not run in these scenarios");
+      }
+    };
+    const options = { model: "m", maxCostCentsPerCall: 10, maxTopUpCentsPerAction: 500 };
+
+    const askSession = await createSession({ workspaceRoot: root, budgetCents: 2000 });
+    await expect(new BudgetedLlmProvider(askSession, insufficient, {
+      ...options,
+      confirmProviderAction: async (request) => {
+        expect(request.action).toBe("credit_top_up");
+        expect(request.detail).toContain("not withdrawable");
+        return false;
+      }
+    }).complete([{ role: "user", content: "hi" }])).rejects.toThrow("declined");
+
+    const offSession = await createSession({ workspaceRoot: root, budgetCents: 2000, approvalMode: "off" });
+    await expect(new BudgetedLlmProvider(offSession, insufficient, options)
+      .complete([{ role: "user", content: "hi" }])).rejects.toThrow("disabled in approval mode");
   });
 
   it("stops the loop gracefully when the budget is exhausted instead of erroring the run", async () => {
@@ -1041,7 +1112,7 @@ describe("dependency-injected runtime", () => {
 describe("completion gating", () => {
   it("nudges once, then stops deterministically while the completion gate blocks", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let completions = 0;
     const provider: LlmProvider = {
       async complete(): Promise<LlmResponse> {
@@ -1062,7 +1133,7 @@ describe("completion gating", () => {
 
   it("completes normally once the gate clears", async () => {
     const root = await tempRoot();
-    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let gateCalls = 0;
     const provider: LlmProvider = {
       async complete(): Promise<LlmResponse> {

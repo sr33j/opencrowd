@@ -189,7 +189,10 @@ proxy route:
 - Does not query remote balance before every completion; it reads and caches
   balance information returned by inference.
 - On insufficient credit, performs one bounded top-up through AgentCash and
-  retries inference once. It never loops.
+  retries inference once. It never loops. Venice credit is deposit-only (no
+  withdrawals), so the default per-top-up cap is $5, `ask` mode requires
+  explicit confirmation of every top-up, and `off` mode disables automatic
+  top-ups entirely.
 - Sends a stable per-session `prompt_cache_key` and preserves byte-identical
   stable prompt/tool prefixes.
 - Normalizes `cached_tokens` and cache-write fields into usage records.
@@ -218,10 +221,14 @@ transient faults (timeouts, stalls, rate limits, 5xx, dropped connections):
 3. after three consecutive rescues the primary is parked for the rest of the
    process and calls go straight to the backup (a fresh run probes again).
 
-Non-transient failures skip the ladder and surface with remediation. Rescue
-uses exact model IDs only — an `auto` backup preference falls back to the
-shipped default model, because resolving a catalog mid-outage is exactly the
-wrong moment. Headless and eval runs additionally
+In `ask` approval mode each rescue call requires explicit human confirmation
+through the same approval surface as purchases (headless ask-mode runs have
+no confirmation surface, so the rescue is denied and the original error
+surfaces); degraded-first routing is skipped in ask mode so the primary is
+always probed. Non-transient failures skip the ladder and surface with
+remediation. Rescue uses exact model IDs only — an `auto` backup preference
+falls back to the shipped default model, because resolving a catalog
+mid-outage is exactly the wrong moment. Headless and eval runs additionally
 cap the per-request deadline at 240s (`NON_INTERACTIVE_LLM_TIMEOUT_MS`);
 interactive sessions keep the configured `llmTimeoutMs`.
 

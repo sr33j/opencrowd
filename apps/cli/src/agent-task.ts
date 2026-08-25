@@ -16,6 +16,7 @@ import {
   type LlmProvider,
   type LlmResponse,
   type LlmRuntimeSelection,
+  type ProviderActionRequest,
   type RuntimeLlm,
   type SubagentOptions,
   type ToolExecutor
@@ -104,6 +105,7 @@ function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) 
         auto: options.forceAutoPolicy,
         nonInteractive: options.nonInteractive
       });
+      const confirmProviderAction = providerActionConfirmer(options);
       return {
         kind: "typed",
         main: {
@@ -116,12 +118,13 @@ function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) 
           fallback: llm.fallback
             ? { provider: llm.fallback.provider, model: llm.fallback.mainModel }
             : undefined,
+          confirmProviderAction,
           // Stream deltas so time-to-first-token is visible in the UI.
           onTextDelta: options.onProgress
             ? (delta) => options.onProgress?.({ type: "assistant_delta", message: delta })
             : undefined
         },
-        subagent: subagentOptionsFor(current, llm),
+        subagent: subagentOptionsFor(current, llm, confirmProviderAction),
         contextWindowTokens: llm.catalog.find((model) => model.id === llm.models.main)?.contextWindowTokens
           ?? fallbackContextWindowTokens(llm.models.main),
         promptSections: await vendorInstructions()
@@ -188,7 +191,11 @@ function connectorsDisabled(): boolean {
   return process.env.OPENCROWD_DISABLE_CONNECTORS === "1" || process.env.OPENCROWD_DISABLE_CONNECTORS === "true";
 }
 
-function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): SubagentOptions | undefined {
+function subagentOptionsFor(
+  session: SessionState,
+  llm: LlmRuntimeSelection,
+  confirmProviderAction?: (request: ProviderActionRequest) => Promise<boolean>
+): SubagentOptions | undefined {
   if (!llm.models.subagent) {
     return undefined;
   }
@@ -206,8 +213,35 @@ function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): Su
       catalog: llm.catalog,
       fallback: llm.fallback
         ? { provider: llm.fallback.provider, model: llm.fallback.subagentModel }
-        : undefined
+        : undefined,
+      confirmProviderAction
     }
+  };
+}
+
+/**
+ * Route rescue-call and credit-top-up confirmations through the same human
+ * approval surface as purchases (the TUI modal). Headless ask-mode runs have
+ * no handler, so these actions are denied there — same rule as purchases.
+ */
+function providerActionConfirmer(
+  options: PersistentAgentTaskOptions
+): ((request: ProviderActionRequest) => Promise<boolean>) | undefined {
+  const handler = options.approvalHandler;
+  if (!handler) {
+    return undefined;
+  }
+  return async (request) => {
+    const answer = await handler({
+      endpoint: request.action === "rescue_call"
+        ? `${request.providerId}: rescue LLM call`
+        : `${request.providerId}: prepaid credit top-up`,
+      origin: `provider:${request.providerId}`,
+      method: "LLM",
+      quotedCostCents: request.amountCents,
+      evidenceSummary: request.detail
+    });
+    return answer.decision === "allow_once" || answer.decision === "always_allow";
   };
 }
 

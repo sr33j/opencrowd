@@ -287,11 +287,25 @@ export interface BudgetedLlmOptions {
    * on the backup, recorded in the ledger with the reason.
    */
   fallback?: LlmFallbackTarget;
+  /**
+   * Ask-mode confirmation for provider money/routing actions — a rescue
+   * call on the backup provider, or an automatic credit top-up (Venice
+   * deposits are non-withdrawable). In ask mode an absent handler denies
+   * the action, mirroring purchase approvals.
+   */
+  confirmProviderAction?: (request: ProviderActionRequest) => Promise<boolean>;
 }
 
 export interface LlmFallbackTarget {
   provider: TypedLlmProvider;
   model: string;
+}
+
+export interface ProviderActionRequest {
+  action: "rescue_call" | "credit_top_up";
+  providerId: string;
+  detail: string;
+  amountCents: number;
 }
 
 /**
@@ -323,7 +337,9 @@ export class BudgetedLlmProvider implements LlmProvider {
     const reservation = await reserveBudget(this.session, this.options.maxCostCentsPerCall);
     const started = Date.now();
     const fallback = this.options.fallback;
-    const degraded = fallback !== undefined
+    // Degraded-first routing is skipped in ask mode: every backup call there
+    // is individually confirmed, so the primary is always probed first.
+    const degraded = fallback !== undefined && this.session.approvalMode !== "ask"
       && (failoverCounts.get(this.provider) ?? 0) >= DEGRADED_AFTER_FAILOVERS;
     let used = degraded && fallback
       ? { provider: fallback.provider, model: fallback.model, note: `primary ${this.provider.id} degraded after repeated failovers` }
@@ -353,6 +369,15 @@ export class BudgetedLlmProvider implements LlmProvider {
             completion = await attempt();
           } catch (second) {
             if (!fallback || used.provider === fallback.provider || !isTransientProviderError(second)) {
+              throw second;
+            }
+            const approved = await this.approveProviderAction({
+              action: "rescue_call",
+              providerId: fallback.provider.id,
+              detail: `one rescue LLM call on ${fallback.provider.id} (${fallback.model}) after ${this.provider.id} failed twice: ${truncateNote((second as Error).message)}`,
+              amountCents: this.options.maxCostCentsPerCall
+            });
+            if (!approved) {
               throw second;
             }
             failoverCounts.set(this.provider, (failoverCounts.get(this.provider) ?? 0) + 1);
@@ -423,6 +448,10 @@ export class BudgetedLlmProvider implements LlmProvider {
     if (ceilingCents <= 0) {
       throw error;
     }
+    if (this.session.approvalMode === "off") {
+      // A top-up is a real (non-withdrawable) deposit, not plain LLM spend.
+      throw new Error(`${error.message} Automatic top-ups are disabled in approval mode \`off\`; top up manually with /fund.`);
+    }
     const allowanceCents = remainingBudgetCents(this.session);
     const amountCents = Math.min(ceilingCents, allowanceCents);
     const minimumCents = error.minimumTopUpUsd !== undefined ? Math.ceil(error.minimumTopUpUsd * 100) : 0;
@@ -432,6 +461,15 @@ export class BudgetedLlmProvider implements LlmProvider {
         `but only ${formatCents(Math.max(allowanceCents, 0))} of session allowance remains (per-top-up cap ${formatCents(ceilingCents)}). ` +
         "Raise the session budget with /budget or top up manually."
       );
+    }
+    const approved = await this.approveProviderAction({
+      action: "credit_top_up",
+      providerId: provider.id,
+      detail: `deposit ${formatCents(amountCents)} of wallet USDC as ${provider.id} prepaid credit (deposits are not withdrawable)`,
+      amountCents
+    });
+    if (!approved) {
+      throw new Error(`${error.message} The automatic top-up was declined; top up manually with /fund or approve it next time.`);
     }
     await provider.topUpCredit!(amountCents / 100);
     await appendLedgerEntry(this.session.ledgerPath, {
@@ -444,6 +482,14 @@ export class BudgetedLlmProvider implements LlmProvider {
       approval_mode: this.session.approvalMode,
       notes: "automatic bounded provider credit top-up (cash flow; usage is billed against the budget)"
     });
+  }
+
+  /** Ask mode requires explicit confirmation; auto (and off, for rescues) proceeds. */
+  private async approveProviderAction(request: ProviderActionRequest): Promise<boolean> {
+    if (this.session.approvalMode !== "ask") {
+      return true;
+    }
+    return await this.options.confirmProviderAction?.(request) ?? false;
   }
 }
 
@@ -533,6 +579,8 @@ export interface TypedLlmRuntime {
   onTextDelta?: (delta: string) => void;
   /** Per-call rescue provider+model after two consecutive transient failures. */
   fallback?: LlmFallbackTarget;
+  /** Ask-mode confirmation for rescue calls and credit top-ups. */
+  confirmProviderAction?: (request: ProviderActionRequest) => Promise<boolean>;
 }
 
 export interface AgentRunOptions {
@@ -619,7 +667,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       promptCacheKey: options.llm.promptCacheKey,
       catalog: options.llm.catalog,
       onTextDelta: options.llm.onTextDelta,
-      fallback: options.llm.fallback
+      fallback: options.llm.fallback,
+      confirmProviderAction: options.llm.confirmProviderAction
     })
     : undefined);
   if (!provider) {
@@ -1067,7 +1116,8 @@ function subagentProvider(
       promptCacheKey: subagent.llm.promptCacheKey,
       catalog: subagent.llm.catalog,
       ledgerSessionId: subagentId,
-      fallback: subagent.llm.fallback
+      fallback: subagent.llm.fallback,
+      confirmProviderAction: subagent.llm.confirmProviderAction
     });
   }
   throw new Error("subagent has no provider: pass subagent.provider (tests) or subagent.llm (typed runtime)");
