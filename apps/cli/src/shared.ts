@@ -72,7 +72,8 @@ export function shortUrl(value: string): string {
 }
 
 export function formatCents(cents: number): string {
-  return `$${(Math.round(cents) / 100).toFixed(2)}`;
+  // Sub-cent spend is real (a cheap LLM call): show it instead of $0.00.
+  return `$${(cents / 100).toFixed(cents > 0 && cents < 1 ? 4 : 2)}`;
 }
 
 export function terminalWidth(): number {

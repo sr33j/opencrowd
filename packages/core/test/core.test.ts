@@ -48,6 +48,14 @@ describe("budget accounting", () => {
     expect(session.spentCents).toBe(25);
     await expect(reserveBudget(session, 80)).rejects.toThrow("budget exceeded");
   });
+
+  it("accepts fractional charged cents — most single LLM calls cost under a cent", async () => {
+    const session = await createSession({ workspaceRoot: await tempRoot(), budgetCents: 100 });
+    await finalizeReservation(session, await reserveBudget(session, 10), 0.217);
+    await finalizeReservation(session, await reserveBudget(session, 10), 0.033);
+    expect(session.spentCents).toBeCloseTo(0.25, 4);
+    expect(session.reservedCents).toBe(0);
+  });
 });
 
 describe("OpenCrowd session defaults", () => {

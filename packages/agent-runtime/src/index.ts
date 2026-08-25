@@ -1480,12 +1480,16 @@ function truncateMiddle(value: string, maxLength: number): string {
 }
 
 function formatCents(cents: number): string {
-  return `$${(cents / 100).toFixed(2)}`;
+  // Sub-cent spend is real (a cheap LLM call): show it instead of $0.00.
+  return `$${(cents / 100).toFixed(cents > 0 && cents < 1 ? 4 : 2)}`;
 }
 
 function sumCents(rows: Record<string, string>[]): number {
-  return rows.reduce((total, row) => {
+  // Keep fractional cents: most single LLM calls cost well under 1¢ and
+  // per-row rounding would erase the session's real spend.
+  const total = rows.reduce((sum, row) => {
     const value = Number(row.charged_cost_cents || 0);
-    return total + (Number.isFinite(value) ? Math.round(value) : 0);
+    return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
+  return roundCents(total);
 }

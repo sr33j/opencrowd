@@ -47,12 +47,17 @@ export async function finalizeReservation(
   chargedCostCents: number
 ): Promise<void> {
   return withSessionLock(state.sessionId, async () => {
-    assertCents(chargedCostCents, "charged cost");
+    // Charged costs are frequently fractional cents (a cheap LLM call costs
+    // well under 1¢) — unlike reservations, they are not required to be
+    // integers, only real spend.
+    if (!Number.isFinite(chargedCostCents) || chargedCostCents < 0) {
+      throw new Error("charged cost must be a non-negative number of cents");
+    }
     // Charged may legitimately exceed the reservation: upto-style x402
     // billing reconciles a ceiling to actual usage after the call, and the
     // money is already spent — record reality rather than throwing.
     state.reservedCents = Math.max(0, state.reservedCents - reservation.amountCents);
-    state.spentCents += chargedCostCents;
+    state.spentCents = Math.round((state.spentCents + chargedCostCents) * 10_000) / 10_000;
     await saveSession(state);
   });
 }
