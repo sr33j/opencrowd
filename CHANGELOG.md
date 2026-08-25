@@ -35,8 +35,15 @@ New architecture:
   route, pay-per-request via wallet-signed upto challenges only when the
   route demands payment, streaming, cached-challenge pre-signing), Venice
   (wallet-native backup; SIWX auth, prepaid credit, one bounded automatic
-  top-up with one retry), and direct OpenRouter (`OPENROUTER_API_KEY`). No
-  automatic provider fallback — switching providers is always explicit.
+  top-up with one retry), and direct OpenRouter (`OPENROUTER_API_KEY`).
+  Sessions never silently migrate providers; switching is always explicit.
+- Tail-latency hardening: every proxy call streams with liveness watching —
+  a stream silent for 25s aborts as a transient timeout instead of waiting
+  out the full deadline; transient faults ride a bounded ladder (one retry,
+  then one ledgered rescue call on the paired backup provider, with the
+  primary parked after three consecutive rescues); headless/eval runs cap
+  the per-request deadline at 240s; sub-cent LLM costs keep fractional
+  cents in the ledger instead of rounding to zero.
 - One enforced paid-capability lifecycle behind a stable six-tool gateway:
   discover → inspect → CrowdCode pre-check → approval → budget reservation →
   AgentCash execution → reconciliation → immutable receipt → required

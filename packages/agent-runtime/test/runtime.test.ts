@@ -439,6 +439,85 @@ describe("failure hardening", () => {
     expect(attempts).toBe(1);
   });
 
+  it("fails over to the backup provider after two consecutive transient failures", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50 });
+    let primaryAttempts = 0;
+    const primary: TypedLlmProvider = {
+      id: "x402",
+      async listModels() { return []; },
+      async complete() {
+        primaryAttempts += 1;
+        throw new Error("x402 proxy stream stalled: no bytes for 25000ms (timed out)");
+      }
+    };
+    const backupModels: string[] = [];
+    const backup: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete(request) {
+        backupModels.push(request.model);
+        return { content: "rescued", toolCalls: [], usage: { costCents: 4 } };
+      }
+    };
+    const provider = new BudgetedLlmProvider(session, primary, {
+      model: "openai/gpt-5.6-sol",
+      maxCostCentsPerCall: 10,
+      fallback: { provider: backup, model: "claude-sonnet-4-6" }
+    });
+
+    await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toMatchObject({ content: "rescued" });
+    expect(primaryAttempts).toBe(2);
+    expect(backupModels).toEqual(["claude-sonnet-4-6"]);
+    expect(session.spentCents).toBe(4);
+    const ledger = await readFile(session.ledgerPath, "utf8");
+    expect(ledger).toContain("venice");
+    expect(ledger).toContain("failover from x402");
+  });
+
+  it("does not fail over on non-transient errors and marks a repeatedly rescued primary degraded", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100 });
+    let primaryAttempts = 0;
+    const primary: TypedLlmProvider = {
+      id: "x402",
+      async listModels() { return []; },
+      async complete() {
+        primaryAttempts += 1;
+        throw new Error("x402 proxy stream stalled: no bytes for 25000ms (timed out)");
+      }
+    };
+    let backupCalls = 0;
+    const backup: TypedLlmProvider = {
+      id: "venice",
+      async listModels() { return []; },
+      async complete() {
+        backupCalls += 1;
+        return { content: "rescued", toolCalls: [], usage: { costCents: 1 } };
+      }
+    };
+    const options = { model: "m", maxCostCentsPerCall: 10, fallback: { provider: backup, model: "b" } };
+
+    // Non-transient failures surface without touching the backup.
+    const fatal: TypedLlmProvider = {
+      id: "x402",
+      async listModels() { return []; },
+      async complete() { throw new Error("model `nope` is not in the x402 catalog"); }
+    };
+    await expect(new BudgetedLlmProvider(session, fatal, options).complete([{ role: "user", content: "hi" }]))
+      .rejects.toThrow("catalog");
+    expect(backupCalls).toBe(0);
+
+    // Three rescues in a row park the primary: later calls skip it entirely.
+    for (let call = 0; call < 3; call += 1) {
+      await new BudgetedLlmProvider(session, primary, options).complete([{ role: "user", content: "hi" }]);
+    }
+    expect(primaryAttempts).toBe(6);
+    await new BudgetedLlmProvider(session, primary, options).complete([{ role: "user", content: "hi" }]);
+    expect(primaryAttempts).toBe(6);
+    expect(backupCalls).toBe(4);
+  });
+
   it("stops the loop gracefully when the budget is exhausted instead of erroring the run", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 5 });
@@ -573,7 +652,7 @@ describe("x402 proxy provider", () => {
     const provider = new X402ProxyProvider({
       baseUrl: "https://proxy.test/v1",
       privateKey: TEST_KEY,
-      fetchImpl: (async () => new Response(sse, { status: 200 })) as typeof fetch
+      fetchImpl: (async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } })) as typeof fetch
     });
     const deltas: string[] = [];
     const completion = await provider.complete({
@@ -584,6 +663,76 @@ describe("x402 proxy provider", () => {
     });
     expect(deltas.join("")).toBe("tokens");
     expect(completion.usage.costCents).toBeCloseTo(0.01, 5);
+  });
+
+  it("always requests a stream so liveness is observable", async () => {
+    let requestedBody: Record<string, unknown> = {};
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(JSON.stringify(COMPLETION), { status: 200 });
+      }) as typeof fetch
+    });
+    const completion = await provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(requestedBody.stream).toBe(true);
+    // A route that ignores `stream` and answers with plain JSON still parses.
+    expect(completion.content).toBe("paid ok");
+  });
+
+  it("aborts a silently stalled stream quickly with a transient timeout error", async () => {
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      stallTimeoutMs: 50,
+      fetchImpl: (async (_input: RequestInfo | URL, init?: RequestInit) => {
+        // Headers arrive, then the stream goes silent forever.
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener("abort", () => {
+              controller.error(init.signal?.reason ?? new Error("aborted"));
+            });
+          }
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch
+    });
+    const started = Date.now();
+    await expect(provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], tools: [] }))
+      .rejects.toThrow(/stalled.*timed out/);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("does not abort a slow but alive stream", async () => {
+    const encoder = new TextEncoder();
+    const chunks = [
+      ": keep-alive\n",
+      'data: {"choices":[{"delta":{"content":"slow"}}]}\n',
+      ": keep-alive\n",
+      'data: {"choices":[{"delta":{"content":" ok"}}]}\n',
+      "data: [DONE]\n"
+    ];
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      stallTimeoutMs: 80,
+      fetchImpl: (async () => {
+        const body = new ReadableStream<Uint8Array>({
+          async start(controller) {
+            for (const chunk of chunks) {
+              // Each gap is below the stall threshold; the total exceeds it.
+              await new Promise((resolve) => setTimeout(resolve, 40));
+              controller.enqueue(encoder.encode(chunk));
+            }
+            controller.close();
+          }
+        });
+        return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+      }) as typeof fetch
+    });
+    const completion = await provider.complete({ model: "m", messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(completion.content).toBe("slow ok");
   });
 });
 

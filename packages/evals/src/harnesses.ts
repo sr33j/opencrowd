@@ -111,7 +111,8 @@ const openCrowdHarness: GaiaHarness = {
     }
     const llm = context.testMode ? undefined : await resolveLlmRuntime(session, {
       model: context.model,
-      auto: context.auto
+      auto: context.auto,
+      nonInteractive: true
     });
     const gateway = await buildEvalGateway(session, context);
     const promptSections = await vendorInstructions(context);
@@ -122,7 +123,10 @@ const openCrowdHarness: GaiaHarness = {
         model: llm.models.main,
         maxCostCentsPerCall: llm.maxCostCentsPerCall,
         promptCacheKey: session.sessionId,
-        catalog: llm.catalog
+        catalog: llm.catalog,
+        fallback: llm.fallback
+          ? { provider: llm.fallback.provider, model: llm.fallback.mainModel }
+          : undefined
       } : undefined,
       subagent: llm ? subagentOptions(session.sessionId, llm) : undefined,
       maxTurns: 40,
@@ -248,7 +252,10 @@ function subagentOptions(sessionId: string, llm: LlmRuntimeSelection): SubagentO
       model: llm.models.subagent,
       maxCostCentsPerCall: llm.maxCostCentsPerCall,
       promptCacheKey: sessionId,
-      catalog: llm.catalog
+      catalog: llm.catalog,
+      fallback: llm.fallback
+        ? { provider: llm.fallback.provider, model: llm.fallback.subagentModel }
+        : undefined
     }
   };
 }

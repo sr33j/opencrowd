@@ -42,6 +42,8 @@ export interface PersistentAgentTaskOptions {
   subagentModel?: string;
   /** Force "auto" model resolution for this run. */
   forceAutoPolicy?: boolean;
+  /** Headless run: cap the per-request LLM deadline (nobody can watch a stuck call). */
+  nonInteractive?: boolean;
   testMode?: boolean;
   testSeed?: string;
   mockProvider?: LlmProvider;
@@ -99,7 +101,8 @@ function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) 
       const llm = await resolveLlmRuntime(current, {
         model: options.model,
         subagentModel: options.subagentModel,
-        auto: options.forceAutoPolicy
+        auto: options.forceAutoPolicy,
+        nonInteractive: options.nonInteractive
       });
       return {
         kind: "typed",
@@ -110,6 +113,9 @@ function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) 
           maxTopUpCentsPerAction: llm.maxTopUpCentsPerAction,
           promptCacheKey: current.sessionId,
           catalog: llm.catalog,
+          fallback: llm.fallback
+            ? { provider: llm.fallback.provider, model: llm.fallback.mainModel }
+            : undefined,
           // Stream deltas so time-to-first-token is visible in the UI.
           onTextDelta: options.onProgress
             ? (delta) => options.onProgress?.({ type: "assistant_delta", message: delta })
@@ -197,7 +203,10 @@ function subagentOptionsFor(session: SessionState, llm: LlmRuntimeSelection): Su
       maxCostCentsPerCall: llm.maxCostCentsPerCall,
       maxTopUpCentsPerAction: llm.maxTopUpCentsPerAction,
       promptCacheKey: session.sessionId,
-      catalog: llm.catalog
+      catalog: llm.catalog,
+      fallback: llm.fallback
+        ? { provider: llm.fallback.provider, model: llm.fallback.subagentModel }
+        : undefined
     }
   };
 }

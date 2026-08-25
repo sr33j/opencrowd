@@ -167,11 +167,15 @@ proxy route:
   round trip per turn.
 - Streams output; actual cost comes from settled-cost response headers, else
   the body's usage cost, else catalog pricing.
+- Always requests a stream and watches liveness: if the stream goes silent
+  (no bytes — keep-alives count) for the stall window (default 25s), the
+  request aborts as a transient timeout instead of waiting out the full
+  deadline. Slow-but-alive generations are never cut.
 - Trust caveat: the proxy is third-party infrastructure that sees prompts
   and holds the upstream key. It is a deliberate latency/robustness
   trade-off; Venice remains the wallet-native alternative.
 
-### Venice (backup, explicitly selectable — never automatic)
+### Venice (backup: explicitly selectable, plus per-call rescue)
 
 - Authenticates using the AgentCash wallet/SIWX path.
 - Uses prepaid Venice credit.
@@ -196,9 +200,23 @@ preflight is not.
 - Consumes OpenRouter account credit.
 - Uses returned usage/cost/cache fields without a separate balance query.
 
-There is no automatic provider fallback — "backup" means user-selectable via
-`/provider` or `opencrowd config set provider`, never silent failover. A
-provider failure is returned to the user with a remediation message.
+Sessions never silently migrate providers — "backup" as a preference means
+user-selectable via `/provider` or `opencrowd config set provider`. What does
+exist (owner decision, 2026-08-25) is a bounded per-call rescue ladder for
+transient faults (timeouts, stalls, rate limits, 5xx, dropped connections):
+
+1. retry the same provider once;
+2. if that also fails transiently, make one rescue call on the paired backup
+   provider (Venice for x402/OpenRouter, x402 for Venice) using its
+   configured exact model IDs, recorded in the ledger with the reason;
+3. after three consecutive rescues the primary is parked for the rest of the
+   process and calls go straight to the backup (a fresh run probes again).
+
+Non-transient failures skip the ladder and surface with remediation. If the
+backup's configured model is `auto`, no rescue is wired (resolving a catalog
+mid-outage is exactly the wrong moment). Headless and eval runs additionally
+cap the per-request deadline at 240s (`NON_INTERACTIVE_LLM_TIMEOUT_MS`);
+interactive sessions keep the configured `llmTimeoutMs`.
 
 ### Model policy
 
@@ -416,7 +434,9 @@ The rewrite (and any later change) is complete only when:
   context, artifacts, and audit data;
 - one command registry drives all interactive command behavior and help;
 - startup renders without waiting on the network;
-- no automatic provider or economy fallback remains;
+- no silent provider or economy migration remains: sessions keep their
+  provider; transient-fault rescue calls are bounded, ledgered, and
+  per-call only;
 - no legacy wallet/Bazaar/generic x402/OpenCrowd MCP/local API code remains;
 - docs describe the running implementation exactly (CI fails when live help
   and documented help diverge);

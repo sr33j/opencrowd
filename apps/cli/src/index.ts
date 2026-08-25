@@ -212,6 +212,7 @@ async function headlessRunCommand(args: string[]): Promise<void> {
     model: readOption(args, "--model"),
     subagentModel: readOption(args, "--subagent-model"),
     forceAutoPolicy: args.includes("--auto"),
+    nonInteractive: true,
     testMode,
     testSeed,
     maxTurns: maxTurnsArg === undefined ? undefined : Number(maxTurnsArg),

@@ -1,4 +1,4 @@
-import { loadConfig, saveSession, type SessionState } from "@opencrowd/core";
+import { loadConfig, saveSession, type OpenCrowdConfig, type SessionState } from "@opencrowd/core";
 import {
   isProviderId,
   OpenRouterProvider,
@@ -23,7 +23,26 @@ export interface LlmRuntimeSelection {
   catalog: ProviderModel[];
   maxCostCentsPerCall: number;
   maxTopUpCentsPerAction: number;
+  /**
+   * Last-resort per-call rescue provider used only after the primary fails
+   * transiently twice in a row. This is not a provider preference: sessions
+   * never silently migrate; each rescue is recorded in the ledger.
+   */
+  fallback?: LlmFallbackRuntime;
 }
+
+export interface LlmFallbackRuntime {
+  provider: TypedLlmProvider;
+  mainModel: string;
+  subagentModel: string;
+}
+
+/**
+ * Headless and eval runs cap the per-request deadline: nobody is watching a
+ * stuck call, and with stall detection plus one retry a shorter total bound
+ * is safe. 240s stays above the longest healthy generation observed (~220s).
+ */
+export const NON_INTERACTIVE_LLM_TIMEOUT_MS = 240_000;
 
 const providerCache = new Map<ProviderId, TypedLlmProvider>();
 
@@ -65,6 +84,8 @@ export interface LlmRuntimeOverrides {
   subagentModel?: string;
   /** Force "auto" resolution for any preference not explicitly overridden. */
   auto?: boolean;
+  /** Headless/eval run: cap the per-request deadline (nobody can watch a stuck call). */
+  nonInteractive?: boolean;
 }
 
 export async function resolveLlmRuntime(
@@ -77,7 +98,11 @@ export async function resolveLlmRuntime(
     throw new Error(`unknown LLM provider \`${requested}\`; supported: venice, openrouter`);
   }
   const providerId: ProviderId = requested;
-  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+  const timeoutMs = overrides.nonInteractive
+    ? Math.min(config.llmTimeoutMs, NON_INTERACTIVE_LLM_TIMEOUT_MS)
+    : config.llmTimeoutMs;
+  const provider = sharedTypedProvider(providerId, { timeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+  const fallback = resolveFallbackRuntime(providerId, config, timeoutMs);
 
   // Reuse the session's recorded resolution when nothing overrides it, so a
   // resumed session keeps its exact provider and models.
@@ -90,7 +115,8 @@ export async function resolveLlmRuntime(
       models: { ...recorded, provider: providerId },
       catalog,
       maxCostCentsPerCall: config.llmMaxCostCentsPerCall,
-      maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0
+      maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0,
+      fallback
     };
   }
 
@@ -108,6 +134,33 @@ export async function resolveLlmRuntime(
     models,
     catalog,
     maxCostCentsPerCall: config.llmMaxCostCentsPerCall,
-    maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0
+    maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0,
+    fallback
+  };
+}
+
+/**
+ * Pair each primary with its rescue provider: Venice for the x402 proxy (and
+ * OpenRouter), the x402 proxy for Venice. Only exact configured model IDs
+ * qualify — "auto" would need a live catalog fetch on the rescue path, which
+ * is exactly when the network is already misbehaving.
+ */
+function resolveFallbackRuntime(
+  primary: ProviderId,
+  config: OpenCrowdConfig,
+  timeoutMs: number
+): LlmFallbackRuntime | undefined {
+  const backupId: ProviderId = primary === "venice" ? "x402" : "venice";
+  const defaults = config[backupId];
+  if (defaults.model === "auto" || defaults.model === "off") {
+    return undefined;
+  }
+  const subagentModel = defaults.submodel === "auto" || defaults.submodel === "off"
+    ? defaults.model
+    : defaults.submodel;
+  return {
+    provider: sharedTypedProvider(backupId, { timeoutMs, x402ProxyUrl: config.x402ProxyUrl }),
+    mainModel: defaults.model,
+    subagentModel
   };
 }

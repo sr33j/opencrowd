@@ -25,9 +25,44 @@ import {
 export interface X402ProxyProviderOptions {
   baseUrl?: string;
   timeoutMs?: number;
+  /**
+   * Abort when the completion stream goes silent for this long. Any bytes —
+   * SSE keep-alives, reasoning deltas — count as liveness, so a slow but
+   * alive generation is never cut; only a dead connection is. A stalled
+   * request surfaces as a transient timeout, which the budget layer retries.
+   */
+  stallTimeoutMs?: number;
   fetchImpl?: typeof fetch;
   /** Test hook: sign challenges without a real wallet. */
   privateKey?: string;
+}
+
+const DEFAULT_STALL_TIMEOUT_MS = 25_000;
+
+/** One abort signal covering a total deadline plus an inter-byte idle deadline. */
+class StreamLiveness {
+  readonly controller = new AbortController();
+  private idleTimer?: NodeJS.Timeout;
+  private readonly totalTimer: NodeJS.Timeout;
+
+  constructor(private readonly idleMs: number, totalMs: number) {
+    this.totalTimer = setTimeout(() => {
+      this.controller.abort(new Error(`x402 proxy request timed out after ${totalMs}ms`));
+    }, totalMs);
+    this.bump();
+  }
+
+  bump(): void {
+    clearTimeout(this.idleTimer);
+    this.idleTimer = setTimeout(() => {
+      this.controller.abort(new Error(`x402 proxy stream stalled: no bytes for ${this.idleMs}ms (timed out)`));
+    }, this.idleMs);
+  }
+
+  clear(): void {
+    clearTimeout(this.idleTimer);
+    clearTimeout(this.totalTimer);
+  }
 }
 
 export class X402ProxyProvider implements TypedLlmProvider {
@@ -66,7 +101,8 @@ export class X402ProxyProvider implements TypedLlmProvider {
   }
 
   async complete(request: CompletionRequest): Promise<ProviderCompletion> {
-    const streaming = request.onTextDelta !== undefined;
+    // Always stream: liveness is only observable on a streamed response, and
+    // a silent stall is then distinguishable from a long generation.
     const body: Record<string, unknown> = {
       model: request.model,
       messages: request.messages.map(toWireChatMessage),
@@ -74,54 +110,61 @@ export class X402ProxyProvider implements TypedLlmProvider {
         type: "function",
         function: { name: tool.name, description: tool.description, parameters: tool.parameters }
       })),
-      tool_choice: request.tools.length > 0 ? "auto" : undefined
+      tool_choice: request.tools.length > 0 ? "auto" : undefined,
+      stream: true,
+      stream_options: { include_usage: true }
     };
     if (request.promptCacheKey) {
       body.prompt_cache_key = request.promptCacheKey;
     }
-    if (streaming) {
-      body.stream = true;
-      body.stream_options = { include_usage: true };
-    }
     const url = `${this.baseUrl}/chat/completions`;
+    const liveness = new StreamLiveness(
+      this.options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS,
+      this.options.timeoutMs ?? 300_000
+    );
     const init: RequestInit = {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.options.timeoutMs ?? 300_000)
+      signal: liveness.controller.signal
     };
 
-    const started = Date.now();
-    // A previously seen challenge lets us pre-sign and skip the 402 round trip.
-    let response = await this.fetchImpl()(url, this.cachedChallenge
-      ? { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) }
-      : init);
-    if (response.status === 402) {
-      // Fresh (or changed) challenge: sign it and retry exactly once.
-      this.cachedChallenge = await challengeFromResponse(response);
-      if (!x402Challenge(this.cachedChallenge)?.accepts.length) {
-        this.cachedChallenge = undefined;
-        throw new Error(`the x402 proxy demanded payment but returned no parseable challenge (${this.baseUrl})`);
-      }
-      response = await this.fetchImpl()(url, { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) });
+    try {
+      const started = Date.now();
+      // A previously seen challenge lets us pre-sign and skip the 402 round trip.
+      let response = await this.fetchImpl()(url, this.cachedChallenge
+        ? { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) }
+        : init);
+      liveness.bump();
       if (response.status === 402) {
-        this.cachedChallenge = undefined;
-        throw new Error("the x402 proxy rejected a signed payment; check the wallet's USDC balance on Base and retry");
+        // Fresh (or changed) challenge: sign it and retry exactly once.
+        this.cachedChallenge = await challengeFromResponse(response);
+        if (!x402Challenge(this.cachedChallenge)?.accepts.length) {
+          this.cachedChallenge = undefined;
+          throw new Error(`the x402 proxy demanded payment but returned no parseable challenge (${this.baseUrl})`);
+        }
+        liveness.bump();
+        response = await this.fetchImpl()(url, { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) });
+        liveness.bump();
+        if (response.status === 402) {
+          this.cachedChallenge = undefined;
+          throw new Error("the x402 proxy rejected a signed payment; check the wallet's USDC balance on Base and retry");
+        }
       }
-    }
-    if (!response.ok) {
-      const detail = await response.text().catch(() => "");
-      throw new Error(`x402 proxy completion failed: HTTP ${response.status} ${detail.slice(0, 200)}`);
-    }
-    if (streaming) {
-      const completion = await readSseCompletion(response, request.onTextDelta, started);
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`x402 proxy completion failed: HTTP ${response.status} ${detail.slice(0, 200)}`);
+      }
+      const contentType = response.headers.get("content-type") ?? "";
+      const completion = contentType.includes("text/event-stream")
+        ? await readSseCompletion(response, request.onTextDelta, started, () => liveness.bump())
+        // Some routes ignore `stream` and answer with plain JSON.
+        : parseChatCompletionResponse(await response.json().catch(() => undefined));
       completion.usage = withSettledCost(completion.usage, response);
       return completion;
+    } finally {
+      liveness.clear();
     }
-    const parsed = await response.json().catch(() => undefined);
-    const completion = parseChatCompletionResponse(parsed);
-    completion.usage = withSettledCost(completion.usage, response);
-    return completion;
   }
 
   private async paymentHeaders(challenge: unknown, url: string): Promise<Headers> {

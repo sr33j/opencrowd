@@ -228,11 +228,16 @@ function veniceRemediationError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-/** Accumulate an OpenAI-compatible SSE stream into one completion. */
+/**
+ * Accumulate an OpenAI-compatible SSE stream into one completion.
+ * `onActivity` fires on every raw chunk (including keep-alive comments) so
+ * callers can distinguish a live-but-slow stream from a dead connection.
+ */
 export async function readSseCompletion(
   response: Response,
   onTextDelta: ((delta: string) => void) | undefined,
-  startedAtMs: number
+  startedAtMs: number,
+  onActivity?: () => void
 ): Promise<ProviderCompletion> {
   if (!response.body) {
     throw new Error("streaming response has no body");
@@ -287,6 +292,7 @@ export async function readSseCompletion(
 
   while (true) {
     const { value, done } = await reader.read();
+    onActivity?.();
     if (done) {
       break;
     }

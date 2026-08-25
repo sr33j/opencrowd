@@ -281,7 +281,29 @@ export interface BudgetedLlmOptions {
    * remaining session allowance; at most one top-up and one retry happen.
    */
   maxTopUpCentsPerAction?: number;
+  /**
+   * Per-call rescue after the primary fails transiently twice in a row.
+   * Sessions never silently migrate providers; each rescue is a single call
+   * on the backup, recorded in the ledger with the reason.
+   */
+  fallback?: LlmFallbackTarget;
 }
+
+export interface LlmFallbackTarget {
+  provider: TypedLlmProvider;
+  model: string;
+}
+
+/**
+ * Consecutive per-call failovers per primary provider instance (process-wide:
+ * the shared provider is one instance). At the threshold the primary is
+ * treated as degraded and calls go straight to the backup, skipping the
+ * doomed attempt+retry against a dead route. A primary success below the
+ * threshold resets the count; once degraded, the primary stays parked for
+ * the rest of the process, and a fresh run probes it again.
+ */
+const failoverCounts = new WeakMap<TypedLlmProvider, number>();
+const DEGRADED_AFTER_FAILOVERS = 3;
 
 /**
  * Adapts a typed provider to the loop-facing LlmProvider interface, adding
@@ -300,38 +322,61 @@ export class BudgetedLlmProvider implements LlmProvider {
     const definitions = wireToolDefinitions(this.options.tools, this.options.extraTools);
     const reservation = await reserveBudget(this.session, this.options.maxCostCentsPerCall);
     const started = Date.now();
+    const fallback = this.options.fallback;
+    const degraded = fallback !== undefined
+      && (failoverCounts.get(this.provider) ?? 0) >= DEGRADED_AFTER_FAILOVERS;
+    let used = degraded && fallback
+      ? { provider: fallback.provider, model: fallback.model, note: `primary ${this.provider.id} degraded after repeated failovers` }
+      : { provider: this.provider, model: this.options.model, note: undefined as string | undefined };
+    const attempt = (): Promise<ProviderCompletion> => used.provider.complete({
+      model: used.model,
+      messages,
+      tools: definitions,
+      promptCacheKey: this.options.promptCacheKey,
+      onTextDelta: this.options.onTextDelta
+    });
     try {
-      const request = {
-        model: this.options.model,
-        messages,
-        tools: definitions,
-        promptCacheKey: this.options.promptCacheKey,
-        onTextDelta: this.options.onTextDelta
-      };
       let completion: ProviderCompletion;
       try {
-        completion = await this.provider.complete(request);
+        completion = await attempt();
       } catch (error) {
-        if (error instanceof InsufficientCreditError && this.provider.topUpCredit) {
+        if (error instanceof InsufficientCreditError && used.provider.topUpCredit) {
           // Exhausted prepaid credit: exactly one bounded top-up, one retry.
-          await this.performBoundedTopUp(error);
-          completion = await this.provider.complete(request);
+          await this.performBoundedTopUp(error, used.provider);
+          completion = await attempt();
         } else if (isTransientProviderError(error)) {
-          // One retry for transient faults (timeouts, rate limits, dropped
-          // connections). Anything else — and a second transient failure —
-          // surfaces unchanged; there is no retry loop.
-          completion = await this.provider.complete(request);
+          // Escalation ladder for transient faults (timeouts, stalls, rate
+          // limits, dropped connections): one retry on the same provider,
+          // then — if configured — one rescue call on the backup provider.
+          // Anything else surfaces unchanged; there is no retry loop.
+          try {
+            completion = await attempt();
+          } catch (second) {
+            if (!fallback || used.provider === fallback.provider || !isTransientProviderError(second)) {
+              throw second;
+            }
+            failoverCounts.set(this.provider, (failoverCounts.get(this.provider) ?? 0) + 1);
+            used = {
+              provider: fallback.provider,
+              model: fallback.model,
+              note: `failover from ${this.provider.id} after: ${truncateNote((second as Error).message)}`
+            };
+            completion = await attempt();
+          }
         } else {
           throw error;
         }
       }
-      const charged = chargedCostCents(completion.usage, this.options);
+      if (used.provider === this.provider) {
+        failoverCounts.delete(this.provider);
+      }
+      const charged = chargedCostCents(completion.usage, used.model, this.options.catalog);
       await finalizeReservation(this.session, reservation, charged);
       await appendLedgerEntry(this.session.ledgerPath, {
         session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
-        endpoint: this.provider.id,
-        model: this.options.model,
+        endpoint: used.provider.id,
+        model: used.model,
         method: "POST",
         quoted_cost_cents: this.options.maxCostCentsPerCall,
         charged_cost_cents: charged,
@@ -340,7 +385,7 @@ export class BudgetedLlmProvider implements LlmProvider {
         latency_ms: Date.now() - started,
         input_tokens: completion.usage.inputTokens,
         output_tokens: completion.usage.outputTokens,
-        notes: usageMetricsNote(completion)
+        notes: joinNotes(usageMetricsNote(completion), used.note)
       });
       const valid = validToolNames(this.options.tools, this.options.extraTools);
       return {
@@ -352,15 +397,15 @@ export class BudgetedLlmProvider implements LlmProvider {
       await appendLedgerEntry(this.session.ledgerPath, {
         session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
-        endpoint: this.provider.id,
-        model: this.options.model,
+        endpoint: used.provider.id,
+        model: used.model,
         method: "POST",
         quoted_cost_cents: this.options.maxCostCentsPerCall,
         charged_cost_cents: 0,
         status: "failed",
         approval_mode: this.session.approvalMode,
         latency_ms: Date.now() - started,
-        notes: (error as Error).message
+        notes: joinNotes(truncateNote((error as Error).message), used.note)
       });
       throw error;
     }
@@ -373,7 +418,7 @@ export class BudgetedLlmProvider implements LlmProvider {
    * consumes the credit and is what counts against the budget, so the two
    * are never double-counted.
    */
-  private async performBoundedTopUp(error: InsufficientCreditError): Promise<void> {
+  private async performBoundedTopUp(error: InsufficientCreditError, provider: TypedLlmProvider): Promise<void> {
     const ceilingCents = this.options.maxTopUpCentsPerAction ?? 0;
     if (ceilingCents <= 0) {
       throw error;
@@ -388,11 +433,11 @@ export class BudgetedLlmProvider implements LlmProvider {
         "Raise the session budget with /budget or top up manually."
       );
     }
-    await this.provider.topUpCredit!(amountCents / 100);
+    await provider.topUpCredit!(amountCents / 100);
     await appendLedgerEntry(this.session.ledgerPath, {
       session_id: this.options.ledgerSessionId ?? this.session.sessionId,
       type: "wallet_top_up",
-      endpoint: this.provider.id,
+      endpoint: provider.id,
       quoted_cost_cents: amountCents,
       charged_cost_cents: amountCents,
       status: "charged",
@@ -402,28 +447,48 @@ export class BudgetedLlmProvider implements LlmProvider {
   }
 }
 
-/** Timeouts, rate limits, and dropped connections merit exactly one retry. */
+/** Timeouts, stalls, rate limits, server errors, and dropped connections merit the retry/failover ladder. */
 function isTransientProviderError(error: unknown): boolean {
   if (error instanceof InsufficientCreditError || error instanceof BudgetExhaustedError) {
     return false;
   }
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
-  return /TIMEOUT|timed out|429|rate limit|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated/i.test(message);
+  // "rejected a signed payment" is transient by measurement: the proxy's
+  // payment validation flakes (~25% observed) and a fresh challenge+signature
+  // on the very next attempt succeeds.
+  return /TIMEOUT|timed out|stalled|429|rate limit|HTTP 5\d\d|rejected a signed payment|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated/i.test(message);
 }
 
-/** Actual cost: provider-reported, else estimated from catalog pricing, else 0. */
-function chargedCostCents(usage: LlmUsage, options: BudgetedLlmOptions): number {
+function truncateNote(text: string): string {
+  return text.length > 300 ? `${text.slice(0, 300)}…` : text;
+}
+
+function joinNotes(...notes: Array<string | undefined>): string | undefined {
+  const present = notes.filter((note): note is string => note !== undefined && note !== "");
+  return present.length > 0 ? present.join(" | ") : undefined;
+}
+
+/**
+ * Actual cost: provider-reported, else estimated from catalog pricing, else 0.
+ * Fractional cents are preserved — most single calls cost well under a cent,
+ * and rounding each to an integer would erase real spend from the ledger.
+ */
+function chargedCostCents(usage: LlmUsage, modelId: string, catalog?: ProviderModel[]): number {
   if (usage.costCents !== undefined) {
-    return Math.max(0, Math.round(usage.costCents));
+    return Math.max(0, roundCents(usage.costCents));
   }
-  const model = options.catalog?.find((candidate) => candidate.id === options.model);
+  const model = catalog?.find((candidate) => candidate.id === modelId);
   if (model && (model.inputCostCentsPer1k !== undefined || model.outputCostCentsPer1k !== undefined)
     && (usage.inputTokens !== undefined || usage.outputTokens !== undefined)) {
     const cents = ((usage.inputTokens ?? 0) / 1_000) * (model.inputCostCentsPer1k ?? 0)
       + ((usage.outputTokens ?? 0) / 1_000) * (model.outputCostCentsPer1k ?? 0);
-    return Math.max(0, Math.round(cents));
+    return Math.max(0, roundCents(cents));
   }
   return 0;
+}
+
+function roundCents(cents: number): number {
+  return Math.round(cents * 10_000) / 10_000;
 }
 
 /**
@@ -466,6 +531,8 @@ export interface TypedLlmRuntime {
   promptCacheKey?: string;
   catalog?: ProviderModel[];
   onTextDelta?: (delta: string) => void;
+  /** Per-call rescue provider+model after two consecutive transient failures. */
+  fallback?: LlmFallbackTarget;
 }
 
 export interface AgentRunOptions {
@@ -551,7 +618,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       extraTools: dynamicDefinitions,
       promptCacheKey: options.llm.promptCacheKey,
       catalog: options.llm.catalog,
-      onTextDelta: options.llm.onTextDelta
+      onTextDelta: options.llm.onTextDelta,
+      fallback: options.llm.fallback
     })
     : undefined);
   if (!provider) {
@@ -566,6 +634,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (options.dynamicTools) {
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
+      "Paid capability index — fast paths the wallet can buy in one call, typically under a cent: web search and news (Exa-grade) plus page scraping via https://stableenrich.dev; social media data via https://stablesocial.dev; more via find_paid_service.",
+      "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
       "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",
       ...(options.promptSections ?? [])
@@ -579,10 +649,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (options.subagent) {
     systemPromptParts.push(
       `Delegation: spawn_subagent runs a cheaper, faster model (${options.subagent.model}${options.subagent.costHint ? `, ${options.subagent.costHint}` : ""}) with local file and shell tools only.`,
-      "Multiple spawn_subagent calls in one reply run in parallel, so batch independent subtasks into a single reply; scale effort to the task (simple lookups need no subagents; broad sweeps merit 2-4).",
+      "Multiple spawn_subagent calls in one reply run in parallel, so batch independent subtasks into a single reply; a single subagent working through a list serially is the slowest possible shape — split the list across 2-4 parallel subagents instead.",
       "Give each subagent an objective, expected output format, and clear boundaries so parallel subagents cannot make conflicting decisions; they see none of this conversation, so pass explicit context (file paths, constraints).",
       "Each subagent's files land under artifacts/subagents/<n>/ and its completion lists what it wrote.",
-      "Delegate bounded, low-judgment work such as searching, summarizing, extracting, mechanical edits, or fetching public web pages (subagents can curl free URLs via run_shell); keep planning, paid-service decisions, and final answers in this main loop.",
+      "Delegate bounded, low-judgment work such as summarizing, extracting, mechanical edits, or reading specific already-known URLs (subagents can curl free URLs via run_shell); keep planning, paid-service decisions, and final answers in this main loop.",
+      "For web research: first buy one paid web search here in the main loop, then fan the returned URLs out to parallel subagents in a single reply. Never send a subagent off to guess URLs with curl.",
       "Prefer delegating whenever a subtask does not need your judgment: the subagent model is an order of magnitude cheaper and faster, so offloading easy legwork cuts both cost and wall-clock time."
     );
   }
@@ -995,7 +1066,8 @@ function subagentProvider(
       tools: SUBAGENT_TOOL_NAMES,
       promptCacheKey: subagent.llm.promptCacheKey,
       catalog: subagent.llm.catalog,
-      ledgerSessionId: subagentId
+      ledgerSessionId: subagentId,
+      fallback: subagent.llm.fallback
     });
   }
   throw new Error("subagent has no provider: pass subagent.provider (tests) or subagent.llm (typed runtime)");
