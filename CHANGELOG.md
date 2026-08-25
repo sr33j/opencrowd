@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.0 — unreleased
+## 0.2.0 — 2026-08-25
 
 Breaking clean-architecture rewrite. There is no migration path; obsolete
 surfaces were removed rather than shimmed (no wallet/config data on disk is
