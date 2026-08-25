@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
@@ -90,6 +90,15 @@ async function main(argv: string[]): Promise<void> {
     case "evals":
       await evalsCommand(rest);
       return;
+    case "--version":
+    case "-v":
+    case "version": {
+      // Works from both layouts: dist/index.js and bundle/opencrowd.js sit
+      // one level below the package root.
+      const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+      console.log(pkg.version);
+      return;
+    }
     case "--help":
     case "-h":
     case "help":
@@ -437,6 +446,7 @@ function printHelp(): void {
   opencrowd wallet [--json] address|balance
   opencrowd models [--json] list
   opencrowd doctor
+  opencrowd --version
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]
 
 Interactive commands (also /help inside the UI):
