@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.1 — 2026-08-25
+
+- `opencrowd --version` (also `-v` / `version`) prints the installed version.
+
 ## 0.2.0 — 2026-08-25
 
 Breaking clean-architecture rewrite. There is no migration path; obsolete
