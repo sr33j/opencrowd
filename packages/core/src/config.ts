@@ -20,7 +20,8 @@ export interface OpenCrowdConfig {
   /** Vendor MCP servers (AgentCash, CrowdCode). Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
   /** Default LLM provider for new sessions. */
-  provider: "x402" | "venice" | "openrouter";
+  provider: "blockrun" | "x402" | "venice" | "openrouter";
+  blockrun: ProviderModelDefaults;
   x402: ProviderModelDefaults;
   venice: ProviderModelDefaults;
   openrouter: ProviderModelDefaults;
@@ -43,10 +44,11 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
   },
-  // Owner decision (2026-08-24): the x402 token proxy is the default for its
-  // OpenRouter-grade serving latency; Venice stays as the wallet-native,
-  // explicitly selectable backup (no automatic fallback between them).
-  provider: "x402",
+  // GAIA provider benchmark (2026-08-25): same-model BlockRun matched the
+  // current route's accuracy and completed the sample 6.7x faster. The
+  // current x402 route remains the bounded per-call rescue provider.
+  provider: "blockrun",
+  blockrun: { model: "openai/gpt-5.6-sol", submodel: "openai/gpt-5.6-luna" },
   x402: { model: "openai/gpt-5.6-sol", submodel: "openai/gpt-5.6-luna" },
   // Venice defaults are benchmark-informed (GAIA smoke, 2026-08): sonnet led
   // answered-accuracy at 4-11c/question; deepseek-v4-flash subagents were

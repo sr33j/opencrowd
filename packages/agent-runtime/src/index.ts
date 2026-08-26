@@ -30,6 +30,7 @@ import {
 } from "./providers.js";
 
 export * from "./providers.js";
+export * from "./blockrun.js";
 export * from "./llm-runtime.js";
 export * from "./runtime.js";
 export * from "./x402-proxy.js";
@@ -502,7 +503,7 @@ function isTransientProviderError(error: unknown): boolean {
   // "rejected a signed payment" is transient by measurement: the proxy's
   // payment validation flakes (~25% observed) and a fresh challenge+signature
   // on the very next attempt succeeds.
-  return /TIMEOUT|timed out|stalled|429|rate limit|HTTP 5\d\d|rejected a signed payment|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated/i.test(message);
+  return /TIMEOUT|timed out|stalled|429|rate limit|HTTP 5\d\d|rejected a signed payment|payment was rejected|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated/i.test(message);
 }
 
 function truncateNote(text: string): string {

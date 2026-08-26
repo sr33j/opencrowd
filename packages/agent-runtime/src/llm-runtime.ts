@@ -9,6 +9,7 @@ import {
   type ResolvedSessionModels,
   type TypedLlmProvider
 } from "./providers.js";
+import { BlockRunProvider } from "./blockrun.js";
 import { X402ProxyProvider } from "./x402-proxy.js";
 
 /**
@@ -54,6 +55,9 @@ export interface TypedProviderOptions {
 
 /** Build a provider for a provider ID. */
 export function createTypedProvider(id: ProviderId, options: TypedProviderOptions = {}): TypedLlmProvider {
+  if (id === "blockrun") {
+    return new BlockRunProvider({ timeoutMs: options.timeoutMs });
+  }
   if (id === "x402") {
     return new X402ProxyProvider({ baseUrl: options.x402ProxyUrl, timeoutMs: options.timeoutMs });
   }
@@ -95,7 +99,7 @@ export async function resolveLlmRuntime(
   const config = await loadConfig();
   const requested = overrides.provider ?? session.models?.provider ?? config.provider;
   if (!isProviderId(requested)) {
-    throw new Error(`unknown LLM provider \`${requested}\`; supported: venice, openrouter`);
+    throw new Error(`unknown LLM provider \`${requested}\`; supported: blockrun, x402, venice, openrouter`);
   }
   const providerId: ProviderId = requested;
   const timeoutMs = overrides.nonInteractive
@@ -140,8 +144,9 @@ export async function resolveLlmRuntime(
 }
 
 /**
- * Pair each primary with its rescue provider: Venice for the x402 proxy (and
- * OpenRouter), the x402 proxy for Venice. Rescue needs an exact model ID —
+ * Pair BlockRun with the current x402 route; preserve the established
+ * x402/Venice pairing for explicitly selected providers. Rescue needs an
+ * exact model ID —
  * "auto" would need a live catalog fetch on the rescue path, which is
  * exactly when the network is already misbehaving — so an "auto" preference
  * falls back to the shipped default model for that provider.
@@ -151,7 +156,7 @@ function resolveFallbackRuntime(
   config: OpenCrowdConfig,
   timeoutMs: number
 ): LlmFallbackRuntime | undefined {
-  const backupId: ProviderId = primary === "venice" ? "x402" : "venice";
+  const backupId = rescueProviderId(primary);
   const exact = (preferred: string, shipped: string): string =>
     preferred === "auto" || preferred === "off" ? shipped : preferred;
   const mainModel = exact(config[backupId].model, DEFAULT_CONFIG[backupId].model);
@@ -161,4 +166,12 @@ function resolveFallbackRuntime(
     mainModel,
     subagentModel
   };
+}
+
+/** Stable provider pairing used by the bounded per-call rescue ladder. */
+export function rescueProviderId(primary: ProviderId): ProviderId {
+  if (primary === "blockrun" || primary === "venice") {
+    return "x402";
+  }
+  return "venice";
 }

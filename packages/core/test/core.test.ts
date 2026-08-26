@@ -10,6 +10,7 @@ import {
   readConversationMessages,
   createOpenCrowdSession,
   createSession,
+  DEFAULT_CONFIG,
   listArtifacts,
   openCrowdToolDefinition,
   readAgentCashWallet,
@@ -59,6 +60,11 @@ describe("budget accounting", () => {
 });
 
 describe("OpenCrowd session defaults", () => {
+  it("uses BlockRun as the primary provider with matching x402 rescue models", () => {
+    expect(DEFAULT_CONFIG.provider).toBe("blockrun");
+    expect(DEFAULT_CONFIG.blockrun).toEqual(DEFAULT_CONFIG.x402);
+  });
+
   it("defaults to ask mode, shell access, and the configured budget cap without any network lookup", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");

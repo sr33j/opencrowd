@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0 — 2026-08-25
+
+- Make BlockRun the default LLM provider, using its official x402 v2 SDK,
+  with the prior x402 token proxy as the bounded per-call rescue provider.
+- Require Node.js 22 or newer, matching the CLI's runtime dependencies.
+
 ## 0.2.1 — 2026-08-25
 
 - `opencrowd --version` (also `-v` / `version`) prints the installed version.

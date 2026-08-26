@@ -90,7 +90,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   },
   {
     name: "provider",
-    usage: "/provider [x402|venice|openrouter]",
+    usage: "/provider [blockrun|x402|venice|openrouter]",
     summary: "Show or select this session's LLM provider (validated immediately)",
     execute: async (rest, { session, state }) => {
       const config = await loadConfig();
@@ -102,7 +102,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
         throw new Error("provider selection is unavailable in demo mode");
       }
       if (!isProviderId(rest[0])) {
-        throw new Error("/provider supports x402, venice, or openrouter");
+        throw new Error("/provider supports blockrun, x402, venice, or openrouter");
       }
       const providerId: ProviderId = rest[0];
       // Validate configuration immediately: this connects/authenticates and
@@ -396,7 +396,7 @@ export async function sessionHasPendingReviews(session: SessionState): Promise<b
 
 function activeProviderId(session: SessionState, fallback: ProviderId): ProviderId {
   const recorded = session.models?.provider;
-  return recorded === "venice" || recorded === "openrouter" ? recorded : fallback;
+  return isProviderId(recorded) ? recorded : fallback;
 }
 
 /** Re-resolve this session's models with one preference changed; persist. */

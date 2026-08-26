@@ -2,16 +2,14 @@ import { VeniceClient, VeniceError } from "venice-x402-client";
 import { requireAgentCashWallet } from "@opencrowd/core";
 
 /**
- * Typed LLM provider contract. Venice (default) authenticates with the
- * AgentCash wallet over SIWX and consumes prepaid Venice credit; OpenRouter
- * (optional) calls the official OpenRouter API with an API key. There is no
- * automatic fallback between providers: a provider failure surfaces to the
- * user with remediation.
+ * Typed LLM provider contract. BlockRun and the x402 proxy pay per request
+ * from the shared AgentCash wallet, Venice consumes prepaid wallet-funded
+ * credit, and OpenRouter uses an API key.
  */
 
-export type ProviderId = "x402" | "venice" | "openrouter";
+export type ProviderId = "blockrun" | "x402" | "venice" | "openrouter";
 
-export const PROVIDER_IDS: ProviderId[] = ["x402", "venice", "openrouter"];
+export const PROVIDER_IDS: ProviderId[] = ["blockrun", "x402", "venice", "openrouter"];
 
 export interface ProviderModel {
   id: string;
@@ -356,7 +354,7 @@ export class OpenRouterProvider implements TypedLlmProvider {
     if (!key) {
       throw new Error(
         "OpenRouter requires an API key. Set OPENROUTER_API_KEY (create one at https://openrouter.ai/keys) " +
-        "or switch back to the default provider with `/provider venice`."
+        "or switch back to the default provider with `/provider blockrun`."
       );
     }
     return key;
@@ -410,7 +408,7 @@ export class OpenRouterProvider implements TypedLlmProvider {
 }
 
 export function isProviderId(value: unknown): value is ProviderId {
-  return value === "x402" || value === "venice" || value === "openrouter";
+  return value === "blockrun" || value === "x402" || value === "venice" || value === "openrouter";
 }
 
 /** Resolved per-session model selection, persisted for reproducibility. */

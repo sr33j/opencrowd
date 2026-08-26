@@ -279,7 +279,7 @@ async function configCommand(args: string[]): Promise<void> {
   switch (key) {
     case "provider": {
       if (!isProviderId(value)) {
-        throw new Error("provider must be x402, venice, or openrouter");
+        throw new Error("provider must be blockrun, x402, venice, or openrouter");
       }
       await updateConfig({ provider: value });
       break;

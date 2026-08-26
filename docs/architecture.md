@@ -151,10 +151,25 @@ A provider supplies:
 - cache-read/cache-write metrics when supplied;
 - provider-specific health/authentication errors.
 
-### x402 token proxy (default)
+### BlockRun (default)
 
-Owner decision (2026-08-24), superseding the original brief's removal of the
-proxy route:
+Owner decision (2026-08-25), based on the same-model GAIA provider benchmark:
+
+- Calls BlockRun's OpenAI-compatible route through the official `@blockrun/llm`
+  SDK and pays x402 v2 USDC from the AgentCash wallet; no API key or prepaid
+  provider balance is required.
+- Defaults to `openai/gpt-5.6-sol` for the main loop and
+  `openai/gpt-5.6-luna` for subagents.
+- Streams text and tool calls, forwards the stable per-session prompt cache
+  key, and records the SDK's settled x402 amount as actual cost.
+- Creates one SDK client per in-flight completion so concurrent subagents do
+  not mix the SDK's pending-payment or spending counters.
+- Treats 90 seconds without a stream chunk, or the configured total deadline,
+  as a transient timeout eligible for the bounded rescue ladder.
+
+### x402 token proxy (rescue provider; explicitly selectable)
+
+The previous default remains available and is BlockRun's paired rescue route:
 
 - Calls an OpenAI-compatible, x402-metered proxy (`x402ProxyUrl`, default
   `https://x402-tokens.fly.dev/v1`) fronting OpenRouter-grade serving
@@ -178,8 +193,8 @@ proxy route:
   is free — a parked call has not signed a payment or started its
   stall/timeout clocks yet.
 - Trust caveat: the proxy is third-party infrastructure that sees prompts
-  and holds the upstream key. It is a deliberate latency/robustness
-  trade-off; Venice remains the wallet-native alternative.
+  and holds the upstream key. It is retained as a reliability fallback;
+  Venice remains the wallet-native alternative.
 
 ### Venice (backup: explicitly selectable, plus per-call rescue)
 
@@ -209,14 +224,13 @@ preflight is not.
 - Consumes OpenRouter account credit.
 - Uses returned usage/cost/cache fields without a separate balance query.
 
-Sessions never silently migrate providers — "backup" as a preference means
-user-selectable via `/provider` or `opencrowd config set provider`. What does
-exist (owner decision, 2026-08-25) is a bounded per-call rescue ladder for
-transient faults (timeouts, stalls, rate limits, 5xx, dropped connections):
+The session's selected provider never changes silently. What does exist is a
+bounded per-call rescue ladder for transient faults (timeouts, stalls, rate
+limits, 5xx, dropped connections):
 
 1. retry the same provider once;
 2. if that also fails transiently, make one rescue call on the paired backup
-   provider (Venice for x402/OpenRouter, x402 for Venice) using its
+   provider (x402 for BlockRun/Venice, Venice for x402/OpenRouter) using its
    configured exact model IDs, recorded in the ledger with the reason;
 3. after three consecutive rescues the primary is parked for the rest of the
    process and calls go straight to the backup (a fresh run probes again).
@@ -237,8 +251,8 @@ interactive sessions keep the configured `llmTimeoutMs`.
 Configuration specifies a default provider and provider-specific default main
 and subagent model preferences. Session creation resolves and records exact
 model IDs. `auto` may resolve from live catalog data, but resolved IDs are
-persisted for reproducibility. Venice and OpenRouter model IDs are distinct
-namespaces; IDs are validated against the active provider's catalog.
+persisted for reproducibility. Provider model IDs are validated against the
+active provider's catalog.
 
 ## Paid capability gateway
 
@@ -331,7 +345,7 @@ command, which affects future sessions, never a running one.
 | Command | Exact meaning |
 | --- | --- |
 | `/status` | Show session, provider, resolved models, wallet/credit status, budget, and approval mode. |
-| `/provider [venice\|openrouter]` | Show or select this session's provider. Validate configuration immediately. |
+| `/provider [blockrun\|x402\|venice\|openrouter]` | Show or select this session's provider. Validate configuration immediately. |
 | `/models` | List models for the active provider. No mutation. |
 | `/model [id\|auto]` | Show or set the current session's main model. |
 | `/submodel [id\|auto\|off]` | Show, set, auto-select, or disable the session's subagent model. |

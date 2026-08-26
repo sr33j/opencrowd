@@ -1,6 +1,6 @@
 {
   "name": "opencrowd",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "A CLI agent with its own wallet \u2014 discovers x402 services, pays in USDC, and completes tasks under a local budget",
   "type": "module",
   "license": "MIT",
@@ -23,7 +23,7 @@
     "base"
   ],
   "engines": {
-    "node": ">=20.3"
+    "node": ">=22"
   },
   "bin": {
     "opencrowd": "bundle/opencrowd.js"

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSession, readLedger } from "../../core/src/index.js";
 import { VeniceError } from "venice-x402-client";
 import {
+  BlockRunProvider,
   BudgetedLlmProvider,
   createOpenCrowdRuntime,
   createMockToolExecutor,
@@ -15,6 +16,7 @@ import {
   OpenRouterProvider,
   renderCompactPurchaseSummary,
   renderProgress,
+  rescueProviderId,
   resolveSessionModels,
   runAgentTask,
   runAgentTaskDetailed,
@@ -24,6 +26,7 @@ import {
   type LlmMessage,
   type LlmProvider,
   type LlmResponse,
+  type BlockRunLikeClient,
   type ProviderCompletion,
   type ProviderModel,
   type TypedLlmProvider
@@ -43,6 +46,10 @@ afterEach(async () => {
 });
 
 describe("typed providers and budget accounting", () => {
+  it("pairs BlockRun with the current x402 provider for rescue calls", () => {
+    expect(rescueProviderId("blockrun")).toBe("x402");
+  });
+
   function fakeTypedProvider(overrides: Partial<ProviderCompletion> = {}, id: "venice" | "openrouter" = "venice"): TypedLlmProvider {
     return {
       id,
@@ -384,6 +391,98 @@ describe("OpenRouter provider", () => {
     });
     await expect(provider.complete({ model: "m", messages: [], tools: [] }))
       .rejects.toThrow("OpenRouter account credit is exhausted");
+  });
+});
+
+describe("BlockRun provider", () => {
+  it("streams OpenAI-compatible tool calls through the official SDK and records settled cost", async () => {
+    let seenPath = "";
+    let seenBody: Record<string, unknown> = {};
+    let settledUsd = 0;
+    const client: BlockRunLikeClient = {
+      async *stream(path, body) {
+        seenPath = path;
+        seenBody = body ?? {};
+        settledUsd = 0.0123;
+        yield { choices: [{ delta: { content: "Hel" } }] };
+        yield { choices: [{ delta: { content: "lo" } }] };
+        yield {
+          choices: [{ delta: { tool_calls: [{
+            index: 0,
+            id: "call_1",
+            function: { name: "get_budget_status", arguments: "{}" }
+          }] } }]
+        };
+        yield { usage: { prompt_tokens: 9, completion_tokens: 4 } };
+      },
+      getSpending() {
+        return { totalUsd: settledUsd, calls: settledUsd > 0 ? 1 : 0 };
+      }
+    };
+    const provider = new BlockRunProvider({ clientFactory: async () => client });
+    const deltas: string[] = [];
+
+    const completion = await provider.complete({
+      model: "openai/gpt-test",
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ name: "get_budget_status", description: "budget", parameters: { type: "object" } }],
+      promptCacheKey: "session-1",
+      onTextDelta: (delta) => deltas.push(delta)
+    });
+
+    expect(seenPath).toBe("/v1/chat/completions");
+    expect(seenBody).toMatchObject({
+      model: "openai/gpt-test",
+      stream: true,
+      prompt_cache_key: "session-1",
+      tool_choice: "auto"
+    });
+    expect(deltas.join("")).toBe("Hello");
+    expect(completion.content).toBe("Hello");
+    expect(completion.toolCalls).toEqual([{ id: "call_1", name: "get_budget_status", arguments: {} }]);
+    expect(completion.usage).toMatchObject({ inputTokens: 9, outputTokens: 4, costCents: 1.23 });
+  });
+
+  it("fetches and caches BlockRun's public model catalog without creating a paying client", async () => {
+    let fetches = 0;
+    let clients = 0;
+    const provider = new BlockRunProvider({
+      fetchImpl: (async () => {
+        fetches += 1;
+        return new Response(JSON.stringify({ data: [{ id: "openai/gpt-5.6-sol" }] }), { status: 200 });
+      }) as typeof fetch,
+      clientFactory: async () => {
+        clients += 1;
+        throw new Error("catalog lookup must not create a paying client");
+      }
+    });
+
+    await expect(provider.listModels()).resolves.toEqual([
+      expect.objectContaining({ id: "openai/gpt-5.6-sol" })
+    ]);
+    await provider.listModels();
+    expect(fetches).toBe(1);
+    expect(clients).toBe(0);
+  });
+
+  it("turns a silent SDK stream into a transient timeout for the fallback ladder", async () => {
+    const client: BlockRunLikeClient = {
+      async *stream<T>() {
+        await new Promise<void>(() => undefined);
+        yield undefined as T;
+      },
+      getSpending() {
+        return { totalUsd: 0, calls: 0 };
+      }
+    };
+    const provider = new BlockRunProvider({
+      clientFactory: async () => client,
+      timeoutMs: 50,
+      stallTimeoutMs: 10
+    });
+
+    await expect(provider.complete({ model: "m", messages: [], tools: [] }))
+      .rejects.toThrow("BlockRun stream stalled");
   });
 });
 
