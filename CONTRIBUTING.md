@@ -34,7 +34,7 @@ tests must stay explicit, low-value, and opt-in.
 | --- | --- |
 | `packages/core` | Vendor-neutral sessions, budget, conversation, artifacts, ledger, local tool contracts |
 | `packages/economy` | Typed AgentCash/CrowdCode adapters, approval rules, purchase receipts, the enforced gateway |
-| `packages/agent-runtime` | LLM loop, BlockRun/x402/Venice/OpenRouter providers, subagents, DI runtime |
+| `packages/agent-runtime` | LLM loop, BlockRun/OpenRouter-x402-proxy/Venice/direct-OpenRouter providers, subagents, DI runtime |
 | `packages/evals` | GAIA benchmark runner |
 | `apps/cli` | The `opencrowd` binary: TUI, command registry, headless runs |
 

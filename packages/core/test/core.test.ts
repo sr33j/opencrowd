@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import {
   createSession,
   DEFAULT_CONFIG,
   listArtifacts,
+  loadConfig,
   openCrowdToolDefinition,
   readAgentCashWallet,
   requireAgentCashWallet,
@@ -60,9 +61,40 @@ describe("budget accounting", () => {
 });
 
 describe("OpenCrowd session defaults", () => {
-  it("uses BlockRun as the primary provider with matching x402 rescue models", () => {
+  it("uses BlockRun as the primary provider with matching proxy rescue models", () => {
     expect(DEFAULT_CONFIG.provider).toBe("blockrun");
-    expect(DEFAULT_CONFIG.blockrun).toEqual(DEFAULT_CONFIG.x402);
+    expect(DEFAULT_CONFIG.blockrun).toEqual(DEFAULT_CONFIG["openrouter-x402-proxy"]);
+  });
+
+  it("migrates the former x402 default to BlockRun while preserving its proxy settings", async () => {
+    const root = await tempRoot();
+    const configDir = join(root, "config");
+    process.env.OPENCROWD_CONFIG_DIR = configDir;
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "config.json"), JSON.stringify({
+      provider: "x402",
+      x402: { model: "openai/legacy-main", submodel: "openai/legacy-sub" },
+      x402ProxyUrl: "https://legacy-proxy.test/v1"
+    }));
+
+    const config = await loadConfig();
+    expect(config.provider).toBe("blockrun");
+    expect(config["openrouter-x402-proxy"]).toEqual({ model: "openai/legacy-main", submodel: "openai/legacy-sub" });
+    expect(config.openrouterX402ProxyUrl).toBe("https://legacy-proxy.test/v1");
+  });
+
+  it("normalizes an explicitly selected legacy x402 alias to the canonical proxy name", async () => {
+    const root = await tempRoot();
+    const configDir = join(root, "config");
+    process.env.OPENCROWD_CONFIG_DIR = configDir;
+    await mkdir(configDir, { recursive: true });
+    await writeFile(join(configDir, "config.json"), JSON.stringify({
+      provider: "x402",
+      blockrun: DEFAULT_CONFIG.blockrun,
+      x402: DEFAULT_CONFIG["openrouter-x402-proxy"]
+    }));
+
+    expect((await loadConfig()).provider).toBe("openrouter-x402-proxy");
   });
 
   it("defaults to ask mode, shell access, and the configured budget cap without any network lookup", async () => {

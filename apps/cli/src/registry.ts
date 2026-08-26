@@ -18,8 +18,9 @@ import {
 } from "@opencrowd/economy";
 import {
   buildSessionSummary,
-  isProviderId,
+  normalizeProviderId,
   resolveSessionModels,
+  rescueProviderId,
   sharedTypedProvider,
   type ProviderId
 } from "@opencrowd/agent-runtime";
@@ -66,10 +67,11 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
     execute: async (_rest, { session, state }) => {
       const budget = budgetStatus(session);
       const config = await loadConfig();
+      const providerId = activeProviderId(session, config.provider);
       const rows: Record<string, unknown> = {
         session: session.sessionId,
         workspace: session.workspaceRoot,
-        provider: session.models?.provider ?? config.provider,
+        provider: providerId,
         model: session.models?.main ?? `${config[config.provider].model} (unresolved)`,
         submodel: session.models?.subagent ?? (session.models ? "off" : `${config[config.provider].submodel} (unresolved)`),
         budget: `${formatCents(budget.spent_cents)} spent / ${formatCents(budget.remaining_cents)} left of ${formatCents(budget.budget_cents)}`,
@@ -90,24 +92,41 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   },
   {
     name: "provider",
-    usage: "/provider [blockrun|x402|venice|openrouter]",
+    usage: "/provider [help|blockrun|openrouter-x402-proxy|venice|openrouter]",
     summary: "Show or select this session's LLM provider (validated immediately)",
     execute: async (rest, { session, state }) => {
       const config = await loadConfig();
       if (!rest[0]) {
-        const current = session.models?.provider ?? config.provider;
-        return { kind: "text", label: "Provider", body: renderKeyValues({ provider: current }) };
+        const current = activeProviderId(session, config.provider);
+        return {
+          kind: "text",
+          label: "Provider",
+          body: renderKeyValues({
+            provider: current,
+            description: PROVIDER_DESCRIPTIONS[current],
+            model: session.models?.main ?? `${config[current].model} (unresolved)`,
+            fallback: rescueProviderId(current)
+          })
+        };
+      }
+      if (rest[0] === "help") {
+        return {
+          kind: "text",
+          label: "Providers",
+          body: renderTable(PROVIDER_HELP, [["provider", "provider"], ["auth", "auth/payment"], ["description", "route"]])
+        };
       }
       if (state.testMode) {
         throw new Error("provider selection is unavailable in demo mode");
       }
-      if (!isProviderId(rest[0])) {
-        throw new Error("/provider supports blockrun, x402, venice, or openrouter");
+      const normalized = normalizeProviderId(rest[0]);
+      if (!normalized) {
+        throw new Error("/provider supports blockrun, openrouter-x402-proxy, venice, or openrouter (try /provider help)");
       }
-      const providerId: ProviderId = rest[0];
+      const providerId: ProviderId = normalized;
       // Validate configuration immediately: this connects/authenticates and
       // fetches the catalog, then re-resolves this session's models.
-      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.openrouterX402ProxyUrl });
       const catalog = await provider.listModels();
       const defaults = config[providerId];
       session.models = resolveSessionModels(providerId, catalog, {
@@ -136,7 +155,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
       }
       const config = await loadConfig();
       const providerId = activeProviderId(session, config.provider);
-      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+      const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.openrouterX402ProxyUrl });
       const models = await provider.listModels({ refresh: rest[0] === "refresh" });
       const rows = models.map((model) => ({
         id: model.id,
@@ -289,15 +308,19 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
       if (!wallet) {
         throw new Error("No AgentCash wallet found. Install agentcash (its wallet is created automatically) and retry.");
       }
+      const transferUri = usdcTransferUri(wallet.address, SUGGESTED_FUND_CENTS);
+      const metamask = metamaskDeepLink(wallet.address, SUGGESTED_FUND_CENTS);
       return {
         kind: "text",
         label: "Fund the wallet",
-        body: renderKeyValues({
-          address: wallet.address,
-          send: `USDC on Base (suggested ${formatCents(SUGGESTED_FUND_CENTS)})`,
-          transfer_uri: usdcTransferUri(wallet.address, SUGGESTED_FUND_CENTS),
-          metamask: metamaskDeepLink(wallet.address, SUGGESTED_FUND_CENTS)
-        })
+        // Funding URIs must remain complete and copyable; the generic
+        // key/value renderer intentionally shortens URLs for status output.
+        body: [
+          `  address          ${wallet.address}`,
+          `  send             USDC on Base (suggested ${formatCents(SUGGESTED_FUND_CENTS)})`,
+          `  transfer_uri     ${transferUri}`,
+          `  metamask         ${metamask}`
+        ].join("\n")
       };
     }
   },
@@ -396,8 +419,22 @@ export async function sessionHasPendingReviews(session: SessionState): Promise<b
 
 function activeProviderId(session: SessionState, fallback: ProviderId): ProviderId {
   const recorded = session.models?.provider;
-  return isProviderId(recorded) ? recorded : fallback;
+  return normalizeProviderId(recorded) ?? fallback;
 }
+
+const PROVIDER_DESCRIPTIONS: Record<ProviderId, string> = {
+  blockrun: "BlockRun gateway; AgentCash wallet pays x402 USDC",
+  "openrouter-x402-proxy": "legacy x402-paid proxy fronting OpenRouter-grade serving",
+  venice: "direct Venice integration using wallet-funded Venice credit",
+  openrouter: "direct OpenRouter API using OPENROUTER_API_KEY and account credit"
+};
+
+const PROVIDER_HELP: Array<Record<string, unknown>> = [
+  { provider: "blockrun (default)", auth: "AgentCash / x402", description: PROVIDER_DESCRIPTIONS.blockrun },
+  { provider: "openrouter-x402-proxy", auth: "AgentCash / x402", description: PROVIDER_DESCRIPTIONS["openrouter-x402-proxy"] },
+  { provider: "venice", auth: "AgentCash / SIWX", description: PROVIDER_DESCRIPTIONS.venice },
+  { provider: "openrouter", auth: "OPENROUTER_API_KEY", description: PROVIDER_DESCRIPTIONS.openrouter }
+];
 
 /** Re-resolve this session's models with one preference changed; persist. */
 async function updateSessionModels(
@@ -406,7 +443,7 @@ async function updateSessionModels(
 ): Promise<void> {
   const config = await loadConfig();
   const providerId = activeProviderId(session, config.provider);
-  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+  const provider = sharedTypedProvider(providerId, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.openrouterX402ProxyUrl });
   const catalog = await provider.listModels();
   const defaults = config[providerId];
   const currentSubagent = session.models ? session.models.subagent ?? "off" : defaults.submodel;

@@ -1,6 +1,6 @@
 {
   "name": "opencrowd",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A CLI agent with its own wallet \u2014 discovers x402 services, pays in USDC, and completes tasks under a local budget",
   "type": "module",
   "license": "MIT",
@@ -47,6 +47,6 @@
   "scripts": {
     "build": "tsc -b && chmod +x dist/index.js",
     "bundle": "node ../../scripts/bundle-cli.mjs",
-    "prepack": "npm run bundle"
+    "prepack": "npm --prefix ../.. run build && npm run bundle"
   }
 }

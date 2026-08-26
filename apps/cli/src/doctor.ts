@@ -76,7 +76,7 @@ export async function runDoctor(log: (line: string) => void): Promise<boolean> {
         if (config.provider === "openrouter" && !process.env.OPENROUTER_API_KEY) {
           throw new Error("OPENROUTER_API_KEY is not set");
         }
-        const provider = sharedTypedProvider(config.provider, { timeoutMs: 30_000, x402ProxyUrl: config.x402ProxyUrl });
+        const provider = sharedTypedProvider(config.provider, { timeoutMs: 30_000, x402ProxyUrl: config.openrouterX402ProxyUrl });
         const models = await provider.listModels();
         return `${config.provider}: ${models.length} models in catalog`;
       }

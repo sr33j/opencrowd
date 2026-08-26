@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -22,6 +22,7 @@ async function tempRoot(): Promise<string> {
 
 afterEach(async () => {
   delete process.env.OPENCROWD_CONFIG_DIR;
+  delete process.env.AGENTCASH_WALLET_PATH;
   await Promise.all(tmpRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -118,6 +119,41 @@ describe("session mutation commands", () => {
 });
 
 describe("inspection commands", () => {
+  it("/provider shows the BlockRun default and /provider help explains every route", async () => {
+    const ctx = await context();
+    const current = await runSlashCommand(ctx, "provider") as { body: string };
+    expect(current.body).toContain("blockrun");
+    expect(current.body).toContain("openrouter-x402-proxy");
+
+    const help = await runSlashCommand(ctx, "provider help") as { body: string };
+    expect(help.body).toContain("BlockRun gateway");
+    expect(help.body).toContain("OPENROUTER_API_KEY");
+  });
+
+  it("/provider renders legacy x402 sessions with the canonical proxy name", async () => {
+    const ctx = await context({
+      models: { provider: "x402", main: "model-a", resolvedAt: "2026-01-01" }
+    });
+    expect((await runSlashCommand(ctx, "provider") as { body: string }).body)
+      .toContain("openrouter-x402-proxy");
+  });
+
+  it("/fund preserves complete copyable Base transfer links", async () => {
+    const ctx = await context();
+    ctx.state.testMode = false;
+    const walletPath = join(await tempRoot(), "wallet.json");
+    process.env.AGENTCASH_WALLET_PATH = walletPath;
+    await writeFile(walletPath, JSON.stringify({
+      address: "0xF5a65ae916474Da7fB0B47C6182E6c4Eb63A0C80",
+      privateKey: `0x${"1".repeat(64)}`
+    }));
+
+    const result = await runSlashCommand(ctx, "fund") as { body: string };
+    expect(result.body).toContain("uint256=20000000");
+    expect(result.body).toContain("https://metamask.app.link/send/");
+    expect(result.body).not.toContain("…");
+  });
+
   it("/status reports session, models, budget, and approval without needing the network in demo mode", async () => {
     const ctx = await context({
       models: { provider: "venice", main: "model-a", subagent: "model-b", resolvedAt: "2026-01-01" }

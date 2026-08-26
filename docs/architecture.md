@@ -167,11 +167,11 @@ Owner decision (2026-08-25), based on the same-model GAIA provider benchmark:
 - Treats 90 seconds without a stream chunk, or the configured total deadline,
   as a transient timeout eligible for the bounded rescue ladder.
 
-### x402 token proxy (rescue provider; explicitly selectable)
+### OpenRouter x402 proxy (rescue provider; explicitly selectable)
 
 The previous default remains available and is BlockRun's paired rescue route:
 
-- Calls an OpenAI-compatible, x402-metered proxy (`x402ProxyUrl`, default
+- Calls an OpenAI-compatible, x402-metered proxy (`openrouterX402ProxyUrl`, default
   `https://x402-tokens.fly.dev/v1`) fronting OpenRouter-grade serving
   capacity.
 - Pays per request only when challenged: an HTTP 402 challenge is signed
@@ -230,7 +230,7 @@ limits, 5xx, dropped connections):
 
 1. retry the same provider once;
 2. if that also fails transiently, make one rescue call on the paired backup
-   provider (x402 for BlockRun/Venice, Venice for x402/OpenRouter) using its
+   provider (`openrouter-x402-proxy` for BlockRun/Venice, Venice for the proxy/OpenRouter) using its
    configured exact model IDs, recorded in the ledger with the reason;
 3. after three consecutive rescues the primary is parked for the rest of the
    process and calls go straight to the backup (a fresh run probes again).
@@ -345,7 +345,7 @@ command, which affects future sessions, never a running one.
 | Command | Exact meaning |
 | --- | --- |
 | `/status` | Show session, provider, resolved models, wallet/credit status, budget, and approval mode. |
-| `/provider [blockrun\|x402\|venice\|openrouter]` | Show or select this session's provider. Validate configuration immediately. |
+| `/provider [help\|blockrun\|openrouter-x402-proxy\|venice\|openrouter]` | Show, explain, or select this session's provider. Validate configuration immediately. |
 | `/models` | List models for the active provider. No mutation. |
 | `/model [id\|auto]` | Show or set the current session's main model. |
 | `/submodel [id\|auto\|off]` | Show, set, auto-select, or disable the session's subagent model. |

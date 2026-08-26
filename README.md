@@ -61,7 +61,7 @@ First launch is two steps — there is no wallet setup:
 The default provider is **BlockRun**, an OpenAI-compatible route paid per
 request with x402 USDC from the shared AgentCash wallet. It needs no API key
 or prepaid provider balance. If a BlockRun call fails transiently twice, the
-current **x402 token proxy** handles one ledgered rescue call; after three
+legacy **OpenRouter x402 proxy** (`openrouter-x402-proxy`) handles one ledgered rescue call; after three
 rescues the primary is parked for the rest of the process. In `ask` mode the
 rescue requires confirmation, while `auto` mode proceeds within the session
 budget automatically.
@@ -70,7 +70,7 @@ budget automatically.
 venice` or `/provider venice`): SIWX authentication, prepaid Venice credit
 topped up with USDC, at most one bounded automatic top-up per exhausted
 call. **OpenRouter** direct is also available with `OPENROUTER_API_KEY`.
-The x402 proxy, Venice, and direct OpenRouter remain explicitly selectable.
+The OpenRouter x402 proxy, Venice, and direct OpenRouter remain explicitly selectable.
 
 Model preferences are per provider (`auto` resolves from the live catalog at
 session start; resolved IDs are recorded on the session so `run --session`

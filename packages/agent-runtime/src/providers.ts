@@ -7,9 +7,10 @@ import { requireAgentCashWallet } from "@opencrowd/core";
  * credit, and OpenRouter uses an API key.
  */
 
-export type ProviderId = "blockrun" | "x402" | "venice" | "openrouter";
+export type ProviderId = "blockrun" | "openrouter-x402-proxy" | "venice" | "openrouter";
+export type ProviderIdInput = ProviderId | "x402";
 
-export const PROVIDER_IDS: ProviderId[] = ["blockrun", "x402", "venice", "openrouter"];
+export const PROVIDER_IDS: ProviderId[] = ["blockrun", "openrouter-x402-proxy", "venice", "openrouter"];
 
 export interface ProviderModel {
   id: string;
@@ -408,7 +409,12 @@ export class OpenRouterProvider implements TypedLlmProvider {
 }
 
 export function isProviderId(value: unknown): value is ProviderId {
-  return value === "blockrun" || value === "x402" || value === "venice" || value === "openrouter";
+  return value === "blockrun" || value === "openrouter-x402-proxy" || value === "venice" || value === "openrouter";
+}
+
+/** Accept the pre-0.3.1 `x402` route name without exposing it as canonical UI. */
+export function normalizeProviderId(value: unknown): ProviderId | undefined {
+  return value === "x402" ? "openrouter-x402-proxy" : isProviderId(value) ? value : undefined;
 }
 
 /** Resolved per-session model selection, persisted for reproducibility. */

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-08-26
+
+- Rebuild every internal workspace package during `prepack`, preventing a
+  manual publish from bundling stale provider code.
+- Migrate the former x402 default to BlockRun and rename the legacy route to
+  `openrouter-x402-proxy` (the old `x402` spelling remains an input alias).
+- Add descriptive `/provider` and `/provider help` output, preserve complete
+  copyable `/fund` links, and keep `/models` routed through the active provider.
+
 ## 0.3.0 — 2026-08-25
 
 - Make BlockRun the default LLM provider, using its official x402 v2 SDK,

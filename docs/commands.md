@@ -8,7 +8,7 @@ Persistent defaults change only through `opencrowd config`.
 | Command | What it does |
 | --- | --- |
 | `/status` | Session, provider, models, wallet/credit, budget, and approval mode |
-| `/provider [blockrun\|x402\|venice\|openrouter]` | Show or select this session's LLM provider (validated immediately) |
+| `/provider [help\|blockrun\|openrouter-x402-proxy\|venice\|openrouter]` | Show or select this session's LLM provider (validated immediately) |
 | `/models [refresh]` | List models for the active provider (cached; `refresh` refetches) |
 | `/model [id\|auto]` | Show or set this session's main model |
 | `/submodel [id\|auto\|off]` | Show, set, auto-select, or disable this session's subagent model |

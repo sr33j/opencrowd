@@ -41,7 +41,7 @@ export class BlockRunProvider implements TypedLlmProvider {
         signal: AbortSignal.timeout(this.options.timeoutMs ?? 60_000)
       });
       if (!response.ok) {
-        throw new Error(`BlockRun model list failed: HTTP ${response.status}. Run \`opencrowd doctor\` or switch providers with /provider x402.`);
+        throw new Error(`BlockRun model list failed: HTTP ${response.status}. Run \`opencrowd doctor\` or switch providers with /provider openrouter-x402-proxy.`);
       }
       this.modelsCache = normalizeProviderModels(await response.json().catch(() => undefined));
     }
@@ -125,7 +125,7 @@ function blockRunError(error: unknown): Error {
     return error;
   }
   const detail = error instanceof Error ? error.message : String(error);
-  return new Error(`BlockRun inference failed: ${detail}. The current x402 provider will be tried for transient failures.`);
+  return new Error(`BlockRun inference failed: ${detail}. The OpenRouter x402 proxy will be tried for transient failures.`);
 }
 
 async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {

@@ -1,10 +1,11 @@
 import { DEFAULT_CONFIG, loadConfig, saveSession, type OpenCrowdConfig, type SessionState } from "@opencrowd/core";
 import {
-  isProviderId,
+  normalizeProviderId,
   OpenRouterProvider,
   resolveSessionModels,
   VeniceProvider,
   type ProviderId,
+  type ProviderIdInput,
   type ProviderModel,
   type ResolvedSessionModels,
   type TypedLlmProvider
@@ -54,11 +55,15 @@ export interface TypedProviderOptions {
 }
 
 /** Build a provider for a provider ID. */
-export function createTypedProvider(id: ProviderId, options: TypedProviderOptions = {}): TypedLlmProvider {
+export function createTypedProvider(input: ProviderIdInput, options: TypedProviderOptions = {}): TypedLlmProvider {
+  const id = normalizeProviderId(input);
+  if (!id) {
+    throw new Error(`unknown LLM provider \`${input}\``);
+  }
   if (id === "blockrun") {
     return new BlockRunProvider({ timeoutMs: options.timeoutMs });
   }
-  if (id === "x402") {
+  if (id === "openrouter-x402-proxy") {
     return new X402ProxyProvider({ baseUrl: options.x402ProxyUrl, timeoutMs: options.timeoutMs });
   }
   if (id === "venice") {
@@ -68,7 +73,11 @@ export function createTypedProvider(id: ProviderId, options: TypedProviderOption
 }
 
 /** One long-lived provider (and underlying client) per process. */
-export function sharedTypedProvider(id: ProviderId, options: TypedProviderOptions = {}): TypedLlmProvider {
+export function sharedTypedProvider(input: ProviderIdInput, options: TypedProviderOptions = {}): TypedLlmProvider {
+  const id = normalizeProviderId(input);
+  if (!id) {
+    throw new Error(`unknown LLM provider \`${input}\``);
+  }
   let provider = providerCache.get(id);
   if (!provider) {
     provider = createTypedProvider(id, options);
@@ -98,14 +107,15 @@ export async function resolveLlmRuntime(
 ): Promise<LlmRuntimeSelection> {
   const config = await loadConfig();
   const requested = overrides.provider ?? session.models?.provider ?? config.provider;
-  if (!isProviderId(requested)) {
-    throw new Error(`unknown LLM provider \`${requested}\`; supported: blockrun, x402, venice, openrouter`);
+  const normalized = normalizeProviderId(requested);
+  if (!normalized) {
+    throw new Error(`unknown LLM provider \`${requested}\`; supported: blockrun, openrouter-x402-proxy, venice, openrouter`);
   }
-  const providerId: ProviderId = requested;
+  const providerId: ProviderId = normalized;
   const timeoutMs = overrides.nonInteractive
     ? Math.min(config.llmTimeoutMs, NON_INTERACTIVE_LLM_TIMEOUT_MS)
     : config.llmTimeoutMs;
-  const provider = sharedTypedProvider(providerId, { timeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+  const provider = sharedTypedProvider(providerId, { timeoutMs, x402ProxyUrl: config.openrouterX402ProxyUrl });
   const fallback = resolveFallbackRuntime(providerId, config, timeoutMs);
 
   // Reuse the session's recorded resolution when nothing overrides it, so a
@@ -162,7 +172,7 @@ function resolveFallbackRuntime(
   const mainModel = exact(config[backupId].model, DEFAULT_CONFIG[backupId].model);
   const subagentModel = exact(config[backupId].submodel, mainModel);
   return {
-    provider: sharedTypedProvider(backupId, { timeoutMs, x402ProxyUrl: config.x402ProxyUrl }),
+    provider: sharedTypedProvider(backupId, { timeoutMs, x402ProxyUrl: config.openrouterX402ProxyUrl }),
     mainModel,
     subagentModel
   };
@@ -171,7 +181,7 @@ function resolveFallbackRuntime(
 /** Stable provider pairing used by the bounded per-call rescue ladder. */
 export function rescueProviderId(primary: ProviderId): ProviderId {
   if (primary === "blockrun" || primary === "venice") {
-    return "x402";
+    return "openrouter-x402-proxy";
   }
   return "venice";
 }

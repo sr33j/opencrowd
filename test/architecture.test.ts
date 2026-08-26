@@ -88,6 +88,10 @@ describe("architecture invariants", () => {
     const release = await readFile(join(ROOT, ".github/workflows/release.yml"), "utf8");
     const publishes = [...release.matchAll(/npm publish --workspace (\S+)/g)].map((match) => match[1]);
     expect(publishes).toEqual(["opencrowd"]);
+    const cliPackage = JSON.parse(await readFile(join(ROOT, "apps/cli/package.json"), "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(cliPackage.scripts?.prepack).toContain("npm --prefix ../.. run build");
   });
 
   it("enforces unused-code compiler checks", async () => {

@@ -101,7 +101,7 @@ class StreamLiveness {
 }
 
 export class X402ProxyProvider implements TypedLlmProvider {
-  readonly id = "x402" as const;
+  readonly id = "openrouter-x402-proxy" as const;
   private readonly baseUrl: string;
   private readonly slots: Semaphore;
   private modelsCache?: ProviderModel[];

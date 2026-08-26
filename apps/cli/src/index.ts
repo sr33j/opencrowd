@@ -19,7 +19,7 @@ import {
 } from "@opencrowd/core";
 import { closeSharedEconomyRuntime, isApprovalMode } from "@opencrowd/economy";
 import {
-  isProviderId,
+  normalizeProviderId,
   renderProgress,
   sharedTypedProvider,
   type RenderProgressOptions
@@ -276,12 +276,15 @@ async function configCommand(args: string[]): Promise<void> {
     throw new Error("config supports: show | set provider|model|submodel|budget|approval <value>");
   }
   const config = await loadConfig();
+  let savedValue = value;
   switch (key) {
     case "provider": {
-      if (!isProviderId(value)) {
-        throw new Error("provider must be blockrun, x402, venice, or openrouter");
+      const provider = normalizeProviderId(value);
+      if (!provider) {
+        throw new Error("provider must be blockrun, openrouter-x402-proxy, venice, or openrouter");
       }
-      await updateConfig({ provider: value });
+      await updateConfig({ provider });
+      savedValue = provider;
       break;
     }
     case "model": {
@@ -310,7 +313,7 @@ async function configCommand(args: string[]): Promise<void> {
     default:
       throw new Error(`unknown config key: ${key} (supported: provider, model, submodel, budget, approval)`);
   }
-  console.log(`set ${key} = ${value} (applies to future sessions; running sessions are unchanged)`);
+  console.log(`set ${key} = ${savedValue} (applies to future sessions; running sessions are unchanged)`);
 }
 
 async function ledgerCommand(args: string[]): Promise<void> {
@@ -369,7 +372,7 @@ async function modelsCommand(args: string[]): Promise<void> {
   const [action] = args;
   const config = await loadConfig();
   if (action === "list" || action === undefined) {
-    const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.x402ProxyUrl });
+    const provider = sharedTypedProvider(config.provider, { timeoutMs: config.llmTimeoutMs, x402ProxyUrl: config.openrouterX402ProxyUrl });
     const models = await provider.listModels();
     const rows = models.map((model) => ({
       id: model.id,

@@ -7,11 +7,13 @@ import { VeniceError } from "venice-x402-client";
 import {
   BlockRunProvider,
   BudgetedLlmProvider,
+  createTypedProvider,
   createOpenCrowdRuntime,
   createMockToolExecutor,
   InsufficientCreditError,
   MOCK_X402_SERVICES,
   MockLlmProvider,
+  normalizeProviderId,
   normalizeProviderModels,
   OpenRouterProvider,
   renderCompactPurchaseSummary,
@@ -46,8 +48,15 @@ afterEach(async () => {
 });
 
 describe("typed providers and budget accounting", () => {
-  it("pairs BlockRun with the current x402 provider for rescue calls", () => {
-    expect(rescueProviderId("blockrun")).toBe("x402");
+  it("uses canonical route names while accepting the legacy x402 alias", () => {
+    expect(createTypedProvider("blockrun")).toBeInstanceOf(BlockRunProvider);
+    expect(createTypedProvider("openrouter-x402-proxy")).toBeInstanceOf(X402ProxyProvider);
+    expect(createTypedProvider("x402").id).toBe("openrouter-x402-proxy");
+    expect(normalizeProviderId("x402")).toBe("openrouter-x402-proxy");
+  });
+
+  it("pairs BlockRun with the OpenRouter x402 proxy for rescue calls", () => {
+    expect(rescueProviderId("blockrun")).toBe("openrouter-x402-proxy");
   });
 
   function fakeTypedProvider(overrides: Partial<ProviderCompletion> = {}, id: "venice" | "openrouter" = "venice"): TypedLlmProvider {
@@ -544,7 +553,7 @@ describe("failure hardening", () => {
     const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let primaryAttempts = 0;
     const primary: TypedLlmProvider = {
-      id: "x402",
+      id: "openrouter-x402-proxy",
       async listModels() { return []; },
       async complete() {
         primaryAttempts += 1;
@@ -572,7 +581,7 @@ describe("failure hardening", () => {
     expect(session.spentCents).toBe(4);
     const ledger = await readFile(session.ledgerPath, "utf8");
     expect(ledger).toContain("venice");
-    expect(ledger).toContain("failover from x402");
+    expect(ledger).toContain("failover from openrouter-x402-proxy");
   });
 
   it("does not fail over on non-transient errors and marks a repeatedly rescued primary degraded", async () => {
@@ -580,7 +589,7 @@ describe("failure hardening", () => {
     const session = await createSession({ workspaceRoot: root, budgetCents: 100 , approvalMode: "auto" });
     let primaryAttempts = 0;
     const primary: TypedLlmProvider = {
-      id: "x402",
+      id: "openrouter-x402-proxy",
       async listModels() { return []; },
       async complete() {
         primaryAttempts += 1;
@@ -600,7 +609,7 @@ describe("failure hardening", () => {
 
     // Non-transient failures surface without touching the backup.
     const fatal: TypedLlmProvider = {
-      id: "x402",
+      id: "openrouter-x402-proxy",
       async listModels() { return []; },
       async complete() { throw new Error("model `nope` is not in the x402 catalog"); }
     };
@@ -621,7 +630,7 @@ describe("failure hardening", () => {
   it("ask mode gates the rescue call behind explicit confirmation and denies it without a handler", async () => {
     const root = await tempRoot();
     const stalling: TypedLlmProvider = {
-      id: "x402",
+      id: "openrouter-x402-proxy",
       async listModels() { return []; },
       async complete() {
         throw new Error("x402 proxy stream stalled: no bytes for 90000ms (timed out)");

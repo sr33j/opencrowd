@@ -13,7 +13,7 @@ import {
 } from "@opencrowd/core";
 import type { ApprovalAnswer, ApprovalRequest } from "@opencrowd/economy";
 import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } from "./funding.js";
-import { buildSessionSummary } from "@opencrowd/agent-runtime";
+import { buildSessionSummary, normalizeProviderId } from "@opencrowd/agent-runtime";
 import { walletSummary } from "../wallet.js";
 import { ensureMockRuntime, runPersistentAgentTask, warmStartEconomy, type ReplState } from "../agent-task.js";
 import {
@@ -524,7 +524,9 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
   const budget = budgetStatus(session);
   const state = stateRef.current;
   const modeLabel = session.approvalMode;
-  const modelLabel = session.models ? `${session.models.provider}/${session.models.main}` : defaultModel;
+  const modelLabel = session.models
+    ? `${normalizeProviderId(session.models.provider) ?? session.models.provider}/${session.models.main}`
+    : defaultModel;
 
   return (
     <Box flexDirection="column">
