@@ -2,11 +2,16 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { z } from "zod";
 import { createSession, type SessionState } from "@opencrowd/core";
 import {
   EconomyGateway,
   GATEWAY_TOOL_NAMES,
   listPurchases,
+  McpAgentCashAdapter,
+  McpConnection,
   MockAgentCashAdapter,
   MockCrowdCodeAdapter,
   pendingRequiredReviews,
@@ -428,5 +433,89 @@ describe("secrecy", () => {
     const ledger = await readFile(session.ledgerPath, "utf8");
     expect(ledger).not.toContain("0xmock1");
     expect(ledger).not.toContain("bW9jay1wcm9vZg==");
+  });
+});
+
+describe("x402 settlement through the real MCP adapter (field note 001)", () => {
+  // The 402 challenge settles on-chain but the final HTTP response is a
+  // plain 200 whose receipt arrives in a second MCP content block. The
+  // purchase must be recorded as paid at the actual amount with the
+  // settlement evidence retained and its review required.
+  const TX = "0x3cab25e6f1349f8ae7b5c7f48d79e40bef53e9377fecc395bc176520b866f6c1";
+  const RECEIPT = Buffer.from(
+    JSON.stringify({ success: true, payer: "0xF5a65ae916474Da7fB", transaction: TX, network: "base" })
+  ).toString("base64");
+
+  function settledVendor(): McpServer {
+    const server = new McpServer({ name: "agentcash", version: "0.0.0" });
+    server.tool("check_endpoint_schema", "Schema", { url: z.string() }, async ({ url }) => ({
+      content: [{ type: "text", text: JSON.stringify({ url, authMode: "paid", price: "0.002000 USD", protocols: ["x402", "mpp"] }) }]
+    }));
+    server.tool("fetch", "Fetch", { url: z.string() }, async () => ({
+      content: [
+        { type: "text", text: JSON.stringify({ requestId: "req-1", results: [] }) },
+        {
+          type: "text",
+          text: JSON.stringify({
+            protocol: "x402",
+            network: "base",
+            price: "$0.002",
+            payment: { success: true, transactionHash: TX },
+            headers: { "content-type": "application/json", "payment-response": RECEIPT }
+          }, null, 2)
+        }
+      ]
+    }));
+    return server;
+  }
+
+  it("records a paid purchase with receipt evidence and submits the required review", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 100 });
+    const mcp = new McpConnection("agentcash", { command: "unused", args: [] }, {
+      transportFactory: () => {
+        const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+        void settledVendor().connect(serverTransport);
+        return clientTransport;
+      }
+    });
+    const crowdcode = new MockCrowdCodeAdapter();
+    const gateway = new EconomyGateway({
+      session,
+      agentcash: new McpAgentCashAdapter(mcp),
+      crowdcode,
+      approvalMode: "auto",
+      approvalRulesPath: join(root, "approvals.json")
+    });
+    const endpoint = "https://stableenrich.dev/api/exa/contents";
+    await inspect(gateway, endpoint);
+
+    const result = await gateway.execute("call_paid_service", { url: endpoint, method: "POST", body: { urls: ["https://example.com"] } });
+    expect(result.ok).toBe(true);
+    const data = result.data as Record<string, unknown>;
+    expect(data.outcome).toBe("paid_success");
+    expect(data.charged_cost_cents).toBe(1);
+    expect(data.review_required).toBe(true);
+    // No settlement details leak into the model-visible result.
+    expect(JSON.stringify(result)).not.toContain(TX.slice(2));
+    expect(JSON.stringify(result)).not.toContain(RECEIPT);
+
+    const purchases = await listPurchases(session);
+    expect(purchases[0].record.outcome).toBe("paid_success");
+    expect(purchases[0].record.evidence).toMatchObject({ reference: TX, proof: RECEIPT, rail: "x402-base" });
+
+    const review = await gateway.execute("review_paid_service", {
+      purchase_id: data.purchase_id,
+      rating: 5,
+      reason: "fast and relevant"
+    });
+    expect(review.ok).toBe(true);
+    expect(crowdcode.reviews[0]).toMatchObject({
+      paymentReference: TX,
+      paymentProof: RECEIPT,
+      paymentProvider: "x402",
+      apiEndpoint: endpoint
+    });
+    await mcp.close();
   });
 });

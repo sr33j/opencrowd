@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.2 — 2026-08-27
+
+Field note 001 fixes (issues 2 and 3):
+
+- Stop losing paid x402/MPP receipts. AgentCash's fetch returns the response
+  body and the payment metadata as separate MCP content blocks; these were
+  joined into one unparseable string, so settled payments reconciled as
+  `free` with no charge, no receipt, and no required review — while leaking
+  the raw receipt to the model. Multi-block tool results now parse per
+  block, the metadata (tx hash, receipt header, dollar price, rail) becomes
+  stored purchase evidence charged at the actual amount with
+  `review_required: true`, and the model sees only the vendor body.
+- Read the session ledger with a real RFC 4180 parser. Quoted multiline
+  `notes` cells (e.g. Markdown summaries) no longer shear into phantom rows
+  in `opencrowd ledger` output.
+
 ## 0.3.1 — 2026-08-26
 
 - Rebuild every internal workspace package during `prepack`, preventing a

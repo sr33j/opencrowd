@@ -4,11 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  appendLedgerEntry,
   clearConversation,
   compactConversationIfNeeded,
   appendConversationMessage,
   readConversationMessages,
   createOpenCrowdSession,
+  readLedger,
   createSession,
   DEFAULT_CONFIG,
   listArtifacts,
@@ -258,3 +260,46 @@ function addressPort(server: ReturnType<typeof createServer>): number {
   }
   return address.port;
 }
+
+describe("ledger CSV round-trip", () => {
+  // Field note 001, issue 3: a multiline Markdown `notes` cell must not
+  // shear into phantom ledger rows when read back.
+  it("round-trips cells with commas, quotes, and embedded newlines", async () => {
+    const root = await tempRoot();
+    const path = join(root, "sessions", "s1", "ledger.csv");
+    const notes = 'Summary:\n- paid $0.01, "verified" on-chain\n- receipt stored\r\nDone';
+    await appendLedgerEntry(path, {
+      session_id: "s1",
+      type: "service_call",
+      resource_url: "https://svc.example/api,with,commas",
+      method: "POST",
+      quoted_cost_cents: 2,
+      charged_cost_cents: 1,
+      status: "charged",
+      approval_mode: "auto",
+      notes
+    });
+    await appendLedgerEntry(path, {
+      session_id: "s1",
+      type: "service_call",
+      resource_url: "https://svc.example/api/second",
+      method: "GET",
+      quoted_cost_cents: 1,
+      charged_cost_cents: 0,
+      status: "ok",
+      approval_mode: "auto",
+      notes: "plain"
+    });
+
+    const rows = await readLedger(path);
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toMatchObject({
+      session_id: "s1",
+      resource_url: "https://svc.example/api,with,commas",
+      charged_cost_cents: "1",
+      status: "charged",
+      notes
+    });
+    expect(rows[1]).toMatchObject({ resource_url: "https://svc.example/api/second", notes: "plain" });
+  });
+});

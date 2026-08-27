@@ -99,10 +99,19 @@ function parseToolContent(content: unknown): unknown {
   if (!Array.isArray(content)) {
     return content;
   }
-  const text = content
+  const texts = content
     .filter((block) => block && typeof block === "object" && (block as { type?: unknown }).type === "text")
-    .map((block) => String((block as { text?: unknown }).text ?? ""))
-    .join("\n");
+    .map((block) => String((block as { text?: unknown }).text ?? ""));
+  if (texts.length <= 1) {
+    return parseMaybeJson(texts[0] ?? "");
+  }
+  // Multiple text blocks are distinct values (AgentCash's fetch returns the
+  // response body and a payment-metadata object as separate blocks); joining
+  // them would corrupt both, so each block is parsed on its own.
+  return texts.map(parseMaybeJson);
+}
+
+function parseMaybeJson(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {

@@ -1,7 +1,7 @@
 {
   "name": "opencrowd",
-  "version": "0.3.1",
-  "description": "A CLI agent with its own wallet \u2014 discovers x402 services, pays in USDC, and completes tasks under a local budget",
+  "version": "0.3.2",
+  "description": "A CLI agent with its own wallet — discovers x402 services, pays in USDC, and completes tasks under a local budget",
   "type": "module",
   "license": "MIT",
   "repository": {

@@ -128,10 +128,14 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
 /**
  * Reconcile a vendor fetch result into a free/SIWX/paid outcome with receipt
  * evidence. Field names are parsed defensively; the vendor payload shape is
- * not part of OpenCrowd's contract.
+ * not part of OpenCrowd's contract. The vendor may deliver the response body
+ * and the payment metadata as separate MCP content blocks (an array here), a
+ * single object, or a pre-joined string; all three shapes reconcile the same
+ * way, and a settlement that arrives with a 200 response still produces paid
+ * evidence.
  */
 export function parsePaidFetchResult(raw: unknown, requestedRail: PaymentRail): PaidFetchResult {
-  const record = objectValue(raw) ?? {};
+  const { body, record } = splitFetchPayload(raw);
   const status = numberValue(record.status ?? record.statusCode);
   const ok = typeof record.ok === "boolean" ? record.ok : status !== undefined ? status < 400 : true;
   const payment = parsePaymentEvidence(record, requestedRail);
@@ -144,11 +148,64 @@ export function parsePaidFetchResult(raw: unknown, requestedRail: PaymentRail): 
     ok,
     ambiguous: false,
     status,
-    data: record.data ?? record.body ?? record.response ?? raw,
+    data: body,
     error: ok ? undefined : stringValue(record.error) ?? (status !== undefined ? `HTTP ${status}` : "request failed"),
     authMode: payment ? "paid" : usedSiwx ? "siwx" : "free",
     payment
   };
+}
+
+/**
+ * Separate the model-visible response body from the payment/transport
+ * metadata, whichever shape the vendor used.
+ */
+function splitFetchPayload(raw: unknown): { body: unknown; record: Record<string, unknown> } {
+  if (Array.isArray(raw)) {
+    const record: Record<string, unknown> = {};
+    const bodies: unknown[] = [];
+    for (const block of raw) {
+      const object = objectValue(block);
+      if (object && looksLikePaymentMetadata(object)) {
+        Object.assign(record, object);
+      } else {
+        bodies.push(block);
+      }
+    }
+    return { body: bodies.length === 1 ? bodies[0] : bodies, record };
+  }
+  if (typeof raw === "string") {
+    return splitEmbeddedMetadata(raw) ?? { body: raw, record: {} };
+  }
+  const record = objectValue(raw) ?? {};
+  return { body: record.data ?? record.body ?? record.response ?? raw, record };
+}
+
+function looksLikePaymentMetadata(record: Record<string, unknown>): boolean {
+  if (objectValue(record.payment ?? record.paymentDetails ?? record.payment_details)) {
+    return true;
+  }
+  const headers = objectValue(record.headers ?? record.responseHeaders);
+  if (headers && Object.keys(headers).some((key) => /^(x-)?payment-(response|receipt|required)$/i.test(key))) {
+    return true;
+  }
+  return typeof record.protocol === "string"
+    && (record.price !== undefined || typeof record.network === "string");
+}
+
+/**
+ * A pre-joined payload is "<body>\n<pretty-printed JSON metadata>". Scan
+ * newline+brace boundaries from the end and take the first suffix that
+ * parses to a payment-metadata object.
+ */
+function splitEmbeddedMetadata(text: string): { body: unknown; record: Record<string, unknown> } | undefined {
+  for (let index = text.lastIndexOf("\n{"); index >= 0; index = text.lastIndexOf("\n{", index - 1)) {
+    const candidate = objectValue(parseMaybeJson(text.slice(index + 1)));
+    if (candidate && looksLikePaymentMetadata(candidate)) {
+      const bodyText = text.slice(0, index).trim();
+      return { body: parseMaybeJson(bodyText), record: candidate };
+    }
+  }
+  return undefined;
 }
 
 function parsePaymentEvidence(record: Record<string, unknown>, requestedRail: PaymentRail): PaymentEvidence | undefined {
@@ -158,18 +215,22 @@ function parsePaymentEvidence(record: Record<string, unknown>, requestedRail: Pa
     payment?.proof ?? payment?.receipt
     ?? headers["payment-response"] ?? headers["x-payment-response"] ?? headers["payment-receipt"] ?? headers["Payment-Receipt"]
   );
-  const reference = stringValue(
+  let reference = stringValue(
     payment?.txHash ?? payment?.tx_hash ?? payment?.transactionHash ?? payment?.reference ?? record.txHash ?? record.tx_hash
   );
-  const paidUsd = numberValue(payment?.price ?? payment?.amount ?? payment?.paidUsd ?? payment?.amountUsd ?? record.paid ?? record.price);
+  const paidUsd = moneyValue(payment?.price ?? payment?.amount ?? payment?.paidUsd ?? payment?.amountUsd ?? record.paid ?? record.price);
   if (!payment && !proof && !reference && paidUsd === undefined) {
     return undefined;
   }
-  const network = stringValue(payment?.network ?? record.network)?.toLowerCase();
-  const protocol = stringValue(payment?.protocol ?? record.paymentProtocol)?.toLowerCase();
+  // The base64 receipt header carries the settlement facts authoritatively;
+  // fill anything the surrounding metadata omitted from it.
+  const receipt = proof ? objectValue(parseMaybeJson(decodeBase64(proof) ?? "")) : undefined;
+  reference ??= stringValue(receipt?.transaction ?? receipt?.transactionHash ?? receipt?.txHash ?? receipt?.reference);
+  const network = stringValue(payment?.network ?? record.network ?? receipt?.network)?.toLowerCase();
+  const protocol = stringValue(payment?.protocol ?? record.protocol ?? record.paymentProtocol)?.toLowerCase();
   const rail: PaymentRail = network === "tempo" || protocol === "mpp" || protocol === "mppx"
     ? "mppx"
-    : network === "base" || protocol === "x402"
+    : network === "base" || network === "eip155:8453" || protocol === "x402"
       ? "x402-base"
       : network === undefined && protocol === undefined
         ? requestedRail
@@ -179,8 +240,27 @@ function parsePaymentEvidence(record: Record<string, unknown>, requestedRail: Pa
     rail,
     reference,
     proof,
-    payTo: stringValue(payment?.payTo ?? payment?.pay_to ?? payment?.recipient)
+    payTo: stringValue(
+      payment?.payTo ?? payment?.pay_to ?? payment?.recipient
+      ?? receipt?.payTo ?? receipt?.pay_to ?? receipt?.recipient ?? receipt?.payee
+    )
   };
+}
+
+function parseMaybeJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function decodeBase64(value: string): string | undefined {
+  try {
+    return Buffer.from(value, "base64").toString("utf8");
+  } catch {
+    return undefined;
+  }
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
@@ -199,4 +279,17 @@ function numberValue(value: unknown): number | undefined {
     return Number(value);
   }
   return undefined;
+}
+
+/** Like numberValue, but also accepts money strings such as "$0.01" or "0.01 USD". */
+function moneyValue(value: unknown): number | undefined {
+  const direct = numberValue(value);
+  if (direct !== undefined) {
+    return direct;
+  }
+  if (typeof value !== "string") {
+    return undefined;
+  }
+  const cleaned = value.replace(/[$,\s]|usd(c?)/gi, "");
+  return cleaned === "" ? undefined : numberValue(cleaned);
 }
