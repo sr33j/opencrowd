@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Box, render, Static, Text, useApp, useInput, useStdout } from "ink";
+import { Box, render, Static, Text, useApp, useInput, usePaste, useStdout } from "ink";
 import {
   budgetStatus,
   clearConversation,
@@ -24,6 +24,7 @@ import {
   type CommandResult
 } from "../registry.js";
 import { envFlag, formatCents, shortUrl, truncateMiddle } from "../shared.js";
+import { insertInputText } from "./input.js";
 
 let nextItemId = 1;
 
@@ -379,6 +380,19 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
     });
   }, [push, session]);
 
+  const insertText = useCallback((text: string) => {
+    const next = insertInputText(input, cursor, text);
+    setInput(next.value);
+    setCursor(next.cursor);
+  }, [cursor, input]);
+
+  usePaste((text) => {
+    if (exiting || modal || wizard) {
+      return;
+    }
+    insertText(text);
+  });
+
   useInput((char, key) => {
     if (exiting) {
       return;
@@ -504,20 +518,7 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
       return;
     }
     if (char && !key.ctrl && !key.meta) {
-      const [first, hasNewline] = splitChunk(char);
-      const nextValue = input.slice(0, cursor) + first + input.slice(cursor);
-      if (hasNewline) {
-        if (busy) {
-          push({ kind: "note", text: "a task is still running — wait for it to finish" });
-          return;
-        }
-        setInput("");
-        setCursor(0);
-        void handleSubmit(nextValue);
-        return;
-      }
-      setInput(nextValue);
-      setCursor(cursor + first.length);
+      insertText(char);
     }
   });
 
@@ -730,15 +731,6 @@ function StatusBar({ walletLabel, walletBalanceCents, spentCents, remainingCents
       <Text dimColor>{hint}</Text>
     </Box>
   );
-}
-
-function splitChunk(chunk: string): [string, boolean] {
-  const normalized = chunk.replace(/\r\n?/g, "\n");
-  const newlineIndex = normalized.indexOf("\n");
-  if (newlineIndex === -1) {
-    return [normalized, false];
-  }
-  return [normalized.slice(0, newlineIndex), true];
 }
 
 function indent(text: string): string {
