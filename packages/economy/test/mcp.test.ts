@@ -164,4 +164,39 @@ describe("parsePaidFetchResult", () => {
       payment: { rail: "mppx", reference: "rcpt_1", proof: "cmVjZWlwdA==" }
     });
   });
+
+  it("does not mistake a price and protocol for a settlement receipt", () => {
+    const result = parsePaidFetchResult({
+      ok: true,
+      status: 200,
+      data: { transcript: "done" },
+      protocol: "x402",
+      network: "base",
+      price: "$0.10"
+    }, "x402-base");
+
+    expect(result).toMatchObject({
+      ok: true,
+      ambiguous: true,
+      ambiguityReason: "missing_receipt",
+      payment: undefined
+    });
+    expect(result.error).toContain("no verifiable settlement receipt");
+  });
+
+  it("reads receipt headers case-insensitively", () => {
+    const result = parsePaidFetchResult({
+      ok: true,
+      status: 200,
+      protocol: "x402",
+      network: "base",
+      price: "$0.01",
+      headers: { "PAYMENT-RESPONSE": SETTLED_RECEIPT }
+    }, "x402-base");
+
+    expect(result).toMatchObject({
+      ambiguous: false,
+      payment: { reference: SETTLED_TX, proof: SETTLED_RECEIPT }
+    });
+  });
 });

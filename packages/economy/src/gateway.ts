@@ -281,7 +281,9 @@ export class EconomyGateway {
         ? Math.max(1, Math.round((result.payment?.paidUsd ?? quotedCostCents / 100) * 100))
         : 0;
 
-    const artifact = outcome === "unknown" ? undefined : await saveArtifact(
+    // A transport failure may have no trustworthy response body. Missing
+    // receipt metadata occurs after a real response, so preserve that body.
+    const artifact = result.ambiguityReason === "transport" ? undefined : await saveArtifact(
       session,
       `service-calls/${Date.now()}-${slugUrl(endpoint)}.json`,
       JSON.stringify({ status: result.status, body: result.data }, null, 2),
@@ -304,9 +306,11 @@ export class EconomyGateway {
       artifact_path: artifact?.path,
       // Confirmed paid successes AND paid failures require reviews; free,
       // SIWX, and unknown outcomes create no paid receipt to review.
-      review_required: paid && supportedRail && result.payment?.reference !== undefined,
+      review_required: paid && supportedRail,
       evidence: result.payment,
-      notes: result.ambiguous ? "transport failure: payment state unknown; never auto-retried" : result.error
+      notes: result.ambiguous
+        ? `${result.ambiguityReason ?? "ambiguous"}: payment state unknown; never auto-retried`
+        : result.error
     };
     await appendPurchase(session, record);
     await finalizeReservation(session, reservation, outcome === "free" || outcome === "siwx" ? 0 : chargedCents);
@@ -324,12 +328,24 @@ export class EconomyGateway {
     });
 
     if (outcome === "unknown") {
+      const missingReceipt = result.ambiguityReason === "missing_receipt";
+      const unsupportedReceipt = result.ambiguityReason === "unsupported_receipt";
       return {
         ok: false,
-        error: [
-          `the call to ${endpoint} failed in transport and its payment state is unknown (recorded as purchase ${purchaseId}).`,
-          "It was NOT retried and must not be retried automatically; verify the service state before calling again."
-        ].join(" ")
+        error: missingReceipt
+          ? [
+            `the call to ${endpoint} returned but indicated payment without a verifiable settlement receipt (recorded as purchase ${purchaseId}).`,
+            "Its payment state is unknown. It was NOT retried and must not be retried automatically; inspect the saved artifact and reconcile with AgentCash before continuing."
+          ].join(" ")
+          : unsupportedReceipt
+            ? [
+              `the call to ${endpoint} returned a settlement receipt on an unsupported payment rail (recorded as purchase ${purchaseId}).`,
+              "It was NOT retried and must not be retried automatically; reconcile the payment manually before continuing."
+            ].join(" ")
+            : [
+              `the call to ${endpoint} failed in transport and its payment state is unknown (recorded as purchase ${purchaseId}).`,
+              "It was NOT retried and must not be retried automatically; verify the service state before calling again."
+            ].join(" ")
       };
     }
     return {
@@ -443,6 +459,12 @@ export class EconomyGateway {
       return { ok: false, error: `purchase ${purchaseId} is already reviewed` };
     }
     if (state.reviewStatus === "not_required") {
+      if (state.record.outcome === "paid_success" || state.record.outcome === "paid_failure") {
+        return {
+          ok: false,
+          error: `purchase ${purchaseId} was recorded as ${state.record.outcome} without a verifiable settlement reference; this legacy receipt cannot be submitted to CrowdCode automatically`
+        };
+      }
       return { ok: false, error: `purchase ${purchaseId} has no paid receipt to review (outcome: ${state.record.outcome})` };
     }
     const evidence = state.record.evidence;

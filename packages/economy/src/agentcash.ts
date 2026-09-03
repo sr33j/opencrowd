@@ -26,8 +26,10 @@ export interface PaidFetchRequest {
  */
 export interface PaidFetchResult {
   ok: boolean;
-  /** Transport failure: the call may or may not have executed on the vendor side. */
+  /** The payment state cannot be verified, so the call must not be retried. */
   ambiguous: boolean;
+  /** Why the payment state is ambiguous. */
+  ambiguityReason?: "transport" | "missing_receipt" | "unsupported_receipt";
   status?: number;
   /** Model-visible response body. */
   data: unknown;
@@ -113,6 +115,7 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
       return {
         ok: false,
         ambiguous: result.transportError === true,
+        ...(result.transportError === true ? { ambiguityReason: "transport" as const } : {}),
         data: undefined,
         error: result.error
       };
@@ -139,6 +142,8 @@ export function parsePaidFetchResult(raw: unknown, requestedRail: PaymentRail): 
   const status = numberValue(record.status ?? record.statusCode);
   const ok = typeof record.ok === "boolean" ? record.ok : status !== undefined ? status < 400 : true;
   const payment = parsePaymentEvidence(record, requestedRail);
+  const paymentClaimed = indicatesPayment(record);
+  const unsupportedReceipt = payment?.rail === "unsupported";
   const headers = objectValue(record.headers ?? record.responseHeaders) ?? {};
   const usedSiwx = Boolean(
     record.siwx ?? record.signInWithX ?? headers["sign-in-with-x"] ?? headers["x-sign-in-with-x"]
@@ -146,13 +151,33 @@ export function parsePaidFetchResult(raw: unknown, requestedRail: PaymentRail): 
   );
   return {
     ok,
-    ambiguous: false,
+    // A price/protocol marker says a payment happened, but it is not a
+    // settlement receipt. Without a verifiable reference, conservatively
+    // record the payment state as unknown and never retry the call.
+    ambiguous: (paymentClaimed && !payment) || unsupportedReceipt,
+    ...(paymentClaimed && !payment
+      ? { ambiguityReason: "missing_receipt" as const }
+      : unsupportedReceipt ? { ambiguityReason: "unsupported_receipt" as const } : {}),
     status,
     data: body,
-    error: ok ? undefined : stringValue(record.error) ?? (status !== undefined ? `HTTP ${status}` : "request failed"),
-    authMode: payment ? "paid" : usedSiwx ? "siwx" : "free",
+    error: paymentClaimed && !payment
+      ? "the service indicated payment but supplied no verifiable settlement receipt"
+      : unsupportedReceipt
+        ? "the settlement receipt used an unsupported payment rail"
+        : ok ? undefined : stringValue(record.error) ?? (status !== undefined ? `HTTP ${status}` : "request failed"),
+    authMode: paymentClaimed ? "paid" : usedSiwx ? "siwx" : "free",
     payment
   };
+}
+
+/** Payment-like metadata is a claim, not proof; only a reference makes it reviewable. */
+function indicatesPayment(record: Record<string, unknown>): boolean {
+  const payment = objectValue(record.payment ?? record.paymentDetails ?? record.payment_details);
+  const headers = normalizedHeaders(record.headers ?? record.responseHeaders);
+  return payment !== undefined
+    || stringValue(headers["payment-response"] ?? headers["x-payment-response"] ?? headers["payment-receipt"]) !== undefined
+    || stringValue(record.txHash ?? record.tx_hash ?? record.transactionHash ?? record.transaction) !== undefined
+    || (typeof record.protocol === "string" && (record.price !== undefined || record.paid !== undefined));
 }
 
 /**
@@ -210,22 +235,27 @@ function splitEmbeddedMetadata(text: string): { body: unknown; record: Record<st
 
 function parsePaymentEvidence(record: Record<string, unknown>, requestedRail: PaymentRail): PaymentEvidence | undefined {
   const payment = objectValue(record.payment ?? record.paymentDetails ?? record.payment_details);
-  const headers = objectValue(record.headers ?? record.responseHeaders) ?? {};
+  const headers = normalizedHeaders(record.headers ?? record.responseHeaders);
   const proof = stringValue(
     payment?.proof ?? payment?.receipt
-    ?? headers["payment-response"] ?? headers["x-payment-response"] ?? headers["payment-receipt"] ?? headers["Payment-Receipt"]
+    ?? headers["payment-response"] ?? headers["x-payment-response"] ?? headers["payment-receipt"]
   );
   let reference = stringValue(
-    payment?.txHash ?? payment?.tx_hash ?? payment?.transactionHash ?? payment?.reference ?? record.txHash ?? record.tx_hash
+    payment?.txHash ?? payment?.tx_hash ?? payment?.transactionHash ?? payment?.transaction_hash
+    ?? payment?.transaction ?? payment?.reference
+    ?? record.txHash ?? record.tx_hash ?? record.transactionHash ?? record.transaction
   );
   const paidUsd = moneyValue(payment?.price ?? payment?.amount ?? payment?.paidUsd ?? payment?.amountUsd ?? record.paid ?? record.price);
-  if (!payment && !proof && !reference && paidUsd === undefined) {
-    return undefined;
-  }
   // The base64 receipt header carries the settlement facts authoritatively;
   // fill anything the surrounding metadata omitted from it.
   const receipt = proof ? objectValue(parseMaybeJson(decodeBase64(proof) ?? "")) : undefined;
   reference ??= stringValue(receipt?.transaction ?? receipt?.transactionHash ?? receipt?.txHash ?? receipt?.reference);
+  // Price, protocol, or even a bare `payment: {success: true}` object is not
+  // enough for CrowdCode to verify a review. Do not turn it into a confirmed
+  // paid outcome unless a settlement reference was actually supplied.
+  if (!reference) {
+    return undefined;
+  }
   const network = stringValue(payment?.network ?? record.network ?? receipt?.network)?.toLowerCase();
   const protocol = stringValue(payment?.protocol ?? record.protocol ?? record.paymentProtocol)?.toLowerCase();
   const rail: PaymentRail = network === "tempo" || protocol === "mpp" || protocol === "mppx"
@@ -245,6 +275,11 @@ function parsePaymentEvidence(record: Record<string, unknown>, requestedRail: Pa
       ?? receipt?.payTo ?? receipt?.pay_to ?? receipt?.recipient ?? receipt?.payee
     )
   };
+}
+
+function normalizedHeaders(value: unknown): Record<string, unknown> {
+  const headers = objectValue(value) ?? {};
+  return Object.fromEntries(Object.entries(headers).map(([key, child]) => [key.toLowerCase(), child]));
 }
 
 function parseMaybeJson(text: string): unknown {

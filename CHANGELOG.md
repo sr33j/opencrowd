@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Preserve provider finish reasons, reject prematurely closed LLM streams,
+  and make one bounded continuation when generation reaches its output-token
+  limit instead of silently completing with a response cut off mid-word.
+- Do not treat x402/MPP price or protocol metadata as proof of settlement.
+  Paid calls now require a verifiable settlement reference before they become
+  reviewable `paid_success`/`paid_failure` records; missing receipts are
+  recorded conservatively as unknown and are never retried.
+
 ## 0.3.2 — 2026-08-27
 
 Field note 001 fixes (issues 2 and 3):

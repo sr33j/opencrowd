@@ -422,6 +422,7 @@ describe("BlockRun provider", () => {
             function: { name: "get_budget_status", arguments: "{}" }
           }] } }]
         };
+        yield { choices: [{ delta: {}, finish_reason: "tool_calls" }] };
         yield { usage: { prompt_tokens: 9, completion_tokens: 4 } };
       },
       getSpending() {
@@ -844,6 +845,40 @@ describe("x402 proxy provider", () => {
     expect(completion.usage.costCents).toBeCloseTo(0.01, 5);
   });
 
+  it("rejects a stream that ends without a finish reason or DONE marker", async () => {
+    const sse = 'data: {"choices":[{"delta":{"content":"partial ans"}}]}\n';
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async () => new Response(sse, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      })) as typeof fetch
+    });
+
+    await expect(provider.complete({ model: "m", messages: [], tools: [] }))
+      .rejects.toThrow(/terminated.*unexpected EOF/i);
+  });
+
+  it("preserves the provider finish reason from a stream", async () => {
+    const sse = [
+      'data: {"choices":[{"delta":{"content":"partial"}}]}',
+      'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+      "data: [DONE]"
+    ].join("\n") + "\n";
+    const provider = new X402ProxyProvider({
+      baseUrl: "https://proxy.test/v1",
+      privateKey: TEST_KEY,
+      fetchImpl: (async () => new Response(sse, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" }
+      })) as typeof fetch
+    });
+
+    await expect(provider.complete({ model: "m", messages: [], tools: [] }))
+      .resolves.toMatchObject({ content: "partial", finishReason: "length" });
+  });
+
   it("absorbs one flaky payment rejection by re-signing a fresh challenge", async () => {
     const calls: Array<{ paid: boolean }> = [];
     const provider = new X402ProxyProvider({
@@ -1218,6 +1253,56 @@ describe("dependency-injected runtime", () => {
 });
 
 describe("completion gating", () => {
+  it("continues once when the provider stops at its output limit", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
+    const seen: LlmMessage[][] = [];
+    const persisted: LlmMessage[] = [];
+    const provider: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        seen.push(messages.map((message) => ({ ...message })));
+        if (seen.length === 1) {
+          return {
+            content: "The first half ends mid-sen",
+            toolCalls: [{ id: "incomplete", name: "run_shell", arguments: {} }],
+            finishReason: "length"
+          };
+        }
+        expect(messages.at(-2)).toMatchObject({ role: "assistant", content: "The first half ends mid-sen", toolCalls: [] });
+        expect(messages.at(-1)?.content).toContain("Continue exactly where it stopped");
+        return { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "tence." } }] };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "write a long answer", {
+      provider,
+      onMessage: async (message) => { persisted.push(message); }
+    });
+
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("The first half ends mid-sentence.");
+    expect(seen).toHaveLength(2);
+    expect(persisted.some((message) => message.role === "user" && message.content.includes("output limit"))).toBe(true);
+  });
+
+  it("stops explicitly after two consecutive output-limit responses", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
+    let calls = 0;
+    const provider: LlmProvider = {
+      async complete(): Promise<LlmResponse> {
+        calls += 1;
+        return { content: `partial ${calls}`, toolCalls: [], finishReason: "length" };
+      }
+    };
+
+    const result = await runAgentTaskDetailed(session, "write a very long answer", { provider });
+
+    expect(calls).toBe(2);
+    expect(result.outcome).toBe("stopped");
+    expect(String(result.summary.final_message)).toContain("output limit twice");
+  });
+
   it("nudges once, then stops deterministically while the completion gate blocks", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });

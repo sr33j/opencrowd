@@ -7,6 +7,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import { createSession, type SessionState } from "@opencrowd/core";
 import {
+  appendPurchase,
   EconomyGateway,
   GATEWAY_TOOL_NAMES,
   listPurchases,
@@ -100,6 +101,30 @@ describe("purchase lifecycle", () => {
     const purchases = await listPurchases(session);
     expect(purchases[0].record.evidence?.reference).toMatch(/^0xmock/);
     expect(session.spentCents).toBeGreaterThan(0);
+  });
+
+  it("records claimed payment without a settlement receipt as unknown, never paid_success", async () => {
+    const agentcash = new MockAgentCashAdapter({
+      defaultFetchResult: {
+        ok: true,
+        ambiguous: true,
+        ambiguityReason: "missing_receipt",
+        status: 200,
+        data: { transcript: "done" },
+        error: "the service indicated payment but supplied no verifiable settlement receipt"
+      }
+    });
+    const { session, gateway } = await setup({ agentcash });
+    await inspect(gateway);
+
+    const result = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("without a verifiable settlement receipt");
+    expect(result.error).toContain("NOT retried");
+    const purchases = await listPurchases(session);
+    expect(purchases[0].record).toMatchObject({ outcome: "unknown", review_required: false });
+    expect(purchases[0].record.artifact_path).toBeTruthy();
   });
 
   it("prevents payment when CrowdCode is unavailable", async () => {
@@ -353,6 +378,33 @@ describe("approval policy", () => {
 });
 
 describe("required reviews", () => {
+  it("explains legacy paid-success records that have no verifiable receipt", async () => {
+    const { session, gateway } = await setup();
+    await appendPurchase(session, {
+      purchase_id: "pur_legacy",
+      session_id: session.sessionId,
+      created_at: new Date().toISOString(),
+      endpoint: ENDPOINT,
+      method: "POST",
+      rail: "x402-base",
+      quoted_cost_cents: 10,
+      charged_cost_cents: 10,
+      outcome: "paid_success",
+      review_required: false,
+      evidence: { paidUsd: 0.1, rail: "x402-base" }
+    });
+
+    const review = await gateway.execute("review_paid_service", {
+      purchase_id: "pur_legacy",
+      rating: 5,
+      reason: "completed"
+    });
+
+    expect(review.ok).toBe(false);
+    expect(review.error).toContain("recorded as paid_success without a verifiable settlement reference");
+    expect(review.error).toContain("cannot be submitted");
+  });
+
   it("blocks a second purchase until the pending review is submitted, using stored evidence", async () => {
     const { session, gateway, crowdcode } = await setup();
     await inspect(gateway);

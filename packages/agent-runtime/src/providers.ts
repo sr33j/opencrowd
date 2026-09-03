@@ -65,6 +65,8 @@ export interface ProviderCompletion {
   content: string;
   toolCalls: WireToolCall[];
   usage: LlmUsage;
+  /** OpenAI-compatible reason the provider stopped generating. */
+  finishReason?: string;
   /** Milliseconds until the first streamed token, when streaming. */
   firstTokenMs?: number;
 }
@@ -247,6 +249,8 @@ export async function readSseCompletion(
   let content = "";
   let usage: LlmUsage = {};
   let firstTokenMs: number | undefined;
+  let finishReason: string | undefined;
+  let sawDone = false;
   const toolCallsByIndex = new Map<number, { id?: string; name?: string; argumentsText: string }>();
 
   const consumeChunk = (chunk: unknown) => {
@@ -255,6 +259,9 @@ export async function readSseCompletion(
       usage = normalizeUsage(record.usage);
     }
     const choice = Array.isArray(record.choices) ? record.choices[0] as Record<string, unknown> | undefined : undefined;
+    if (typeof choice?.finish_reason === "string") {
+      finishReason = choice.finish_reason;
+    }
     const delta = choice?.delta && typeof choice.delta === "object" ? choice.delta as Record<string, unknown> : undefined;
     if (!delta) {
       return;
@@ -305,6 +312,7 @@ export async function readSseCompletion(
       }
       const payload = line.slice(5).trim();
       if (payload === "[DONE]") {
+        sawDone = true;
         continue;
       }
       try {
@@ -313,6 +321,14 @@ export async function readSseCompletion(
         // Ignore malformed keep-alive fragments.
       }
     }
+  }
+
+  // A clean OpenAI-compatible stream ends with either a final choice carrying
+  // finish_reason or the [DONE] sentinel. Treat a bare EOF as a dropped
+  // connection so the bounded provider rescue ladder handles it instead of
+  // silently accepting a partial answer.
+  if (!sawDone && finishReason === undefined) {
+    throw new Error("LLM stream terminated before a finish reason or [DONE] marker (unexpected EOF)");
   }
 
   const toolCalls = [...toolCallsByIndex.entries()]
@@ -331,7 +347,7 @@ export async function readSseCompletion(
       };
     })
     .filter((toolCall) => toolCall.name !== "");
-  return { content, toolCalls, usage, firstTokenMs };
+  return { content, toolCalls, usage, finishReason, firstTokenMs };
 }
 
 export interface OpenRouterProviderOptions {
@@ -625,7 +641,8 @@ export function parseChatCompletionResponse(body: unknown): ProviderCompletion {
     toolCalls: Array.isArray(message.tool_calls)
       ? message.tool_calls.map(toParsedToolCall).filter((toolCall): toolCall is WireToolCall => toolCall !== null)
       : [],
-    usage: normalizeUsage((body as { usage?: unknown })?.usage)
+    usage: normalizeUsage((body as { usage?: unknown })?.usage),
+    finishReason: stringValue(objectValue(firstChoice)?.finish_reason)
   };
 }
 

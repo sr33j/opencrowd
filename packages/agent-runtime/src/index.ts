@@ -63,6 +63,8 @@ export interface DynamicToolsOption {
 export interface LlmResponse {
   content: string;
   toolCalls: LlmToolCall[];
+  /** OpenAI-compatible reason the provider stopped generating. */
+  finishReason?: string;
 }
 
 export interface LlmProvider {
@@ -416,7 +418,8 @@ export class BudgetedLlmProvider implements LlmProvider {
       const valid = validToolNames(this.options.tools, this.options.extraTools);
       return {
         content: completion.content,
-        toolCalls: completion.toolCalls.filter((toolCall) => valid.has(toolCall.name))
+        toolCalls: completion.toolCalls.filter((toolCall) => valid.has(toolCall.name)),
+        finishReason: completion.finishReason
       };
     } catch (error) {
       await releaseReservation(this.session, reservation);
@@ -503,7 +506,11 @@ function isTransientProviderError(error: unknown): boolean {
   // "rejected a signed payment" is transient by measurement: the proxy's
   // payment validation flakes (~25% observed) and a fresh challenge+signature
   // on the very next attempt succeeds.
-  return /TIMEOUT|timed out|stalled|429|rate limit|HTTP 5\d\d|rejected a signed payment|payment was rejected|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated/i.test(message);
+  return /TIMEOUT|timed out|stalled|429|rate limit|HTTP 5\d\d|rejected a signed payment|payment was rejected|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated|unexpected EOF/i.test(message);
+}
+
+function isOutputLimitFinishReason(reason: string | undefined): boolean {
+  return reason === "length" || reason === "max_tokens" || reason === "max_output_tokens";
 }
 
 function truncateNote(text: string): string {
@@ -717,6 +724,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   const maxTurns = options.maxTurns ?? 100;
   const repeatedFailures = new Map<string, number>();
   let completionNudges = 0;
+  let outputContinuationNudges = 0;
+  let outputContinuationPrefix = "";
   let serviceCallFailures = 0;
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
@@ -758,9 +767,31 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       throw error;
     }
     if (response.content || response.toolCalls.length > 0) {
-      const assistantMessage = assistantMessageFromResponse(response);
+      // Tool calls cut off by the provider's output limit are incomplete and
+      // must never execute. Preserve only the partial prose for continuation.
+      const assistantMessage = assistantMessageFromResponse(isOutputLimitFinishReason(response.finishReason)
+        ? { ...response, toolCalls: [] }
+        : response);
       messages.push(assistantMessage);
       await options.onMessage?.(assistantMessage);
+    }
+    if (isOutputLimitFinishReason(response.finishReason)) {
+      outputContinuationPrefix += response.content;
+      if (outputContinuationNudges >= 1) {
+        const summary = await completeSession(
+          session,
+          `Stopped: the LLM hit its output limit twice. Partial response:\n\n${outputContinuationPrefix}`
+        );
+        return { outcome: "stopped", summary, turns: turn + 1 };
+      }
+      outputContinuationNudges += 1;
+      const nudge: LlmMessage = {
+        role: "user",
+        content: "Your previous response hit the provider output limit. Continue exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
+      };
+      messages.push(nudge);
+      await options.onMessage?.(nudge);
+      continue;
     }
     if (response.toolCalls.length === 0) {
       const blocker = await options.completionGate?.();
@@ -775,7 +806,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         await options.onMessage?.(nudge);
         continue;
       }
-      const summary = await completeSession(session, response.content || "Session completed.");
+      const summary = await completeSession(session, outputContinuationPrefix + (response.content || "Session completed."));
       return { outcome: "completed", summary, turns: turn + 1 };
     }
     // Launch every spawn_subagent in this reply immediately (bounded
@@ -819,6 +850,12 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         data: { tool: call.name, arguments: call.arguments }
       });
       const budgetBeforeToolCall = budgetStatus(session);
+      const callArguments = call.name === "complete_session" && outputContinuationPrefix
+        ? {
+          ...call.arguments,
+          final_message: outputContinuationPrefix + (typeof call.arguments.final_message === "string" ? call.arguments.final_message : "")
+        }
+        : call.arguments;
       let result: ToolResult;
       if (call.name === "spawn_subagent") {
         result = options.subagent
@@ -843,9 +880,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           };
         }
       } else if (TOOL_NAMES.includes(call.name as ToolName)) {
-        result = await toolExecutor(call.name as ToolName, call.arguments, { session, onProgress: options.onProgress });
+        result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress });
       } else if (options.dynamicTools) {
-        result = await options.dynamicTools.execute(call.name, call.arguments);
+        result = await options.dynamicTools.execute(call.name, callArguments);
       } else {
         result = { ok: false, error: `unknown tool: ${call.name}` };
       }
@@ -901,13 +938,16 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         }
         const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
         if (result.ok && result.data && typeof result.data === "object") {
-          const summary = result.data as Record<string, unknown>;
+          const summary = { ...result.data } as Record<string, unknown>;
           if (backgroundResults) {
             summary.background_subagents = backgroundResults;
           }
           return { outcome: "completed", summary, turns: turn + 1 };
         }
-        const summary = await completeSession(session, response.content || result.error || "Session completed.");
+        const summary = await completeSession(
+          session,
+          outputContinuationPrefix + (response.content || result.error || "Session completed.")
+        );
         if (backgroundResults) {
           summary.background_subagents = backgroundResults;
         }
@@ -1008,6 +1048,8 @@ async function runSubagentTask(
   }
 
   const repeatedFailures = new Map<string, number>();
+  let outputContinuationNudges = 0;
+  let outputContinuationPrefix = "";
   const artifactsWritten: string[] = [];
   const finish = async (outcome: SubagentCompletion["outcome"], finalMessage: string, turns: number): Promise<ToolResult> => {
     const completion: SubagentCompletion = {
@@ -1037,19 +1079,35 @@ async function runSubagentTask(
         throw error;
       }
       if (response.content || response.toolCalls.length > 0) {
-        const assistantMessage = assistantMessageFromResponse(response);
+        const assistantMessage = assistantMessageFromResponse(isOutputLimitFinishReason(response.finishReason)
+          ? { ...response, toolCalls: [] }
+          : response);
         messages.push(assistantMessage);
         await record(assistantMessage);
       }
+      if (isOutputLimitFinishReason(response.finishReason)) {
+        outputContinuationPrefix += response.content;
+        if (outputContinuationNudges >= 1) {
+          return finish("stopped", `Subagent stopped: the LLM hit its output limit twice. Partial response:\n\n${outputContinuationPrefix}`, turn + 1);
+        }
+        outputContinuationNudges += 1;
+        const nudge: LlmMessage = {
+          role: "user",
+          content: "Your previous response hit the provider output limit. Continue exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
+        };
+        messages.push(nudge);
+        await record(nudge);
+        continue;
+      }
       if (response.toolCalls.length === 0) {
-        return finish("completed", response.content || "Subagent finished.", turn + 1);
+        return finish("completed", outputContinuationPrefix + (response.content || "Subagent finished."), turn + 1);
       }
       for (const call of response.toolCalls) {
         if (call.name === "complete_session") {
           const finalMessage = typeof call.arguments.final_message === "string" && call.arguments.final_message
             ? call.arguments.final_message
             : response.content || "Subagent finished.";
-          return finish("completed", finalMessage, turn + 1);
+          return finish("completed", outputContinuationPrefix + finalMessage, turn + 1);
         }
         forwardProgress({
           type: "calling_tool",
