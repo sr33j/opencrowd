@@ -64,6 +64,11 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
   switch (command) {
+    case "worker": {
+      const { workerCommand } = await import("./worker.js");
+      await workerCommand(rest);
+      return;
+    }
     case "run":
       await runCommand(rest);
       return;
@@ -466,7 +471,9 @@ function printValue(label: string, value: unknown, options: { pretty?: string; j
 
 main(process.argv.slice(2))
   .catch((error) => {
-    console.error(error instanceof Error ? error.message : String(error));
+    if (process.argv[2] === "worker") {
+      console.error(JSON.stringify({ level: "error", code: "worker_failure", message: "Worker protocol or configuration failed" }));
+    } else console.error(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   })
   .finally(() => closeSharedEconomyRuntime().catch(() => undefined));

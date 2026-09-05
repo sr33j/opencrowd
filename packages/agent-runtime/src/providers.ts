@@ -52,6 +52,7 @@ export interface WireToolDefinition {
 }
 
 export interface CompletionRequest {
+  signal?: AbortSignal;
   model: string;
   messages: WireMessage[];
   tools: WireToolDefinition[];
@@ -180,6 +181,7 @@ export class VeniceProvider implements TypedLlmProvider {
       const started = Date.now();
       try {
         response = await client.requestRaw("/api/v1/chat/completions", {
+          signal: request.signal,
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(body)
@@ -407,7 +409,7 @@ export class OpenRouterProvider implements TypedLlmProvider {
         "content-type": "application/json"
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(timeout)
+      signal: request.signal ? AbortSignal.any([request.signal, AbortSignal.timeout(timeout)]) : AbortSignal.timeout(timeout)
     });
     const parsed = await response.json().catch(() => undefined);
     if (!response.ok) {

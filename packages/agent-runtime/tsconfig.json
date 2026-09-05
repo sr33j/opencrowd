@@ -5,6 +5,15 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "references": [{ "path": "../core" }],
-  "include": ["src/**/*.ts"]
+  "references": [
+    {
+      "path": "../core"
+    },
+    {
+      "path": "../protocol"
+    }
+  ],
+  "include": [
+    "src/**/*.ts"
+  ]
 }

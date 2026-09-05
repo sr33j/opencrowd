@@ -13,6 +13,7 @@ export interface ShellResult {
 }
 
 export interface ShellOptions {
+  signal?: AbortSignal;
   maxTimeoutMs?: number;
   outputCapBytes?: number;
   env?: NodeJS.ProcessEnv;
@@ -28,6 +29,7 @@ export async function runShell(
   if (!state.shellEnabled) {
     throw new Error("shell tool is disabled for this session");
   }
+  options.signal?.throwIfAborted();
   const maxTimeout = options.maxTimeoutMs ?? 30_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout) {
     throw new Error(`timeout_ms must be between 1 and ${maxTimeout}`);
@@ -37,7 +39,7 @@ export async function runShell(
   if (resolvedCwd !== root && !resolvedCwd.startsWith(`${root}/`)) {
     throw new Error("shell cwd must stay inside the workspace");
   }
-  const result = await execute(command, resolvedCwd, timeoutMs, options.outputCapBytes ?? 64_000, options.env);
+  const result = await execute(command, resolvedCwd, timeoutMs, options.outputCapBytes ?? 64_000, options.env, options.signal);
   await appendLedgerEntry(state.ledgerPath, {
     session_id: state.sessionId,
     type: "shell",
@@ -53,7 +55,8 @@ function execute(
   cwd: string,
   timeoutMs: number,
   outputCapBytes: number,
-  env: NodeJS.ProcessEnv = minimalEnv()
+  env: NodeJS.ProcessEnv = minimalEnv(),
+  signal?: AbortSignal
 ): Promise<ShellResult> {
   return new Promise((resolvePromise) => {
     let stdout = "";
@@ -70,6 +73,7 @@ function execute(
         return;
       }
       settled = true;
+      signal?.removeEventListener("abort", abort);
       if (timer) {
         clearTimeout(timer);
       }
@@ -89,6 +93,12 @@ function execute(
       detached,
       stdio: ["ignore", "pipe", "pipe"]
     });
+    const abort = () => {
+      signalProcessGroup(child, detached, "SIGKILL");
+      settle({ command, cwd, exit_code: null, timed_out: false, stdout, stderr });
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
     timer = setTimeout(() => {
       timedOut = true;
       signalProcessGroup(child, detached, "SIGTERM");

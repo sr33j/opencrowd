@@ -18,6 +18,7 @@ import {
   type DynamicToolDefinition,
   type LlmMessage,
   type LlmProvider,
+  type LoopCheckpoint,
   type SubagentOptions,
   type ToolExecutor,
   type TypedLlmRuntime
@@ -79,6 +80,11 @@ export interface OpenCrowdRuntimeOptions {
 }
 
 export interface RuntimeRunOptions {
+  signal?: AbortSignal;
+  runId?: string;
+  resume?: LoopCheckpoint;
+  onCheckpoint?: (checkpoint: LoopCheckpoint) => Promise<void>;
+  hosted?: boolean;
   maxTurns?: number;
   compactOutput?: boolean;
   onProgress?: (event: ProgressEvent) => void;
@@ -102,6 +108,11 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
       ?? (llm.kind === "typed" ? fallbackContextWindowTokens(llm.main.model) : fallbackContextWindowTokens(undefined));
     const history = await storage.history(session, contextWindowTokens, runOptions.onProgress);
     return {
+      signal: runOptions.signal,
+      runId: runOptions.runId,
+      resume: runOptions.resume,
+      onCheckpoint: runOptions.onCheckpoint,
+      hosted: runOptions.hosted,
       maxTurns: runOptions.maxTurns,
       compactOutput: runOptions.compactOutput,
       contextWindowTokens,

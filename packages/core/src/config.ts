@@ -1,6 +1,6 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
+import { atomicWrite, resolveAgentPaths, type AgentPaths } from "./paths.js";
 import type { ApprovalMode } from "./types.js";
 
 export interface McpServerConfig {
@@ -68,20 +68,17 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   approval: "ask"
 };
 
-export function configDir(): string {
-  if (process.env.OPENCROWD_CONFIG_DIR) {
-    return process.env.OPENCROWD_CONFIG_DIR;
-  }
-  return join(homedir(), ".config", "opencrowd");
+export function configDir(paths?: AgentPaths): string {
+  return (paths ?? resolveAgentPaths()).config;
 }
 
-export function configPath(): string {
-  return join(configDir(), "config.json");
+export function configPath(paths?: AgentPaths): string {
+  return join(configDir(paths), "config.json");
 }
 
-export async function loadConfig(): Promise<OpenCrowdConfig> {
+export async function loadConfig(paths?: AgentPaths): Promise<OpenCrowdConfig> {
   try {
-    const text = await readFile(configPath(), "utf8");
+    const text = await readFile(configPath(paths), "utf8");
     return normalizeConfig(JSON.parse(text));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -91,9 +88,9 @@ export async function loadConfig(): Promise<OpenCrowdConfig> {
   }
 }
 
-export async function saveConfig(config: OpenCrowdConfig): Promise<void> {
-  await mkdir(dirname(configPath()), { recursive: true });
-  await writeFile(configPath(), `${JSON.stringify(config, null, 2)}\n`, "utf8");
+export async function saveConfig(config: OpenCrowdConfig, paths?: AgentPaths): Promise<void> {
+  await mkdir(dirname(configPath(paths)), { recursive: true });
+  await atomicWrite(configPath(paths), `${JSON.stringify(config, null, 2)}\n`);
 }
 
 export async function updateConfig(patch: Partial<OpenCrowdConfig>): Promise<OpenCrowdConfig> {

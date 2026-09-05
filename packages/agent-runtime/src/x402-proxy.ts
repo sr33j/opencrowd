@@ -174,7 +174,7 @@ export class X402ProxyProvider implements TypedLlmProvider {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
-      signal: liveness.controller.signal
+      signal: request.signal ? AbortSignal.any([request.signal, liveness.controller.signal]) : liveness.controller.signal
     };
 
     try {

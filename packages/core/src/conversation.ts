@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { SessionState } from "./types.js";
+import { atomicWrite } from "./paths.js";
 
 export interface ConversationToolCall {
   id: string;
@@ -50,7 +51,7 @@ export async function appendConversationEntry(session: SessionState, entry: Conv
   await appendFile(path, `${JSON.stringify(entry)}\n`, "utf8");
 }
 
-export async function readConversationEntries(session: SessionState): Promise<ConversationEntry[]> {
+export async function readConversationEntries(session: SessionState, onRecovery?: () => void): Promise<ConversationEntry[]> {
   let text: string;
   try {
     text = await readFile(conversationPath(session), "utf8");
@@ -60,9 +61,20 @@ export async function readConversationEntries(session: SessionState): Promise<Co
     }
     throw error;
   }
-  return text.split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as ConversationEntry);
+  const lines = text.split(/\r?\n/);
+  const entries: ConversationEntry[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!lines[index]) continue;
+    try { entries.push(JSON.parse(lines[index]) as ConversationEntry); }
+    catch (error) {
+      if (index !== lines.length - 1 || text.endsWith("\n")) throw error;
+      // Only a partial, non-newline-terminated final record is recoverable.
+      await atomicWrite(conversationPath(session), lines.slice(0, index).join("\n") + (index ? "\n" : ""));
+      if (onRecovery) onRecovery();
+      else process.emitWarning("Recovered a partial trailing conversation record", { code: "OPENCROWD_JOURNAL_RECOVERY" });
+    }
+  }
+  return entries;
 }
 
 export async function readConversationMessages(session: SessionState): Promise<ConversationMessage[]> {

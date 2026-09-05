@@ -1,7 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { dirname, join, relative } from "node:path";
 import type { ArtifactRecord, SessionState } from "./types.js";
 import { appendLedgerEntry } from "./ledger.js";
+import { atomicWrite, containedPath } from "./paths.js";
 
 export async function saveArtifact(
   state: SessionState,
@@ -9,9 +10,9 @@ export async function saveArtifact(
   content: string,
   metadata?: Record<string, unknown>
 ): Promise<ArtifactRecord> {
-  const target = safeArtifactPath(state, path);
+  const target = await safeArtifactPath(state, path);
   await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, content, "utf8");
+  await atomicWrite(target, content);
   const rel = relative(state.sessionDir, target);
   await appendLedgerEntry(state.ledgerPath, {
     session_id: state.sessionId,
@@ -25,12 +26,12 @@ export async function saveArtifact(
 }
 
 export async function readArtifact(state: SessionState, path: string): Promise<string> {
-  return readFile(safeArtifactPath(state, path), "utf8");
+  return readFile(await safeArtifactPath(state, path), "utf8");
 }
 
 export async function listArtifacts(state: SessionState, prefix = ""): Promise<string[]> {
   const { readdir } = await import("node:fs/promises");
-  const start = safeArtifactPath(state, prefix || ".");
+  const start = await safeArtifactPath(state, prefix || ".");
   const files: string[] = [];
   await walk(start, files, state.artifactsDir);
   return files.sort();
@@ -46,12 +47,9 @@ export async function listArtifacts(state: SessionState, prefix = ""): Promise<s
   }
 }
 
-function safeArtifactPath(state: SessionState, requestedPath: string): string {
+function safeArtifactPath(state: SessionState, requestedPath: string): Promise<string> {
   const normalizedRequest = requestedPath.replace(/^artifacts\//, "");
-  const target = resolve(state.artifactsDir, normalizedRequest);
-  const root = resolve(state.artifactsDir);
-  if (target !== root && !target.startsWith(`${root}/`)) {
-    throw new Error("artifact path must stay inside the session artifacts directory");
-  }
-  return target;
+  return containedPath(state.artifactsDir, normalizedRequest).catch((error: Error) => {
+    throw new Error(`artifact path: ${error.message}`);
+  });
 }
