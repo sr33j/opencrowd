@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_bad11","seq":11,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.heartbeat","payload":{}}
+{"protocolVersion":1,"id":"evt_bad12","seq":12,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.start","runId":"run_0001","payload":{}}

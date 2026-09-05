@@ -1,0 +1,4 @@
+{"protocolVersion":1,"id":"evt_bad2","emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.ready","payload":{"protocolVersion":1,"runtimeVersion":"0.1.0"}}
+{"protocolVersion":1,"id":"evt_bad3","seq":1.5,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.ready","payload":{"protocolVersion":1,"runtimeVersion":"0.1.0"}}
+{"protocolVersion":1,"id":"evt_bad4","seq":4,"emittedAt":"2026-09-05T12:00:00.000Z","type":"command.accepted","payload":{"commandType":"run.start","duplicate":false}}
+{"protocolVersion":1,"id":"evt_bad5","seq":5,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.finished","payload":{"sessionId":"sess_0001","outcome":"completed"}}

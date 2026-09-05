@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"cmd_0008","seq":8,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.shutdown","payload":{"reason":"machine stopping","gracePeriodMs":10000}}
+{"protocolVersion":1,"id":"cmd_0009","seq":9,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.shutdown","payload":{}}

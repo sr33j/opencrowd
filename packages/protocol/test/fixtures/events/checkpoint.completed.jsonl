@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_0020","seq":20,"emittedAt":"2026-09-05T12:00:00.000Z","type":"checkpoint.completed","runId":"run_0001","payload":{"checkpointId":"ckpt_0001","sessionId":"sess_0001","reason":"waiting","pendingOperationIds":["op_0001"]}}
+{"protocolVersion":1,"id":"evt_0021","seq":21,"emittedAt":"2026-09-05T12:00:00.000Z","type":"checkpoint.completed","commandId":"cmd_0008","runId":"run_0001","payload":{"checkpointId":"ckpt_0002","sessionId":"sess_0001","reason":"shutdown","pendingOperationIds":[]}}

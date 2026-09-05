@@ -1,0 +1,1 @@
+{"protocolVersion":1,"id":"evt_0018","seq":18,"emittedAt":"2026-09-05T12:00:00.000Z","type":"delegation.required","runId":"run_0001","payload":{"operationId":"op_0003","reason":"expired","requiredAmount":"250000","message":"spend delegation expired; renew to continue"}}

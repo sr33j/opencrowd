@@ -1,0 +1,4 @@
+{"protocolVersion":1,"id":"cmd_0003","seq":3,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"approval_granted","operationId":"op_0001","checkpointId":"ckpt_0001"}}
+{"protocolVersion":1,"id":"cmd_0004","seq":4,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"funds_available"}}
+{"protocolVersion":1,"id":"cmd_0005","seq":5,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"delegation_renewed","operationId":"op_0002"}}
+{"protocolVersion":1,"id":"cmd_0006","seq":6,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"payment_reconciled","operationId":"op_0003"}}

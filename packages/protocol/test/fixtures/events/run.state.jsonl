@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_0007","seq":7,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.state","commandId":"cmd_0001","runId":"run_0001","payload":{"sessionId":"sess_0001","state":"running","turn":1}}
+{"protocolVersion":1,"id":"evt_0008","seq":8,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.state","runId":"run_0001","payload":{"sessionId":"sess_0001","state":"waiting_for_approval","operationId":"op_0001","turn":3}}

@@ -1,0 +1,1 @@
+{"protocolVersion":1,"id":"evt_0017","seq":17,"emittedAt":"2026-09-05T12:00:00.000Z","type":"funding.required","runId":"run_0001","payload":{"operationId":"op_0002","required":"250000","available":"100000","shortfall":"150000","walletAddress":"0x1111111111111111111111111111111111111111","message":"top up at least 0.15 USDC to continue"}}

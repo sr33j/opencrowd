@@ -1,0 +1,1 @@
+{"protocolVersion":1,"id":"evt_0015","seq":15,"emittedAt":"2026-09-05T12:00:00.000Z","type":"usage.updated","runId":"run_0001","payload":{"sessionId":"sess_0001","limit":"5000000","spent":"12500","reserved":"1000000","remaining":"3987500","llmSpent":"11000","serviceSpent":"1500","inputTokens":18234,"outputTokens":912,"turn":3}}

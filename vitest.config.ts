@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
+      "@opencrowd/protocol": resolve(__dirname, "packages/protocol/src/index.ts"),
       "@opencrowd/core": resolve(__dirname, "packages/core/src/index.ts"),
       "@opencrowd/economy": resolve(__dirname, "packages/economy/src/index.ts"),
       "@opencrowd/agent-runtime": resolve(__dirname, "packages/agent-runtime/src/index.ts")

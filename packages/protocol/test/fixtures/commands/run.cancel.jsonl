@@ -1,0 +1,1 @@
+{"protocolVersion":1,"id":"cmd_0007","seq":7,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.cancel","runId":"run_0001","payload":{"reason":"user pressed stop"}}

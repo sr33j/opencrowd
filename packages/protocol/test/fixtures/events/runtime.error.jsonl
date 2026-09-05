@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_0026","seq":26,"emittedAt":"2026-09-05T12:00:00.000Z","type":"runtime.error","runId":"run_0001","payload":{"code":"checkpoint_write_failed","message":"ENOSPC writing /data/checkpoints","fatal":true,"details":{"path":"/data/checkpoints/ckpt_0005.json"}}}
+{"protocolVersion":1,"id":"evt_0027","seq":27,"emittedAt":"2026-09-05T12:00:00.000Z","type":"runtime.error","payload":{"code":"config_corrupt","message":"agent home config is not valid JSON","fatal":true}}

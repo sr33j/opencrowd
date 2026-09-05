@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 const ROOT = join(__dirname, "..");
 const SOURCE_DIRS = [
+  "packages/protocol/src",
   "packages/core/src",
   "packages/economy/src",
   "packages/agent-runtime/src",
