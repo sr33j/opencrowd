@@ -209,7 +209,9 @@ export class MachineWorker {
         },
         toolExecutor: async (name, args, context) => {
           const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
-          const id = call?.id ?? randomUUID();
+          // Providers may reuse tool IDs on later turns. Results are scoped to
+          // their checkpoint turn so a later call cannot replay an old result.
+          const id = `${run.checkpoint?.turn ?? 0}:${call?.id ?? randomUUID()}`;
           const digest = createHash("sha256").update(JSON.stringify({ name, args })).digest("hex");
           const saved = run.tools[id];
           if (saved && saved.digest !== digest) throw new Error("tool request digest mismatch");

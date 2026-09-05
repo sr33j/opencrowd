@@ -34,6 +34,7 @@ export * from "./blockrun.js";
 export * from "./llm-runtime.js";
 export * from "./runtime.js";
 export * from "./worker.js";
+export * from "./hosted-provider.js";
 export * from "./x402-proxy.js";
 
 export interface LlmMessage {
