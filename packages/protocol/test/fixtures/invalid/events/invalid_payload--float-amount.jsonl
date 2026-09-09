@@ -1,0 +1,3 @@
+{"protocolVersion":1,"id":"evt_bad6","seq":6,"emittedAt":"2026-09-05T12:00:00.000Z","type":"usage.updated","runId":"run_0001","payload":{"sessionId":"sess_0001","limit":"5000000","spent":0.0125,"reserved":"0","remaining":"4987500"}}
+{"protocolVersion":1,"id":"evt_bad7","seq":7,"emittedAt":"2026-09-05T12:00:00.000Z","type":"funding.required","runId":"run_0001","payload":{"operationId":"op_0002","required":"0.25","available":"0","shortfall":"0.25"}}
+{"protocolVersion":1,"id":"evt_bad8","seq":8,"emittedAt":"2026-09-05T12:00:00.000Z","type":"tool.finished","runId":"run_0001","payload":{"toolCallId":"call_0001","toolName":"web_fetch","status":"ok","cost":0.0015}}

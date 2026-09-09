@@ -1,0 +1,3 @@
+{"protocolVersion":1,"id":"cmd_bad15","seq":15,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"approval_granted","prompt":"Find three vendors for 100 custom mugs and compare prices."}}
+{"protocolVersion":1,"id":"cmd_bad16","seq":16,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"approval_granted","messages":[{"role":"user","content":"again"}]}}
+{"protocolVersion":1,"id":"cmd_bad17","seq":17,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.resume","runId":"run_0001","payload":{"sessionId":"sess_0001","cause":"user_retried"}}

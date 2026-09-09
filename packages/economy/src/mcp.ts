@@ -40,7 +40,7 @@ export class McpConnection {
     return this.instructionsText;
   }
 
-  async call(tool: string, args: Record<string, unknown>): Promise<McpCallResult> {
+  async call(tool: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<McpCallResult> {
     let client: Client;
     try {
       client = await this.connect();
@@ -48,7 +48,7 @@ export class McpConnection {
       return { ok: false, error: `${this.name} is unavailable: ${(error as Error).message}` };
     }
     try {
-      const result = await client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS });
+      const result = await client.callTool({ name: tool, arguments: args }, undefined, { timeout: CALL_TIMEOUT_MS, signal });
       const body = parseToolContent(result.content);
       if (result.isError) {
         return { ok: false, error: typeof body === "string" ? body : JSON.stringify(body) };

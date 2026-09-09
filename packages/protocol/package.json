@@ -1,0 +1,40 @@
+{
+  "name": "@opencrowd/protocol",
+  "version": "0.1.0",
+  "description": "OpenCrowd protocol: versioned, runtime-validated JSONL command/event envelopes for machine (worker) mode",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sr33j/opencrowd.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/sr33j/opencrowd#readme",
+  "bugs": {
+    "url": "https://github.com/sr33j/opencrowd/issues"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

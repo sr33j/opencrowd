@@ -33,6 +33,8 @@ export * from "./providers.js";
 export * from "./blockrun.js";
 export * from "./llm-runtime.js";
 export * from "./runtime.js";
+export * from "./worker.js";
+export * from "./hosted-provider.js";
 export * from "./x402-proxy.js";
 
 export interface LlmMessage {
@@ -68,7 +70,7 @@ export interface LlmResponse {
 }
 
 export interface LlmProvider {
-  complete(messages: LlmMessage[]): Promise<LlmResponse>;
+  complete(messages: LlmMessage[], context?: { signal?: AbortSignal; operationId?: string }): Promise<LlmResponse>;
 }
 
 export type ToolExecutor = (
@@ -335,7 +337,8 @@ export class BudgetedLlmProvider implements LlmProvider {
     private readonly options: BudgetedLlmOptions
   ) {}
 
-  async complete(messages: LlmMessage[]): Promise<LlmResponse> {
+  async complete(messages: LlmMessage[], context?: { signal?: AbortSignal }): Promise<LlmResponse> {
+    context?.signal?.throwIfAborted();
     const definitions = wireToolDefinitions(this.options.tools, this.options.extraTools);
     const reservation = await reserveBudget(this.session, this.options.maxCostCentsPerCall);
     const started = Date.now();
@@ -352,13 +355,15 @@ export class BudgetedLlmProvider implements LlmProvider {
       messages,
       tools: definitions,
       promptCacheKey: this.options.promptCacheKey,
-      onTextDelta: this.options.onTextDelta
+      onTextDelta: this.options.onTextDelta,
+      signal: context?.signal
     });
     try {
       let completion: ProviderCompletion;
       try {
         completion = await attempt();
       } catch (error) {
+        context?.signal?.throwIfAborted();
         if (error instanceof InsufficientCreditError && used.provider.topUpCredit) {
           // Exhausted prepaid credit: exactly one bounded top-up, one retry.
           await this.performBoundedTopUp(error, used.provider);
@@ -591,7 +596,25 @@ export interface TypedLlmRuntime {
   confirmProviderAction?: (request: ProviderActionRequest) => Promise<boolean>;
 }
 
+export interface LoopCheckpoint {
+  messages: LlmMessage[];
+  turn: number;
+  response?: LlmResponse;
+  completedTools: Record<string, ToolResult>;
+  completionNudges: number;
+  outputContinuationNudges: number;
+  outputContinuationPrefix: string;
+  serviceCallFailures: number;
+  repeatedFailures: Array<[string, number]>;
+}
+
 export interface AgentRunOptions {
+  signal?: AbortSignal;
+  runId?: string;
+  resume?: LoopCheckpoint;
+  onCheckpoint?: (checkpoint: LoopCheckpoint) => Promise<void>;
+  /** Durable hosted gateway failures must escape the loop, never be parsed/retried. */
+  hosted?: boolean;
   /** Scripted/mock provider (tests, demo). Exactly one of provider/llm is required. */
   provider?: LlmProvider;
   /** Typed provider runtime; the loop wraps it with local budget accounting. */
@@ -648,7 +671,7 @@ interface BackgroundSubagent {
   result?: ToolResult;
 }
 
-export type AgentTaskOutcome = "completed" | "stopped" | "max_turns";
+export type AgentTaskOutcome = "completed" | "stopped" | "max_turns" | "budget_exhausted";
 
 export interface AgentTaskResult {
   outcome: AgentTaskOutcome;
@@ -714,19 +737,24 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       "For web research: first buy one paid web search here in the main loop, then fan the returned URLs out to parallel subagents in a single reply. Never send a subagent off to guess URLs with curl."
     );
   }
-  const messages: LlmMessage[] = [
+  const messages: LlmMessage[] = options.resume?.messages ?? [
     { role: "system", content: systemPromptParts.join(" ") },
     ...(options.history ?? []),
     { role: "user", content: task }
   ];
-  await options.onMessage?.({ role: "user", content: task });
+  if (!options.resume) await options.onMessage?.({ role: "user", content: task });
 
   const maxTurns = options.maxTurns ?? 100;
-  const repeatedFailures = new Map<string, number>();
-  let completionNudges = 0;
-  let outputContinuationNudges = 0;
-  let outputContinuationPrefix = "";
-  let serviceCallFailures = 0;
+  const repeatedFailures = new Map<string, number>(options.resume?.repeatedFailures);
+  let completionNudges = options.resume?.completionNudges ?? 0;
+  let outputContinuationNudges = options.resume?.outputContinuationNudges ?? 0;
+  let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
+  let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
+  const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
+    await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools,
+      completionNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
+      repeatedFailures: [...repeatedFailures.entries()] }));
+  };
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
   const subagentLimiter = createLimiter(options.subagent?.maxParallel ?? 4);
@@ -741,7 +769,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         : { outcome: "error", error: entry.result?.error })
     }));
   };
-  for (let turn = 0; turn < maxTurns; turn += 1) {
+  for (let turn = options.resume?.turn ?? 0; turn < maxTurns; turn += 1) {
+    options.signal?.throwIfAborted();
+    const restored = turn === options.resume?.turn ? options.resume : undefined;
+    const completedTools: Record<string, ToolResult> = Object.assign(Object.create(null), restored?.completedTools ?? {});
+    if (!restored?.response) await checkpoint(turn);
     if (options.contextWindowTokens) {
       const compacted = compactMessagesInPlace(messages, options.contextWindowTokens);
       if (compacted) {
@@ -754,19 +786,20 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     let response: LlmResponse;
     try {
-      response = provider instanceof MockLlmProvider
+      response = restored?.response ?? (provider instanceof MockLlmProvider
         ? await completeMockLlmCall(session, provider, messages, turn + 1)
-        : await provider.complete(messages);
+        : await provider.complete(messages, { signal: options.signal, operationId: `${options.runId ?? session.sessionId}:llm:${turn}` }));
+      options.signal?.throwIfAborted();
     } catch (error) {
       if (error instanceof BudgetExhaustedError) {
         // Budget exhaustion is a deterministic stop, not a fault: finish
         // with what the session accomplished so far.
         const summary = await completeSession(session, `Stopped: the session budget is exhausted (${error.message}).`);
-        return { outcome: "stopped", summary, turns: turn + 1 };
+        return { outcome: options.hosted ? "budget_exhausted" : "stopped", summary, turns: turn + 1 };
       }
       throw error;
     }
-    if (response.content || response.toolCalls.length > 0) {
+    if (!restored?.response && (response.content || response.toolCalls.length > 0)) {
       // Tool calls cut off by the provider's output limit are incomplete and
       // must never execute. Preserve only the partial prose for continuation.
       const assistantMessage = assistantMessageFromResponse(isOutputLimitFinishReason(response.finishReason)
@@ -775,6 +808,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       messages.push(assistantMessage);
       await options.onMessage?.(assistantMessage);
     }
+    await checkpoint(turn, response, completedTools);
     if (isOutputLimitFinishReason(response.finishReason)) {
       outputContinuationPrefix += response.content;
       if (outputContinuationNudges >= 1) {
@@ -844,6 +878,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       }
     }
     for (const call of response.toolCalls) {
+      options.signal?.throwIfAborted();
       options.onProgress?.({
         type: "calling_tool",
         message: `Tool call: ${summarizeToolCall(call)}`,
@@ -857,7 +892,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         }
         : call.arguments;
       let result: ToolResult;
-      if (call.name === "spawn_subagent") {
+      if (completedTools[call.id]) {
+        result = completedTools[call.id];
+      } else if (call.name === "spawn_subagent") {
         result = options.subagent
           ? await (spawnedThisTurn.get(call.id) ?? Promise.resolve({ ok: false, error: "subagent launch failed" }))
           : { ok: false, error: "subagents are not enabled for this session" };
@@ -880,7 +917,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           };
         }
       } else if (TOOL_NAMES.includes(call.name as ToolName)) {
-        result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress });
+        result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress, signal: options.signal });
       } else if (options.dynamicTools) {
         result = await options.dynamicTools.execute(call.name, callArguments);
       } else {
@@ -901,8 +938,12 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           budget_after_tool_call: budgetAfterToolCall
         }))
       } as LlmMessage;
-      messages.push(toolMessage);
-      await options.onMessage?.(toolMessage);
+      if (!completedTools[call.id]) {
+        messages.push(toolMessage);
+        completedTools[call.id] = result;
+        await checkpoint(turn, response, completedTools);
+        await options.onMessage?.(toolMessage);
+      }
       if (!result.ok) {
         if (call.name === "call_paid_service") {
           serviceCallFailures += 1;
@@ -1066,12 +1107,13 @@ async function runSubagentTask(
 
   try {
     for (let turn = 0; turn < maxTurns; turn += 1) {
+      parentOptions.signal?.throwIfAborted();
       forwardProgress({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
       let response: LlmResponse;
       try {
         response = provider instanceof MockLlmProvider
           ? await completeMockLlmCall(session, provider, messages, turn + 1)
-          : await provider.complete(messages);
+          : await provider.complete(messages, { signal: parentOptions.signal });
       } catch (error) {
         if (error instanceof BudgetExhaustedError) {
           return finish("stopped", "Subagent stopped: the shared session budget is exhausted.", turn + 1);
@@ -1124,7 +1166,7 @@ async function runSubagentTask(
           artifactsWritten.push(path);
         }
         const result = SUBAGENT_TOOL_NAMES.includes(call.name as ToolName)
-          ? await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: forwardProgress })
+          ? await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: forwardProgress, signal: parentOptions.signal })
           : { ok: false, error: `${call.name} is not available to subagents; local tools only` };
         forwardProgress({
           type: "tool_result",

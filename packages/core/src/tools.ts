@@ -6,6 +6,7 @@ import type { ToolName } from "./tool-definitions.js";
 import type { ProgressEvent, SessionState, ToolResult } from "./types.js";
 
 export interface ToolContext {
+  signal?: AbortSignal;
   session: SessionState;
   onProgress?: (event: ProgressEvent) => void;
 }
@@ -13,6 +14,7 @@ export interface ToolContext {
 /** Execute one built-in local tool. Paid tools live in the economy gateway. */
 export async function executeTool(name: ToolName, args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
   try {
+    context.signal?.throwIfAborted();
     switch (name) {
       case "get_budget_status":
         return ok(budgetStatus(context.session));
@@ -28,7 +30,8 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
           context.session,
           requiredString(args.command, "command"),
           optionalString(args.cwd, "cwd") ?? context.session.workspaceRoot,
-          optionalInteger(args.timeout_ms, "timeout_ms") ?? 10_000
+          optionalInteger(args.timeout_ms, "timeout_ms") ?? 10_000,
+          { signal: context.signal }
         ));
       case "spawn_subagent":
       case "check_subagents":
@@ -40,6 +43,7 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         return ok(await completeSession(context.session, requiredString(args.final_message, "final_message")));
     }
   } catch (error) {
+    context.signal?.throwIfAborted();
     return { ok: false, error: (error as Error).message };
   }
 }

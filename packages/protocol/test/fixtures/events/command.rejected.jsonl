@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_0005","seq":5,"emittedAt":"2026-09-05T12:00:00.000Z","type":"command.rejected","commandId":"cmd_0002","payload":{"commandType":"run.start","reason":"run_active","message":"run run_0001 is still active"}}
+{"protocolVersion":1,"id":"evt_0006","seq":6,"emittedAt":"2026-09-05T12:00:00.000Z","type":"command.rejected","payload":{"reason":"invalid_command","message":"command line is not valid JSON","issues":[{"path":"","message":"Unexpected end of JSON input"}]}}

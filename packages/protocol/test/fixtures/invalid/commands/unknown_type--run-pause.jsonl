@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"cmd_bad18","seq":18,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.pause","runId":"run_0001","payload":{}}
+{"protocolVersion":1,"id":"cmd_bad19","seq":19,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.ready","payload":{}}

@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_bad9","seq":9,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.finished","runId":"run_0001","payload":{"sessionId":"sess_0001","outcome":"stopped"}}
+{"protocolVersion":1,"id":"evt_bad10","seq":10,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.state","runId":"run_0001","payload":{"sessionId":"sess_0001","state":"paused"}}

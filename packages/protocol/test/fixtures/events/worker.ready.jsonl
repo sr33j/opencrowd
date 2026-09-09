@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_0001","seq":1,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.ready","payload":{"protocolVersion":1,"runtimeVersion":"0.1.0","workerId":"worker_0001"}}
+{"protocolVersion":1,"id":"evt_0002","seq":2,"emittedAt":"2026-09-05T12:00:00.000Z","type":"worker.ready","payload":{"protocolVersion":1,"runtimeVersion":"0.1.0","restoredRunId":"run_0001"}}

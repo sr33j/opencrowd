@@ -1,0 +1,1 @@
+{"protocolVersion":1,"id":"evt_0011","seq":11,"emittedAt":"2026-09-05T12:00:00.000Z","type":"tool.started","runId":"run_0001","payload":{"toolCallId":"call_0001","toolName":"web_fetch","input":{"url":"https://example.com/quotes","method":"GET"},"turn":2}}

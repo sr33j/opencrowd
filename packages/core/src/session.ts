@@ -1,15 +1,17 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BudgetStatus, ApprovalMode, SessionOptions, SessionState } from "./types.js";
 import { ensureLedger } from "./ledger.js";
+import { assertPathId, atomicWrite, containedPath } from "./paths.js";
 
 const STATE_FILE = "session.json";
 
 export async function createSession(options: SessionOptions = {}): Promise<SessionState> {
   const workspaceRoot = resolve(options.workspaceRoot ?? process.cwd());
   const sessionId = options.sessionId ?? new Date().toISOString().replace(/[:.]/g, "-") + "-" + randomUUID().slice(0, 8);
-  const sessionDir = join(workspaceRoot, "sessions", sessionId);
+  assertPathId(sessionId);
+  const sessionDir = await containedPath(workspaceRoot, join("sessions", sessionId));
   const artifactsDir = join(sessionDir, "artifacts");
   const ledgerPath = join(sessionDir, "ledger.csv");
   const now = new Date().toISOString();
@@ -35,15 +37,20 @@ export async function createSession(options: SessionOptions = {}): Promise<Sessi
 }
 
 export async function loadSession(workspaceRoot: string, sessionId: string): Promise<SessionState> {
-  const sessionDir = join(resolve(workspaceRoot), "sessions", sessionId);
+  assertPathId(sessionId);
+  const sessionDir = await containedPath(workspaceRoot, join("sessions", sessionId));
   const text = await readFile(join(sessionDir, STATE_FILE), "utf8");
-  return JSON.parse(text) as SessionState;
+  const state = JSON.parse(text) as SessionState;
+  if (state.sessionId !== sessionId) throw new Error("session identity mismatch");
+  // A restored backup can live on a different mount; never trust saved absolute paths.
+  return { ...state, workspaceRoot: resolve(workspaceRoot), sessionDir,
+    artifactsDir: await containedPath(sessionDir, "artifacts"), ledgerPath: join(sessionDir, "ledger.csv") };
 }
 
 export async function saveSession(state: SessionState): Promise<void> {
   state.updatedAt = new Date().toISOString();
   await mkdir(state.sessionDir, { recursive: true });
-  await writeFile(join(state.sessionDir, STATE_FILE), `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  await atomicWrite(join(state.sessionDir, STATE_FILE), `${JSON.stringify(state, null, 2)}\n`);
 }
 
 export function budgetStatus(state: SessionState): BudgetStatus {

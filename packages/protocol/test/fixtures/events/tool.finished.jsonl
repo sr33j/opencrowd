@@ -1,0 +1,2 @@
+{"protocolVersion":1,"id":"evt_0012","seq":12,"emittedAt":"2026-09-05T12:00:00.000Z","type":"tool.finished","runId":"run_0001","payload":{"toolCallId":"call_0001","toolName":"web_fetch","status":"ok","durationMs":812,"output":{"status":200,"bytes":4096},"cost":"1500","turn":2}}
+{"protocolVersion":1,"id":"evt_0013","seq":13,"emittedAt":"2026-09-05T12:00:00.000Z","type":"tool.finished","runId":"run_0001","payload":{"toolCallId":"call_0002","toolName":"shell","status":"blocked","error":"shell is disabled for this session","turn":2}}

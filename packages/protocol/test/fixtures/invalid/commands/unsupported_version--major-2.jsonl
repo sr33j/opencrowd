@@ -1,0 +1,2 @@
+{"protocolVersion":2,"id":"cmd_bad1","seq":1,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.cancel","runId":"run_0001","payload":{"reason":"stop"}}
+{"protocolVersion":0,"id":"cmd_bad2","seq":2,"emittedAt":"2026-09-05T12:00:00.000Z","type":"run.cancel","runId":"run_0001","payload":{"reason":"stop"}}
