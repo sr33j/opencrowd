@@ -2,8 +2,8 @@ import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  atomicWrite, containedPath, createSession, executeTool, loadSession, resolveAgentPaths,
-  type AgentPaths, type SessionState, type ToolResult
+  atomicWrite, containedPath, createSession, executeTool, loadSession, resolveAgentPaths, HOSTED_ONLY_TOOL_NAMES,
+  type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
   encodeEvent, parseCommandLine, type CommandOf, type Event, type EventType,
@@ -36,12 +36,17 @@ interface WorkerState {
   runs: Record<string, DurableRun>;
   activeRunId?: string;
 }
+/** Executes supervisor-owned tools (HOSTED_ONLY_TOOL_NAMES) outside the agent process. */
+export type HostedToolExecutor = (name: ToolName, args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
+
 export interface WorkerOptions {
   agentHome: string;
   /** Inject a remote-only provider or demo. No local provider selection occurs. */
   provider: (run: CommandOf<"run.start">, session: SessionState) => LlmProvider;
   output: (line: string) => void | Promise<void>;
   toolExecutor?: ToolExecutor;
+  /** Supervisor-executed tools; absent means hosted-only tools report themselves unavailable. */
+  hostedTools?: (run: CommandOf<"run.start">, session: SessionState) => HostedToolExecutor;
   now?: () => Date;
   id?: () => string;
 }
@@ -192,6 +197,7 @@ export class MachineWorker {
       }
       await this.emit("run.state", { sessionId: session.sessionId, state: "running" }, runId, run.commandId);
       const local = this.options.toolExecutor ?? executeTool;
+      const hosted = this.options.hostedTools?.(run.start, session);
       const result = await runAgentTaskDetailed(session, run.start.payload.prompt, {
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         provider: this.options.provider(run.start, session),
@@ -219,7 +225,7 @@ export class MachineWorker {
           if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
           await this.mutate(() => { run.tools[id] = { digest }; });
           await this.emit("tool.started", { toolCallId: id, toolName: name }, runId, run.commandId);
-          const output = await local(name, args, context);
+          const output = hosted && HOSTED_ONLY_TOOL_NAMES.includes(name) ? await hosted(name, args, context) : await local(name, args, context);
           await this.mutate(() => { run.tools[id].result = output; });
           await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
             error: output.error }, runId, run.commandId);

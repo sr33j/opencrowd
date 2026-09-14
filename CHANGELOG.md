@@ -12,6 +12,10 @@
 - Publish GitHub releases to npm using Trusted Publishing, with package
   version checks and a packed-CLI smoke test.
 
+- Add the hosted-only `deploy_service` tool. Hosted workers advertise it to
+  the model and execute it through the supervisor over the existing
+  credential-free bridge socket (`POST /tool`), inlining the entry artifact.
+  Local runs never advertise it and refuse it if asked by name.
 - Preserve provider finish reasons, reject prematurely closed LLM streams,
   and make one bounded continuation when generation reaches its output-token
   limit instead of silently completing with a response cut off mid-word.
