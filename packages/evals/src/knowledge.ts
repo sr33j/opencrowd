@@ -225,7 +225,8 @@ const PROPOSER_SYSTEM = [
   "- L0.md (<= 800 tokens): the defaults block that goes into the system prompt. Ordered by how often agents actually need the capability. For each: capability -> exact endpoint -> one-line how-to (method, key body fields) -> typical price -> score/evidence strength -> when NOT to buy (local/free path). Start with a 2-3 line policy: prefer local/free when sufficient; buy when it saves turns; inspect exact schema before paying.",
   "- INDEX.md: one line per category: `- <capability keywords> -> categories/<slug>.md`.",
   "- categories/<slug>.md (<= 1500 tokens each): ranked services for that capability with endpoint, rail (x402 base / mppx tempo), observed price, score & n_eff, what reviewers said worked and failed (cite ids), request-shape gotchas, and the cheapest correct path including free alternatives.",
-  "Be specific and terse. Markdown lists, no prose paragraphs. Do not include wallet addresses, keys, or payment proofs."
+  "Be specific and terse. Markdown lists, no prose paragraphs. Do not include wallet addresses, keys, or payment proofs.",
+  "Output budget: at most 12 category pages, each under 900 tokens; the whole JSON response must stay under 9000 tokens. Escape newlines inside JSON strings."
 ].join("\n");
 
 export async function proposeTree(options: ProposeOptions): Promise<Proposal> {
@@ -267,6 +268,9 @@ export async function proposeTree(options: ProposeOptions): Promise<Proposal> {
     { role: "system", content: PROPOSER_SYSTEM },
     { role: "user", content: userContent }
   ]);
+  if (response.finishReason === "length" || response.finishReason === "max_tokens" || response.finishReason === "max_output_tokens") {
+    throw new Error(`proposer output was truncated (${approxTokens(response.content)} tokens); keep the tree smaller`);
+  }
   const tree = parseTreeJson(response.content);
   const changed = options.parent
     ? Object.keys(tree).filter((name) => tree[name] !== options.parent?.tree[name])

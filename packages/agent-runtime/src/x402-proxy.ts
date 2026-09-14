@@ -165,6 +165,9 @@ export class X402ProxyProvider implements TypedLlmProvider {
     if (request.promptCacheKey) {
       body.prompt_cache_key = request.promptCacheKey;
     }
+    if (request.maxOutputTokens) {
+      body.max_tokens = request.maxOutputTokens;
+    }
     const url = `${this.baseUrl}/chat/completions`;
     const liveness = new StreamLiveness(
       this.options.stallTimeoutMs ?? DEFAULT_STALL_TIMEOUT_MS,

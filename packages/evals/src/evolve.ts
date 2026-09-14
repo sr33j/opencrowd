@@ -429,7 +429,8 @@ async function buildProposerProviders(root: string, models: string[]): Promise<M
     const llm = await resolveLlmRuntime(session, { model, subagentModel: "off", nonInteractive: true });
     providers.set(model, new BudgetedLlmProvider(session, llm.provider, {
       model: llm.models.main,
-      maxCostCentsPerCall: Math.max(llm.maxCostCentsPerCall, 150),
+      maxCostCentsPerCall: Math.max(llm.maxCostCentsPerCall, 200),
+      maxOutputTokens: 24_000,
       tools: [],
       extraTools: [],
       catalog: llm.catalog

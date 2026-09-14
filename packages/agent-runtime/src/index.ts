@@ -278,6 +278,8 @@ export interface BudgetedLlmOptions {
   promptCacheKey?: string;
   /** Catalog pricing for cost estimation when the provider reports none. */
   catalog?: ProviderModel[];
+  /** Output cap forwarded to the provider as max_tokens. */
+  maxOutputTokens?: number;
   /** Streaming text callback (time-to-first-token). */
   onTextDelta?: (delta: string) => void;
   /**
@@ -356,6 +358,7 @@ export class BudgetedLlmProvider implements LlmProvider {
       tools: definitions,
       promptCacheKey: this.options.promptCacheKey,
       onTextDelta: this.options.onTextDelta,
+      maxOutputTokens: this.options.maxOutputTokens,
       signal: context?.signal
     });
     try {

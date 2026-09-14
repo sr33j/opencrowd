@@ -1,7 +1,7 @@
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { resolveHarness, type HarnessRun } from "./harnesses.js";
-import { scoreTask } from "./scoring.js";
+import { extractAnswerText, scoreTask } from "./scoring.js";
 import { loadTaskSet, taskPrompt, type EvalTask, type TaskSetName } from "./tasks.js";
 
 /**
@@ -46,6 +46,7 @@ export interface SuiteResultRow {
   question: string;
   expected: string;
   answer?: string;
+  final_message?: string;
   score: number;
   correct: boolean;
   score_detail?: string;
@@ -183,6 +184,7 @@ async function runOneTask(
     question: task.question,
     expected: task.expected,
     answer: extractAnswer(run.final_message),
+    final_message: run.final_message,
     score: scored.score,
     correct: scored.correct,
     score_detail: scored.detail,
@@ -261,8 +263,7 @@ export function renderSuiteReport(report: SuiteReport): string {
 }
 
 function extractAnswer(finalMessage: string | undefined): string | undefined {
-  const matches = [...(finalMessage ?? "").matchAll(/FINAL ANSWER:\s*(.+)/gi)];
-  return matches.at(-1)?.[1]?.trim() || (finalMessage ? truncate(finalMessage, 200) : undefined);
+  return extractAnswerText(finalMessage) ?? (finalMessage ? truncate(finalMessage, 200) : undefined);
 }
 
 function mean(values: number[]): number {

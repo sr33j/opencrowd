@@ -22,7 +22,7 @@ export interface ScoreContext {
 }
 
 export async function scoreTask(task: EvalTask, finalMessage: string | undefined, context: ScoreContext = {}): Promise<TaskScore> {
-  const answer = extractFinalAnswer(finalMessage);
+  const answer = extractAnswerText(finalMessage);
   const spec = task.scorer;
   switch (spec.type) {
     case "gaia": {
@@ -106,6 +106,22 @@ export async function scoreTask(task: EvalTask, finalMessage: string | undefined
     default:
       return { score: 0, correct: false, detail: `unknown scorer ${(spec as ScorerSpec).type}` };
   }
+}
+
+/**
+ * The FINAL ANSWER line when present; otherwise a short final message is
+ * taken as the answer itself (agents sometimes complete with just "55").
+ */
+export function extractAnswerText(finalMessage: string | undefined): string | undefined {
+  const tagged = extractFinalAnswer(finalMessage);
+  if (tagged !== undefined) {
+    return tagged;
+  }
+  const trimmed = finalMessage?.trim();
+  if (!trimmed || trimmed.length > 300 || /^stopped after/i.test(trimmed)) {
+    return undefined;
+  }
+  return trimmed.split(/\r?\n/).at(-1)?.trim();
 }
 
 /**
