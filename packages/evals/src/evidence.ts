@@ -44,6 +44,12 @@ export interface EvidenceBundle {
 
 export interface FetchEvidenceOptions {
   baseUrl?: string;
+  /**
+   * Bearer token for the gated full export (GET /api/knowledge/evidence,
+   * every review per service). Defaults to CROWDCODE_KNOWLEDGE_EXPORT_TOKEN;
+   * without it the public per-service view (5 most recent reviews) is used.
+   */
+  exportToken?: string;
   cachePath?: string;
   /** Reuse the cache if it exists (default true). */
   useCache?: boolean;
@@ -66,6 +72,18 @@ export async function fetchCrowdCodeEvidence(options: FetchEvidenceOptions = {})
   const baseUrl = options.baseUrl ?? DEFAULT_BASE_URL;
   const fetchImpl = options.fetchImpl ?? fetch;
   const log = options.log ?? (() => undefined);
+  const exportToken = options.exportToken ?? process.env.CROWDCODE_KNOWLEDGE_EXPORT_TOKEN;
+  if (exportToken) {
+    const exported = await fetchGatedExport(fetchImpl, baseUrl, exportToken, log);
+    if (exported) {
+      if (cachePath) {
+        await mkdir(dirname(cachePath), { recursive: true });
+        await writeFile(cachePath, `${JSON.stringify(exported, null, 1)}\n`, "utf8");
+      }
+      return exported;
+    }
+    log("gated evidence export unavailable; falling back to the public per-service view");
+  }
   log(`fetching ${baseUrl}/api/services`);
   const listing = await (await fetchImpl(`${baseUrl}/api/services`)).json() as { services?: Array<Record<string, unknown>> };
   const ids = (listing.services ?? []).map((service) => String(service.service_id));
@@ -93,6 +111,48 @@ export async function fetchCrowdCodeEvidence(options: FetchEvidenceOptions = {})
     await writeFile(cachePath, `${JSON.stringify(bundle, null, 1)}\n`, "utf8");
   }
   return bundle;
+}
+
+async function fetchGatedExport(
+  fetchImpl: typeof fetch,
+  baseUrl: string,
+  token: string,
+  log: (message: string) => void
+): Promise<EvidenceBundle | undefined> {
+  const url = `${baseUrl}/api/knowledge/evidence?max_reviews=100`;
+  log(`fetching ${url}`);
+  try {
+    const response = await fetchImpl(url, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120_000) });
+    if (!response.ok) {
+      log(`gated export returned ${response.status}`);
+      return undefined;
+    }
+    const body = await response.json() as { services?: Array<Record<string, unknown>> };
+    const services = (body.services ?? []).map((raw) => flattenService({
+      service: raw,
+      score: raw.score,
+      n_eff: raw.n_eff,
+      unproven: raw.unproven,
+      num_reviews: raw.num_reviews,
+      num_verified_reviews: raw.num_verified_reviews,
+      summary: raw.summary,
+      recent_reviews: raw.reviews
+    }));
+    services.sort((left, right) => right.n_eff * right.score - left.n_eff * left.score || right.num_reviews - left.num_reviews);
+    return {
+      fetched_at: new Date().toISOString(),
+      source: `${baseUrl} (gated full export)`,
+      services,
+      stats: {
+        services: services.length,
+        reviews: services.reduce((sum, service) => sum + service.num_reviews, 0),
+        services_with_reviews: services.filter((service) => service.num_reviews > 0).length
+      }
+    };
+  } catch (error) {
+    log(`gated export failed: ${(error as Error).message}`);
+    return undefined;
+  }
 }
 
 export function flattenService(detail: Record<string, unknown>): ServiceEvidence {
