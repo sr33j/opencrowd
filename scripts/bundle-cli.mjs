@@ -2,7 +2,7 @@
 // for npm publishing. Registry deps stay external and are installed by npm;
 // only the unpublished workspace packages get inlined.
 import { build } from "esbuild";
-import { chmod, copyFile, readFile } from "node:fs/promises";
+import { chmod, copyFile, cp, readFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -28,6 +28,14 @@ await build({
   logLevel: "warning"
 });
 await chmod(outfile, 0o755);
+
+// Bundled modules resolve these assets one level above bundle/opencrowd.js,
+// just as the workspace modules resolve them one level above src/ or dist/.
+for (const [workspace, directory] of [["agent-runtime", "knowledge"], ["evals", "tasks"]]) {
+  const target = join(cliDir, directory);
+  await rm(target, { recursive: true, force: true });
+  await cp(join(root, "packages", workspace, directory), target, { recursive: true });
+}
 
 // npm includes README/LICENSE from the package dir; mirror the repo's copies.
 await copyFile(join(root, "README.md"), join(cliDir, "README.md"));

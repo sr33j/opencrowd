@@ -10,3 +10,5 @@ scratch/
 apps/cli/bundle/
 apps/cli/README.md
 apps/cli/LICENSE
+apps/cli/knowledge/
+apps/cli/tasks/

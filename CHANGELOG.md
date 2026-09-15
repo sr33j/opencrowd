@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.4.0 — 2026-09-15
+
+- Add hosted workers with a versioned command/event protocol, explicit homes,
+  resumable checkpoints, and a scoped model bridge.
+- Add generalized evaluation suites and knowledge-tree evolution commands.
+- Load the CrowdCode knowledge tree into agent prompts and copy category
+  references into session artifacts. Include the knowledge snapshot and
+  evaluation tasks in the npm package.
+- Preserve multiline terminal pastes.
+- Publish GitHub releases to npm using Trusted Publishing, with package
+  version checks and a packed-CLI smoke test.
 
 - Preserve provider finish reasons, reject prematurely closed LLM streams,
   and make one bounded continuation when generation reaches its output-token

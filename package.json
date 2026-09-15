@@ -24,7 +24,8 @@
     "typecheck": "tsc -b --pretty false packages/protocol packages/core packages/economy packages/agent-runtime packages/evals apps/cli",
     "lint": "tsc -b --pretty false packages/protocol packages/core packages/economy packages/agent-runtime packages/evals apps/cli",
     "deadcode": "knip",
-    "smoke": "bash scripts/smoke.sh"
+    "smoke": "bash scripts/smoke.sh",
+    "smoke:pack": "node scripts/smoke-pack.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.15.21",

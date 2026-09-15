@@ -7,6 +7,9 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
 workdir="$(mktemp -d)"
+# macOS exposes its temporary directory through /var -> /private/var.
+# Session storage rejects symlink ancestors, so use the physical path.
+workdir="$(cd "$workdir" && pwd -P)"
 trap 'rm -rf "$workdir"' EXIT
 export OPENCROWD_CONFIG_DIR="$workdir/config"
 
