@@ -1,5 +1,6 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
 import {
   appendLedgerEntry,
   budgetStatus,
@@ -36,6 +37,7 @@ export * from "./runtime.js";
 export * from "./worker.js";
 export * from "./hosted-provider.js";
 export * from "./x402-proxy.js";
+export * from "./knowledge.js";
 
 export interface LlmMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -644,11 +646,18 @@ export interface AgentRunOptions {
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
   promptSections?: string[];
   /**
-   * Replaces the built-in one-line paid-capability index with a generated
-   * knowledge base (level-0 defaults block). Evals use this to A/B a
-   * CrowdCode-derived knowledge tree against the static default.
+   * Replaces the built-in one-line paid-capability index with an explicit
+   * text block (evals). When absent, the knowledge tree is loaded per
+   * `knowledge` and rendered into this slot.
    */
   capabilityIndex?: string;
+  /**
+   * Knowledge tree selection: `false` keeps the static capability line
+   * (eval baselines); `{ dir }` loads an explicit tree; absent resolves
+   * OPENCROWD_KNOWLEDGE_DIR, then the snapshot bundled with the runtime.
+   * Only applies when paid tools (`dynamicTools`) are available.
+   */
+  knowledge?: false | KnowledgeOptions;
   /**
    * When set, the in-memory context is compacted mid-run once it exceeds
    * ~70% of this window. The persisted trajectory keeps full fidelity.
@@ -719,6 +728,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     throw new Error("no LLM provider configured: pass an explicit provider (tests/demo) or a typed llm runtime");
   }
   const toolExecutor = options.toolExecutor ?? executeTool;
+  const knowledge = options.capabilityIndex === undefined && options.knowledge !== false && options.dynamicTools
+    ? await loadKnowledgeTree(session, options.knowledge ?? {})
+    : undefined;
+  const capabilityIndex = options.capabilityIndex ?? (knowledge ? renderCapabilityIndex(knowledge.l0) : undefined);
   const systemPromptParts = [
     "You are the local OpenCrowd agent, a CLI agent with a USDC wallet running on the user's personal machine.",
     "Try to solve the user's task completely. Use local files and bash when they are sufficient, but remember they are bounded by the user's installed tools, credentials, network, open ports, and process lifetime.",
@@ -727,7 +740,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (options.dynamicTools) {
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
-      options.capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
+      capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
       "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",

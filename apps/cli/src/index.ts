@@ -514,7 +514,7 @@ function printHelp(): void {
   opencrowd --version
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]
   opencrowd evals evolve [--out <dir>] [--generations <n>] [--candidates <n>] [--model <agent model>] [--proposer <model,model>] [--seed-trees <dir,dir>] [--baseline-report <report.json>] [--parallel <n>]
-  opencrowd evals suite [--set usage|gaia-hard|assistantbench|heldin|heldout|all] [--knowledge <dir>] [--tag <label>] [--out <dir>] [--only id,id] [--limit <n>] [--parallel <n>] [--model <model>] [--subagent-model <model|off>] [--max-turns <n>]
+  opencrowd evals suite [--set usage|gaia-hard|assistantbench|heldin|heldout|all] [--knowledge <dir>|none] [--tag <label>] [--out <dir>] [--only id,id] [--limit <n>] [--parallel <n>] [--model <model>] [--subagent-model <model|off>] [--max-turns <n>]
 
 Interactive commands (also /help inside the UI):
 ${renderCommandHelp()}`);

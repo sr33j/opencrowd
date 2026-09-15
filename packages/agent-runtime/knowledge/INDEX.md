@@ -1,0 +1,11 @@
+- local files, CSV/JSON, arithmetic, validation, translation, calendar, free APIs -> categories/free-first.md
+- web search, research, citations -> categories/web-search.md
+- webpage extraction, scraping, browser automation -> categories/web-extraction.md
+- LLM inference, chat completions -> categories/llm-gateways.md
+- image, video, audio, media generation -> categories/media-generation.md
+- weather, geocoding, flights, travel -> categories/weather-travel.md
+- file hosting, uploads, email, inboxes, downloads -> categories/files-communications.md
+- social search, trends, news -> categories/social-news.md
+- crypto, markets, on-chain, trading data -> categories/finance-crypto.md
+- company, SEC, drugs, recalls, compliance -> categories/business-regulatory.md
+- DNS, RPC, OCR, calendar, JSON, developer utilities -> categories/utilities.md

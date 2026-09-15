@@ -48,8 +48,16 @@ export interface SessionState {
    * `run --session` reproduces the same provider/model choices.
    */
   models?: SessionModels;
+  /** Service knowledge tree loaded for this session (version + source), for reproducibility. */
+  knowledge?: SessionKnowledge;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SessionKnowledge {
+  version: string;
+  source: string;
+  loadedAt: string;
 }
 
 export interface SessionModels {
