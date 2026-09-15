@@ -52,17 +52,18 @@ export function gradeTrajectory(entries: Record<string, unknown>[]): ComplianceR
   const ambiguousCalls = new Set<string>();
 
   for (const call of calls) {
-    if (/_get_service_score$/.test(call.name)) {
+    // Gateway tools (current surface) and connector-style names (legacy).
+    if (/_get_service_score$/.test(call.name) || call.name === "inspect_paid_service") {
       report.score_checks += 1;
       const origin = originOf(call.arguments);
       if (origin) {
         scoredOrigins.add(origin);
       }
     }
-    if (/_review_service$/.test(call.name)) {
+    if (/_review_service$/.test(call.name) || call.name === "review_paid_service") {
       report.reviews += 1;
     }
-    if (/_fetch$/.test(call.name)) {
+    if (/_fetch$/.test(call.name) || call.name === "call_paid_service") {
       report.fetch_calls += 1;
       if (hasPaymentEvidence(call.result)) {
         report.paid_calls += 1;
@@ -120,7 +121,7 @@ function pairToolCalls(entries: Record<string, unknown>[]): TrajectoryToolCall[]
 }
 
 function hasPaymentEvidence(result: unknown): boolean {
-  return searchKeys(result, /^(payment|payment_id|paymentid|tx_hash|txhash|transaction_hash|settlement|x402|charged|amount_paid|paid)$/i, 0);
+  return searchKeys(result, /^(payment|payment_id|paymentid|tx_hash|txhash|transaction_hash|settlement|x402|charged|amount_paid|paid|purchase_id|charged_cost_cents)$/i, 0);
 }
 
 function searchKeys(value: unknown, pattern: RegExp, depth: number): boolean {

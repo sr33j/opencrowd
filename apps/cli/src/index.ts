@@ -401,6 +401,14 @@ async function modelsCommand(args: string[]): Promise<void> {
 
 async function evalsCommand(args: string[]): Promise<void> {
   const [dataset, ...rest] = args;
+  if (dataset === "suite") {
+    await evalsSuiteCommand(rest);
+    return;
+  }
+  if (dataset === "evolve") {
+    await evalsEvolveCommand(rest);
+    return;
+  }
   if (dataset !== "gaia") {
     throw new Error("evals supports: gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]");
   }
@@ -442,6 +450,55 @@ async function evalsCommand(args: string[]): Promise<void> {
   console.log(renderGaiaReport(report));
 }
 
+async function evalsSuiteCommand(rest: string[]): Promise<void> {
+  const { runSuite, renderSuiteReport, TASK_SETS } = await import("@opencrowd/evals");
+  const set = readOption(rest, "--set") ?? "heldin";
+  if (!(set in TASK_SETS)) {
+    throw new Error(`--set must be one of: ${Object.keys(TASK_SETS).join(", ")}`);
+  }
+  const report = await runSuite({
+    set: set as keyof typeof TASK_SETS,
+    harness: readOption(rest, "--harness") ?? "opencrowd",
+    resultsRoot: readOption(rest, "--out") ?? join(process.cwd(), "evals", "suite"),
+    tag: readOption(rest, "--tag"),
+    knowledgeDir: readOption(rest, "--knowledge"),
+    hfToken: readOption(rest, "--hf-token") ?? process.env.HF_TOKEN,
+    model: readOption(rest, "--model"),
+    subagentModel: readOption(rest, "--subagent-model"),
+    auto: rest.includes("--auto"),
+    maxTurns: readOption(rest, "--max-turns") === undefined ? undefined : Number(readOption(rest, "--max-turns")),
+    parallel: readOption(rest, "--parallel") === undefined ? undefined : Number(readOption(rest, "--parallel")),
+    limit: readOption(rest, "--limit") === undefined ? undefined : Number(readOption(rest, "--limit")),
+    only: readOption(rest, "--only")?.split(",").map((id) => id.trim()).filter(Boolean),
+    seed: readOption(rest, "--seed"),
+    log: (message) => console.error(message)
+  });
+  console.log(renderSuiteReport(report));
+}
+
+async function evalsEvolveCommand(rest: string[]): Promise<void> {
+  const { runEvolution, renderArchive } = await import("@opencrowd/evals");
+  const { archive, best } = await runEvolution({
+    resultsRoot: readOption(rest, "--out") ?? join(process.cwd(), "evals", "evolve"),
+    evidencePath: readOption(rest, "--evidence"),
+    refreshEvidence: rest.includes("--refresh-evidence"),
+    generations: Number(readOption(rest, "--generations") ?? 2),
+    candidatesPerGeneration: Number(readOption(rest, "--candidates") ?? 2),
+    agentModel: readOption(rest, "--model") ?? "openai/gpt-5.6-luna",
+    proposerModels: (readOption(rest, "--proposer") ?? "openai/gpt-5.6-sol,openai/gpt-5.6-luna").split(",").map((id) => id.trim()).filter(Boolean),
+    seedTrees: readOption(rest, "--seed-trees")?.split(",").map((dir) => dir.trim()).filter(Boolean),
+    baselineReport: readOption(rest, "--baseline-report"),
+    parallel: readOption(rest, "--parallel") === undefined ? undefined : Number(readOption(rest, "--parallel")),
+    maxTurns: readOption(rest, "--max-turns") === undefined ? undefined : Number(readOption(rest, "--max-turns")),
+    hfToken: readOption(rest, "--hf-token") ?? process.env.HF_TOKEN,
+    log: (message) => console.error(message)
+  });
+  console.log(renderArchive(archive));
+  if (best?.dir) {
+    console.log(`\nBEST=${best.dir}`);
+  }
+}
+
 function printHelp(): void {
   console.log(`Usage:
   opencrowd                       interactive agent UI
@@ -456,6 +513,8 @@ function printHelp(): void {
   opencrowd doctor
   opencrowd --version
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]
+  opencrowd evals evolve [--out <dir>] [--generations <n>] [--candidates <n>] [--model <agent model>] [--proposer <model,model>] [--seed-trees <dir,dir>] [--baseline-report <report.json>] [--parallel <n>]
+  opencrowd evals suite [--set usage|gaia-hard|assistantbench|heldin|heldout|all] [--knowledge <dir>] [--tag <label>] [--out <dir>] [--only id,id] [--limit <n>] [--parallel <n>] [--model <model>] [--subagent-model <model|off>] [--max-turns <n>]
 
 Interactive commands (also /help inside the UI):
 ${renderCommandHelp()}`);

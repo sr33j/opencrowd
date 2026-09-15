@@ -1,0 +1,128 @@
+{
+  "description": "Real-usage tasks derived from what agents actually pay for on CrowdCode (geocoding, drug data, uploads, image generation, weather, web extraction) plus local-only traps where a purchase would be unnecessary. Held-in: the evolutionary loop may see failures from this set.",
+  "tasks": [
+    {
+      "id": "usage-geocode-reykjavik",
+      "capability": "geocoding",
+      "question": "What are the latitude and longitude of Reykjavik, Iceland, each rounded to one decimal place? Answer as two numbers separated by a comma: lat, lon.",
+      "expected": "64.1, -21.9",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "optional"
+    },
+    {
+      "id": "usage-drug-rxcui-metformin",
+      "capability": "drug-data",
+      "question": "What is the RxNorm RxCUI identifier for the ingredient metformin? Answer with the number only.",
+      "expected": "6809",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "optional"
+    },
+    {
+      "id": "usage-translate-german",
+      "capability": "translation",
+      "question": "Translate the sentence 'The train leaves at nine tomorrow morning.' into German.",
+      "expected": "Der Zug fährt morgen früh um neun (Uhr) ab.",
+      "scorer": { "type": "contains_all", "terms": ["zug", "neun"] },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-youtube-title",
+      "capability": "video-metadata",
+      "question": "What is the exact title of the YouTube video with id dQw4w9WgXcQ?",
+      "expected": "Rick Astley - Never Gonna Give You Up (Official Video)",
+      "scorer": { "type": "contains_all", "terms": ["never gonna give you up"] },
+      "expect_paid": "optional"
+    },
+    {
+      "id": "usage-upload-public",
+      "capability": "file-hosting",
+      "question": "Upload the attached file note.txt so that it is publicly downloadable from the internet, then answer with the public URL only.",
+      "attachment": "note.txt",
+      "expected": "<public URL serving the sentinel>",
+      "scorer": { "type": "url_content", "contains": "opencrowd-eval-sentinel-7f3a9c2e" },
+      "expect_paid": "yes"
+    },
+    {
+      "id": "usage-image-generate",
+      "capability": "image-generation",
+      "question": "Generate an image of a red bicycle on a sandy beach and save it as a session artifact named bike.png or bike.jpg. Answer with the artifact filename only.",
+      "expected": "bike.png",
+      "scorer": { "type": "artifact", "names": ["bike.png", "bike.jpg", "bike.jpeg"], "min_bytes": 8000, "image": true },
+      "expect_paid": "yes"
+    },
+    {
+      "id": "usage-web-extract-rfc",
+      "capability": "web-extraction",
+      "question": "Fetch the page https://www.rfc-editor.org/rfc/rfc9110.html and report the value of the 'Category' field shown in the document header. Answer with the category text only.",
+      "expected": "Standards Track",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-weather-tokyo",
+      "capability": "weather",
+      "question": "What is the current air temperature in Tokyo, Japan, in degrees Celsius? Answer with a single number.",
+      "expected": "a number between -5 and 42",
+      "scorer": { "type": "range", "min": -5, "max": 42 },
+      "expect_paid": "optional"
+    },
+    {
+      "id": "usage-local-csv-median",
+      "capability": "local-data",
+      "question": "The attached file sales.csv has a column named amount. What is the median of that column? Answer with a number rounded to two decimals.",
+      "attachment": "sales.csv",
+      "expected": "535.56",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-local-json-count",
+      "capability": "local-data",
+      "question": "In the attached file events.json, how many entries in the events array have status equal to 'failed'? Answer with the number only.",
+      "attachment": "events.json",
+      "expected": "25",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-business-days",
+      "capability": "calendar",
+      "question": "How many US business days (Monday to Friday, excluding the US federal holidays Veterans Day, Thanksgiving, and Christmas Day) are there from 2026-11-01 to 2026-12-31 inclusive? Answer with the number only.",
+      "expected": "41",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-dns-example",
+      "capability": "dns",
+      "question": "What is one IPv4 A record currently returned for the hostname example.com? Answer with the IP address only.",
+      "expected": "<live A record of example.com>",
+      "scorer": { "type": "dns_a", "hostname": "example.com" },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-ics-file",
+      "capability": "calendar",
+      "question": "Create an iCalendar file for an event titled 'Team sync' on 2026-10-02 from 15:00 to 15:30 UTC and save it as a session artifact named team-sync.ics. Answer with the artifact filename only.",
+      "expected": "team-sync.ics",
+      "scorer": { "type": "artifact", "names": ["team-sync.ics"], "contains_all": ["BEGIN:VEVENT", "20261002T150000", "Team sync"] },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-iban-check",
+      "capability": "validation",
+      "question": "Is the IBAN GB82WEST12345698765432 valid according to the ISO 7064 mod-97 checksum? Answer yes or no.",
+      "expected": "yes",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "no"
+    },
+    {
+      "id": "usage-sec-cik-apple",
+      "capability": "financial-filings",
+      "question": "What is the SEC EDGAR Central Index Key (CIK) of Apple Inc.? Answer with the number only, without leading zeros.",
+      "expected": "320193",
+      "scorer": { "type": "gaia" },
+      "expect_paid": "optional"
+    }
+  ]
+}

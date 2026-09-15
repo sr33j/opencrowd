@@ -60,6 +60,8 @@ export interface CompletionRequest {
   promptCacheKey?: string;
   /** Streaming callback for assistant text deltas (time-to-first-token). */
   onTextDelta?: (delta: string) => void;
+  /** Output cap forwarded as max_tokens (long structured generations, e.g. the eval proposer). */
+  maxOutputTokens?: number;
 }
 
 export interface ProviderCompletion {
@@ -167,6 +169,9 @@ export class VeniceProvider implements TypedLlmProvider {
     };
     if (request.promptCacheKey) {
       body.prompt_cache_key = request.promptCacheKey;
+    }
+    if (request.maxOutputTokens) {
+      body.max_tokens = request.maxOutputTokens;
     }
     if (streaming) {
       body.stream = true;
@@ -399,7 +404,8 @@ export class OpenRouterProvider implements TypedLlmProvider {
       tools: request.tools.map(toWireToolDefinition),
       tool_choice: request.tools.length > 0 ? "auto" : undefined,
       // Returned usage/cost/cache accounting; no separate balance query.
-      usage: { include: true }
+      usage: { include: true },
+      ...(request.maxOutputTokens ? { max_tokens: request.maxOutputTokens } : {})
     };
     const timeout = this.options.timeoutMs ?? 600_000;
     const response = await (this.options.fetchImpl ?? fetch)(`${this.baseUrl}/chat/completions`, {

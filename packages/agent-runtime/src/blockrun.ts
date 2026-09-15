@@ -66,6 +66,9 @@ export class BlockRunProvider implements TypedLlmProvider {
     if (request.promptCacheKey) {
       body.prompt_cache_key = request.promptCacheKey;
     }
+    if (request.maxOutputTokens) {
+      body.max_tokens = request.maxOutputTokens;
+    }
 
     const started = Date.now();
     const chunks = client.stream<Record<string, unknown>>("/v1/chat/completions", body);

@@ -278,6 +278,8 @@ export interface BudgetedLlmOptions {
   promptCacheKey?: string;
   /** Catalog pricing for cost estimation when the provider reports none. */
   catalog?: ProviderModel[];
+  /** Output cap forwarded to the provider as max_tokens. */
+  maxOutputTokens?: number;
   /** Streaming text callback (time-to-first-token). */
   onTextDelta?: (delta: string) => void;
   /**
@@ -356,6 +358,7 @@ export class BudgetedLlmProvider implements LlmProvider {
       tools: definitions,
       promptCacheKey: this.options.promptCacheKey,
       onTextDelta: this.options.onTextDelta,
+      maxOutputTokens: this.options.maxOutputTokens,
       signal: context?.signal
     });
     try {
@@ -608,6 +611,10 @@ export interface LoopCheckpoint {
   repeatedFailures: Array<[string, number]>;
 }
 
+/** Static fallback capability index; replaced by `AgentRunOptions.capabilityIndex` when a knowledge base is supplied. */
+export const DEFAULT_CAPABILITY_INDEX =
+  "Paid capability index — fast paths the wallet can buy in one call, typically under a cent: web search and news (Exa-grade) plus page scraping via https://stableenrich.dev; social media data via https://stablesocial.dev; more via find_paid_service.";
+
 export interface AgentRunOptions {
   signal?: AbortSignal;
   runId?: string;
@@ -636,6 +643,12 @@ export interface AgentRunOptions {
   dynamicTools?: DynamicToolsOption;
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
   promptSections?: string[];
+  /**
+   * Replaces the built-in one-line paid-capability index with a generated
+   * knowledge base (level-0 defaults block). Evals use this to A/B a
+   * CrowdCode-derived knowledge tree against the static default.
+   */
+  capabilityIndex?: string;
   /**
    * When set, the in-memory context is compacted mid-run once it exceeds
    * ~70% of this window. The persisted trajectory keeps full fidelity.
@@ -714,7 +727,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (options.dynamicTools) {
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
-      "Paid capability index — fast paths the wallet can buy in one call, typically under a cent: web search and news (Exa-grade) plus page scraping via https://stableenrich.dev; social media data via https://stablesocial.dev; more via find_paid_service.",
+      options.capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
       "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",

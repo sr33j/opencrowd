@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { copyFile, mkdir } from "node:fs/promises";
+import { copyFile, cp, mkdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   appendConversationMessage,
@@ -26,6 +26,12 @@ import {
 import { gradeTrajectoryFile, type ComplianceReport } from "./grader.js";
 import type { GaiaQuestion } from "./gaia.js";
 
+/** Minimal task shape every harness needs; GaiaQuestion and EvalTask both satisfy it. */
+export interface HarnessTask {
+  task_id: string;
+  question: string;
+}
+
 const execFileAsync = promisify(execFile);
 const COMPARATOR_TIMEOUT_MS = 15 * 60 * 1000;
 
@@ -40,6 +46,9 @@ export interface HarnessContext {
   /** Explicit subagent model, or "off" to disable delegation entirely. */
   subagentModel?: string;
   auto?: boolean;
+  /** Knowledge tree directory (L0.md, INDEX.md, categories/); replaces the static capability index. */
+  knowledgeDir?: string;
+  maxTurns?: number;
   log: (message: string) => void;
 }
 
@@ -54,6 +63,10 @@ export interface HarnessRun {
   estimated_cost_usd?: number;
   tokens?: { input?: number; output?: number };
   trajectory_path?: string;
+  session_dir?: string;
+  artifacts_dir?: string;
+  /** Confirmed paid purchases (from purchases.jsonl). */
+  paid_calls?: number;
   model_policy?: ResolvedSessionModels;
   compliance?: ComplianceReport;
   error?: string;
@@ -63,7 +76,7 @@ export interface GaiaHarness {
   name: string;
   /** True when cost figures are measured on-chain rather than estimated. */
   onChainCost: boolean;
-  run(question: GaiaQuestion, context: HarnessContext): Promise<HarnessRun>;
+  run(question: HarnessTask, context: HarnessContext): Promise<HarnessRun>;
 }
 
 export function resolveHarness(name: string): GaiaHarness {
@@ -119,8 +132,10 @@ const openCrowdHarness: GaiaHarness = {
     });
     const gateway = await buildEvalGateway(session, context);
     const promptSections = await vendorInstructions(context);
+    const capabilityIndex = await loadKnowledge(context.knowledgeDir, session.artifactsDir);
     const result = await runAgentTaskDetailed(session, prompt, {
       promptSections,
+      capabilityIndex,
       llm: llm ? {
         provider: llm.provider,
         model: llm.models.main,
@@ -132,7 +147,7 @@ const openCrowdHarness: GaiaHarness = {
           : undefined
       } : undefined,
       subagent: llm ? subagentOptions(session.sessionId, llm) : undefined,
-      maxTurns: 40,
+      maxTurns: context.maxTurns ?? 40,
       contextWindowTokens: llm
         ? llm.catalog.find((candidate) => candidate.id === llm.models.main)?.contextWindowTokens
           ?? fallbackContextWindowTokens(llm.models.main)
@@ -158,6 +173,9 @@ const openCrowdHarness: GaiaHarness = {
       llm_cost_cents: Number(budget.llm_spend_cents ?? 0),
       service_cost_cents: Number(budget.external_service_spend_cents ?? 0),
       trajectory_path: trajectoryPath,
+      session_dir: session.sessionDir,
+      artifacts_dir: session.artifactsDir,
+      paid_calls: await countPaidPurchases(join(session.sessionDir, "purchases.jsonl")),
       model_policy: llm?.models,
       compliance: await gradeTrajectoryFile(trajectoryPath).catch(() => undefined)
     };
@@ -230,6 +248,37 @@ const codexHarness: GaiaHarness = {
     };
   }
 };
+
+/**
+ * Load a knowledge tree: L0.md becomes the prompt's capability index and the
+ * whole tree is copied under artifacts/knowledge so the model can read_file
+ * category pages on demand (progressive disclosure).
+ */
+async function loadKnowledge(knowledgeDir: string | undefined, artifactsDir: string): Promise<string | undefined> {
+  if (!knowledgeDir) {
+    return undefined;
+  }
+  const l0 = (await readFile(join(knowledgeDir, "L0.md"), "utf8")).trim();
+  await cp(knowledgeDir, join(artifactsDir, "knowledge"), { recursive: true });
+  return [
+    "Service knowledge base (derived from CrowdCode reviews of real paid calls):",
+    l0,
+    "Deeper notes per capability live in the session artifact folder knowledge/ — knowledge/INDEX.md lists the category files; read_file the relevant one (e.g. knowledge/categories/<name>.md) before calling find_paid_service for an unfamiliar capability."
+  ].join("\n");
+}
+
+async function countPaidPurchases(path: string): Promise<number> {
+  try {
+    const text = await readFile(path, "utf8");
+    return text.split(/\r?\n/).filter(Boolean).filter((line) => {
+      const entry = asRecord(parseJson(line));
+      const outcome = asRecord(entry.record).outcome ?? entry.outcome;
+      return outcome === "paid_success" || outcome === "paid_failure";
+    }).length;
+  } catch {
+    return 0;
+  }
+}
 
 async function comparatorPrompt(context: HarnessContext): Promise<string> {
   if (!context.attachmentPath) {

@@ -122,7 +122,19 @@ opencrowd config show
 opencrowd wallet balance
 opencrowd doctor
 opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
+opencrowd evals suite --set all --tag baseline --model openai/gpt-5.6-luna --subagent-model off
+opencrowd evals evolve --baseline-report <run>/report.json --generations 2 --candidates 2
 ```
+
+`evals suite` runs the 40-task suite (15 real-usage tasks derived from
+CrowdCode demand, 15 seeded GAIA level 2/3, 10 seeded AssistantBench) and
+reports accuracy alongside on-chain LLM and service spend, turns, paid calls,
+and unnecessary purchases. `evals evolve` is the meta-harness: it derives a
+service knowledge tree (`L0.md` in the prompt, `INDEX.md` + category pages
+under `artifacts/knowledge/`) from CrowdCode review evidence, mutates it
+against held-in failures, keeps the quality-vs-cost Pareto frontier, and
+never shows the proposer a held-out task. Pass `--knowledge <tree dir>` to
+`evals suite` (or `run`-time integrations) to evaluate a tree.
 
 ## Headless runs
 
