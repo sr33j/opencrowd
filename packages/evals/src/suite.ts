@@ -20,6 +20,7 @@ export interface SuiteRunOptions {
   resultsRoot: string;
   /** Human label stored with the run (e.g. "baseline", "tree-gen2-c1"). */
   tag?: string;
+  /** Tree directory, "none" for the static capability line, or undefined for the runtime default (bundled snapshot). */
   knowledgeDir?: string;
   hfToken?: string;
   model?: string;
@@ -60,6 +61,7 @@ export interface SuiteResultRow {
   unnecessary_purchase: boolean;
   model_policy?: unknown;
   trajectory_path?: string;
+  knowledge_version?: string;
   compliance?: unknown;
   error?: string;
 }
@@ -197,6 +199,7 @@ async function runOneTask(
     unnecessary_purchase: task.expect_paid === "no" && paidCalls > 0,
     model_policy: run.model_policy,
     trajectory_path: run.trajectory_path,
+    knowledge_version: run.knowledge_version,
     compliance: run.compliance,
     error: run.error
   };
@@ -244,7 +247,7 @@ export function renderSuiteReport(report: SuiteReport): string {
     `# Suite ${report.set}${report.tag ? ` [${report.tag}]` : ""} — run ${report.run_id}`,
     "",
     `- harness: ${report.harness}, model: ${report.model ?? "default"}, subagent: ${report.subagent_model ?? "default"}`,
-    `- knowledge: ${report.knowledge_dir ?? "none (static capability index)"}`,
+    `- knowledge: ${report.knowledge_dir === "none" ? "none (static capability index)" : report.knowledge_dir ?? "runtime default (bundled snapshot)"}${versionsOf(report.rows)}`,
     `- tasks: ${s.tasks}, errors: ${s.errors}`,
     `- accuracy: ${s.correct}/${s.tasks} (${pct(s.accuracy)}), mean score ${s.mean_score.toFixed(3)}`,
     `- cost: $${(s.total_cost_cents / 100).toFixed(3)} total, $${(s.mean_cost_cents / 100).toFixed(3)} mean (LLM $${(s.llm_cost_cents / 100).toFixed(3)}, services $${(s.service_cost_cents / 100).toFixed(3)})`,
@@ -260,6 +263,11 @@ export function renderSuiteReport(report: SuiteReport): string {
     ...report.rows.map((row) => `| ${row.task_id} | ${row.error ? "ERR" : row.correct ? "yes" : "no"} | ${row.score.toFixed(2)} | $${((row.cost_cents ?? 0) / 100).toFixed(3)} | ${row.turns ?? "-"} | ${row.paid_calls ?? 0}${row.unnecessary_purchase ? "!" : ""} | ${cell(row.answer ?? row.error ?? "")} | ${cell(row.expected)} |`)
   ];
   return lines.join("\n");
+}
+
+function versionsOf(rows: SuiteResultRow[]): string {
+  const versions = [...new Set(rows.map((row) => row.knowledge_version).filter(Boolean))];
+  return versions.length > 0 ? ` [${versions.join(", ")}]` : "";
 }
 
 function extractAnswer(finalMessage: string | undefined): string | undefined {

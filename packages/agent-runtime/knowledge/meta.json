@@ -1,0 +1,38 @@
+{
+  "id": "g1-c1-gpt5.6sol",
+  "generation": 1,
+  "parent": "g1-c0-gpt5.6luna",
+  "created_at": "2026-09-14T04:57:24.915Z",
+  "proposer_model": "openai/gpt-5.6-sol",
+  "directive": "Favor brevity: shrink L0 to the ten highest-value entries and push everything else into category pages.",
+  "evidence_hash": "0b466cd338753a79",
+  "content_hash": "0593ef60b5b76aa5",
+  "notes": "changed: L0.md, INDEX.md, categories/free-first.md, categories/web-search.md, categories/web-extraction.md, categories/llm-gateways.md, categories/media-generation.md, categories/weather-travel.md, categories/files-communications.md, categories/social-news.md, categories/finance-crypto.md, categories/business-regulatory.md, categories/utilities.md",
+  "validation": {
+    "ok": true,
+    "errors": [],
+    "warnings": [],
+    "stats": {
+      "files": 13,
+      "l0_tokens": 646,
+      "total_tokens": 4994,
+      "referenced_services": 49,
+      "unknown_origins": []
+    }
+  },
+  "scores": {
+    "heldin": {
+      "tasks": 15,
+      "correct": 14,
+      "accuracy": 0.9333333333333333,
+      "mean_score": 0.9333333333333333,
+      "total_cost_cents": 22.5791,
+      "mean_turns": 3.1333333333333333,
+      "paid_calls": 2,
+      "unnecessary_purchases": 0,
+      "errors": 0,
+      "fitness": 13.774209
+    },
+    "report_dir": "/home/vercel-sandbox/crowdcode/eval-runs/evolve/runs/2026-09-14T04-57-24-918Z-g1-c1-gpt5-6sol"
+  }
+}

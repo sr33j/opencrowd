@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { copyFile, cp, mkdir, readFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
   appendConversationMessage,
@@ -46,7 +46,11 @@ export interface HarnessContext {
   /** Explicit subagent model, or "off" to disable delegation entirely. */
   subagentModel?: string;
   auto?: boolean;
-  /** Knowledge tree directory (L0.md, INDEX.md, categories/); replaces the static capability index. */
+  /**
+   * Knowledge tree: a directory (L0.md, INDEX.md, categories/), "none" for
+   * the static capability line (baselines), or undefined for the runtime
+   * default (OPENCROWD_KNOWLEDGE_DIR, then the bundled snapshot).
+   */
   knowledgeDir?: string;
   maxTurns?: number;
   log: (message: string) => void;
@@ -63,6 +67,8 @@ export interface HarnessRun {
   estimated_cost_usd?: number;
   tokens?: { input?: number; output?: number };
   trajectory_path?: string;
+  /** Knowledge tree version recorded on the session (undefined when the static line was used). */
+  knowledge_version?: string;
   session_dir?: string;
   artifacts_dir?: string;
   /** Confirmed paid purchases (from purchases.jsonl). */
@@ -132,10 +138,13 @@ const openCrowdHarness: GaiaHarness = {
     });
     const gateway = await buildEvalGateway(session, context);
     const promptSections = await vendorInstructions(context);
-    const capabilityIndex = await loadKnowledge(context.knowledgeDir, session.artifactsDir);
     const result = await runAgentTaskDetailed(session, prompt, {
       promptSections,
-      capabilityIndex,
+      knowledge: context.knowledgeDir === "none"
+        ? false
+        : context.knowledgeDir
+          ? { dir: context.knowledgeDir }
+          : undefined,
       llm: llm ? {
         provider: llm.provider,
         model: llm.models.main,
@@ -173,6 +182,7 @@ const openCrowdHarness: GaiaHarness = {
       llm_cost_cents: Number(budget.llm_spend_cents ?? 0),
       service_cost_cents: Number(budget.external_service_spend_cents ?? 0),
       trajectory_path: trajectoryPath,
+      knowledge_version: session.knowledge?.version,
       session_dir: session.sessionDir,
       artifacts_dir: session.artifactsDir,
       paid_calls: await countPaidPurchases(join(session.sessionDir, "purchases.jsonl")),
@@ -248,24 +258,6 @@ const codexHarness: GaiaHarness = {
     };
   }
 };
-
-/**
- * Load a knowledge tree: L0.md becomes the prompt's capability index and the
- * whole tree is copied under artifacts/knowledge so the model can read_file
- * category pages on demand (progressive disclosure).
- */
-async function loadKnowledge(knowledgeDir: string | undefined, artifactsDir: string): Promise<string | undefined> {
-  if (!knowledgeDir) {
-    return undefined;
-  }
-  const l0 = (await readFile(join(knowledgeDir, "L0.md"), "utf8")).trim();
-  await cp(knowledgeDir, join(artifactsDir, "knowledge"), { recursive: true });
-  return [
-    "Service knowledge base (derived from CrowdCode reviews of real paid calls):",
-    l0,
-    "Deeper notes per capability live in the session artifact folder knowledge/ — knowledge/INDEX.md lists the category files; read_file the relevant one (e.g. knowledge/categories/<name>.md) before calling find_paid_service for an unfamiliar capability."
-  ].join("\n");
-}
 
 async function countPaidPurchases(path: string): Promise<number> {
   try {

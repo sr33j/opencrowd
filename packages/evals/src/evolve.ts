@@ -127,7 +127,7 @@ export async function runEvolution(options: EvolveOptions): Promise<{ archive: A
       tasks: heldin,
       resultsRoot: runsDir,
       tag: entry.id,
-      knowledgeDir,
+      knowledgeDir: knowledgeDir ?? "none",
       model: options.agentModel,
       subagentModel: "off",
       parallel: options.parallel ?? 4,

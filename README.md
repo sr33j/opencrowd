@@ -133,8 +133,15 @@ and unnecessary purchases. `evals evolve` is the meta-harness: it derives a
 service knowledge tree (`L0.md` in the prompt, `INDEX.md` + category pages
 under `artifacts/knowledge/`) from CrowdCode review evidence, mutates it
 against held-in failures, keeps the quality-vs-cost Pareto frontier, and
-never shows the proposer a held-out task. Pass `--knowledge <tree dir>` to
-`evals suite` (or `run`-time integrations) to evaluate a tree.
+never shows the proposer a held-out task. `evals suite` uses the runtime's
+knowledge tree by default (the snapshot bundled with `@opencrowd/agent-runtime`,
+or `OPENCROWD_KNOWLEDGE_DIR`); pass `--knowledge <tree dir>` to evaluate a
+candidate or `--knowledge none` for the static-prompt baseline.
+
+The agent loads the same tree in normal runs: `L0.md` becomes the prompt's
+capability index and the category pages land under `artifacts/knowledge/`.
+Set `OPENCROWD_KNOWLEDGE_DIR=none` to disable it or point it at another tree;
+the loaded version is recorded on the session.
 
 ## Headless runs
 
