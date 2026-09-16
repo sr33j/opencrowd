@@ -91,8 +91,8 @@ describe("hosted economy: discovery and inspection", () => {
     expect(result.ok).toBe(true);
     const services = (result.data as any).services;
     expect(services.map((s: any) => s.service_id)).toEqual(["svc_search", "svc_social"]);
-    expect(services[0]).toMatchObject({ endpoint: SEARCH, payment_provider: "x402", payable: true, score: 2, n_eff: 12, num_reviews: 15 });
-    expect(services[1]).toMatchObject({ payment_provider: "mppx", payable: false, score: 1 });
+    expect(services[0]).toMatchObject({ endpoint: SEARCH, payment_provider: "x402", payable: true, match: 2, crowdcode_score: 4.6, n_eff: 12, num_reviews: 15 });
+    expect(services[1]).toMatchObject({ payment_provider: "mppx", payable: false, match: 1 });
     expect((result.data as any).note).toMatch(/MPP\/Tempo/);
     const byOrigin = await gateway.execute("find_paid_service", { origin: "https://weather.example" });
     expect((byOrigin.data as any).services.map((s: any) => s.service_id)).toEqual(["svc_weather"]);

@@ -484,7 +484,7 @@ function presentService(service: ListedService, score: number): Record<string, u
     endpoint: service.endpoint,
     payment_provider: service.payment_provider,
     payable: service.payment_provider === "x402",
-    score,
+    match: score,
     crowdcode_score: service.score,
     n_eff: service.n_eff,
     unproven: service.unproven,
