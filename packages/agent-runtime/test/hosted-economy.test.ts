@@ -293,3 +293,22 @@ describe("hosted economy: worker wiring", () => {
     expect(dynamic.definitions.map(d => d.name)).not.toContain("bridge_usdc");
   });
 });
+
+describe("hosted economy: review gate", () => {
+  it("stops blocking completion once CrowdCode has rejected the review twice", async () => {
+    let pending = true;
+    const economy = {
+      definitions: () => [{ name: "review_paid_service", description: "", parameters: {} }],
+      execute: async (name: string) => (name === "review_paid_service" ? { ok: false, error: "CrowdCode review failed (service identity conflict)" } : { ok: true }),
+      hasPendingRequiredReviews: async () => pending
+    } as unknown as Parameters<typeof hostedDynamicTools>[0];
+    const tools = hostedDynamicTools(economy);
+    expect(await tools.completionGate()).toMatch(/review_paid_service/);
+    await tools.execute("review_paid_service", { purchase_id: "p", rating: 4, reason: "x" });
+    expect(await tools.completionGate()).toMatch(/review_paid_service/);
+    await tools.execute("review_paid_service", { purchase_id: "p", rating: 4, reason: "x" });
+    expect(await tools.completionGate()).toBeUndefined();
+    pending = false;
+    expect(await tools.completionGate()).toBeUndefined();
+  });
+});

@@ -235,7 +235,7 @@ export class MachineWorker {
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args)) },
-          completionGate: async () => (await economy!.hasPendingRequiredReviews()) ? "a paid purchase still needs its review_paid_service call" : undefined,
+          completionGate: () => dynamicTools!.completionGate(),
           knowledge: await this.knowledgeOption(session)
         } : {}),
         onCheckpoint: async (checkpoint) => {

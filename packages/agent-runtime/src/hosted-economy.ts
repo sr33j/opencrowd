@@ -394,11 +394,32 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
   });
 }
 
-/** The gateway's dynamic tool surface for a hosted run, minus tools that have no hosted counterpart. */
-export function hostedDynamicTools(economy: EconomyGateway): DynamicToolsOption {
+/** Failed review submissions tolerated before a run may finish with the review still pending. */
+export const MAX_REVIEW_ATTEMPTS = 2;
+
+export interface HostedDynamicTools extends DynamicToolsOption {
+  /** Blocks completion while a paid purchase awaits its review, until CrowdCode has rejected the review twice. */
+  completionGate(): Promise<string | undefined>;
+}
+
+/**
+ * The gateway's dynamic tool surface for a hosted run, minus tools that have
+ * no hosted counterpart. A review the backend keeps rejecting must not hold
+ * the user's answer hostage, so the gate releases after repeated failures.
+ */
+export function hostedDynamicTools(economy: EconomyGateway): HostedDynamicTools {
+  let failedReviews = 0;
   return {
     definitions: economy.definitions().filter((definition) => !HIDDEN_HOSTED_TOOLS.has(definition.name)),
-    execute: (name, args) => economy.execute(name, args)
+    execute: async (name, args) => {
+      const result = await economy.execute(name, args);
+      if (name === "review_paid_service" && !result.ok) failedReviews += 1;
+      return result;
+    },
+    completionGate: async () => {
+      if (failedReviews >= MAX_REVIEW_ATTEMPTS || !(await economy.hasPendingRequiredReviews())) return undefined;
+      return "a paid purchase still needs its review_paid_service call";
+    }
   };
 }
 
