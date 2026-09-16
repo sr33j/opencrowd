@@ -18,6 +18,19 @@
   is told never to ask for values in the chat.
 - Emit a redacted `input` summary on `tool.started` events (commands, paths
   and identifiers only; never file contents or secret values).
+- Give hosted agents paid services. With `--bridge-socket` the worker builds
+  the economy gateway with hosted adapters (`createHostedEconomy`): discovery
+  and reputation from CrowdCode's public API, inspection by an unpaid probe
+  that decodes the x402 v2 `payment-required` offer, and payment, review and
+  balance over the supervisor socket as `economy.pay`, `economy.review` and
+  `economy.balance`. Only CrowdCode-listed x402 services on Base are payable;
+  MPP/Tempo listings are shown but refused. The hosted system prompt now
+  describes the agent's own USDC wallet instead of saying paid services are
+  unavailable, the loop will not finish with an unreviewed paid purchase, and
+  economy tool calls are summarized on `tool.started`.
+- Clamp `run_shell` `timeout_ms` into 1–30000 ms (non-integers fall back to
+  the 10-second default) instead of rejecting the call; hosted models were
+  repeatedly failing with "timeout_ms must be between 1 and 30000".
 
 ## 0.4.0 — 2026-09-15
 

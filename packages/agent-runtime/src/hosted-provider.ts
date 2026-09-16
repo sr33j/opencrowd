@@ -1,7 +1,7 @@
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
-import type { LlmMessage, LlmProvider, LlmResponse } from "./index.js";
+import type { DynamicToolDefinition, LlmMessage, LlmProvider, LlmResponse } from "./index.js";
 import { RuntimePause, type HostedToolExecutor } from "./worker.js";
 
 /** The bridge refused the request before any payment was made (`paid: false`);
@@ -61,15 +61,17 @@ export function trimHostedMessages(messages: LlmMessage[], budgetBytes = 48_000)
 }
 
 /** Narrow local transport. The supervisor owns remote authorization; neither
- * model code nor the agent subprocess receives wallet or gateway credentials. */
-export function createHostedProvider(options: { socketPath: string; runId: string; sessionId: string }): LlmProvider {
+ * model code nor the agent subprocess receives wallet or gateway credentials.
+ * `extraTools` are the run's dynamic (economy gateway) definitions, advertised
+ * to the hosted model alongside the built-in tools. */
+export function createHostedProvider(options: { socketPath: string; runId: string; sessionId: string; extraTools?: DynamicToolDefinition[] }): LlmProvider {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
+  const tools = [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)), ...(options.extraTools ?? [])];
   return {
     async complete(messages, context) {
       const operationId = context?.operationId;
       if (!operationId?.startsWith(`${options.runId}:llm:`)) throw new Error("Hosted model operation scope is missing");
-      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: trimHostedMessages(messages),
-        tools: OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)) });
+      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: trimHostedMessages(messages), tools });
       if (Buffer.byteLength(body) > 64000) throw new Error("Hosted model context exceeds 64 KiB");
       const result = await new Promise<any>((resolve, reject) => {
         const req = request({ socketPath: options.socketPath, path: "/model", method: "POST", signal: context?.signal,
@@ -126,6 +128,48 @@ function rejectedRequest(status: number, text: string): HostedRequestError | und
 /** Upper bound on one supervisor-executed tool request, including inlined source. */
 const HOSTED_TOOL_REQUEST_BYTES = 1024 * 1024;
 
+export interface HostedBridgeOptions { socketPath: string; runId: string; sessionId: string }
+
+/** The supervisor's reply to `POST /tool`: a tool result, optionally with a machine-readable failure code. */
+export interface HostedToolReply { ok: boolean; data?: unknown; error?: string; code?: string }
+
+/**
+ * One bounded `POST /tool` on the credential-free supervisor socket. Rejects
+ * on oversize, transport failure, a non-200 status, or a malformed reply;
+ * callers decide whether a lost reply is harmless (deploys) or ambiguous
+ * (payments).
+ */
+export async function postHostedTool(options: HostedBridgeOptions, name: string, args: Record<string, unknown>,
+  settings: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<HostedToolReply> {
+  if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
+  const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, name, arguments: args });
+  if (Buffer.byteLength(body) > HOSTED_TOOL_REQUEST_BYTES) throw new Error("tool request exceeds 1 MiB");
+  const result = await new Promise<any>((resolve, reject) => {
+    const req = request({ socketPath: options.socketPath, path: "/tool", method: "POST", signal: settings.signal,
+      headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, res => {
+      const chunks: Buffer[] = []; let bytes = 0;
+      res.on("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > 1024 * 1024) res.destroy(new Error("Hosted tool response exceeds 1 MiB"));
+        else chunks.push(chunk);
+      });
+      res.on("error", reject);
+      res.on("end", () => {
+        try {
+          if (res.statusCode !== 200) throw new Error(`Hosted tool request failed (${res.statusCode})`);
+          resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+        } catch (error) { reject(error); }
+      });
+    });
+    req.setTimeout(settings.timeoutMs ?? 180000, () => req.destroy(new Error("Hosted tool timed out")));
+    req.on("error", reject); req.end(body);
+  });
+  if (typeof result?.ok !== "boolean") throw new Error("Invalid hosted tool response");
+  return result.ok
+    ? { ok: true, data: result.data }
+    : { ok: false, error: String(result.error ?? "tool failed"), ...(typeof result.code === "string" ? { code: result.code } : {}) };
+}
+
 /**
  * Supervisor-executed tools (deploy_service, request_secret) travel over the
  * same credential-free socket. For deploy_service the worker inlines the entry
@@ -133,7 +177,7 @@ const HOSTED_TOOL_REQUEST_BYTES = 1024 * 1024;
  * request_secret forwards its arguments untouched. The supervisor owns every
  * remote credential and secret value and returns a plain tool result.
  */
-export function createHostedToolExecutor(options: { socketPath: string; runId: string; sessionId: string }): HostedToolExecutor {
+export function createHostedToolExecutor(options: HostedBridgeOptions): HostedToolExecutor {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
   return async (name, args, context) => {
     let source: string | undefined;
@@ -142,33 +186,12 @@ export function createHostedToolExecutor(options: { socketPath: string; runId: s
       try { source = await readArtifact(context.session, args.entry); }
       catch (error) { return { ok: false, error: `entry could not be read: ${(error as Error).message}` }; }
     }
-    const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, name, arguments: { ...args, ...(source === undefined ? {} : { source }) } });
-    if (Buffer.byteLength(body) > HOSTED_TOOL_REQUEST_BYTES) return { ok: false, error: "tool request exceeds 1 MiB; reduce the service source" };
     try {
-      const result = await new Promise<any>((resolve, reject) => {
-        const req = request({ socketPath: options.socketPath, path: "/tool", method: "POST", signal: context.signal,
-          headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, res => {
-          const chunks: Buffer[] = []; let bytes = 0;
-          res.on("data", (chunk: Buffer) => {
-            bytes += chunk.length;
-            if (bytes > 1024 * 1024) res.destroy(new Error("Hosted tool response exceeds 1 MiB"));
-            else chunks.push(chunk);
-          });
-          res.on("error", reject);
-          res.on("end", () => {
-            try {
-              if (res.statusCode !== 200) throw new Error(`Hosted tool request failed (${res.statusCode})`);
-              resolve(JSON.parse(Buffer.concat(chunks).toString("utf8")));
-            } catch (error) { reject(error); }
-          });
-        });
-        req.setTimeout(180000, () => req.destroy(new Error("Hosted tool timed out")));
-        req.on("error", reject); req.end(body);
-      });
-      if (typeof result?.ok !== "boolean") throw new Error("Invalid hosted tool response");
-      return (result.ok ? { ok: true, data: result.data } : { ok: false, error: String(result.error ?? "tool failed") }) as ToolResult;
+      const result = await postHostedTool(options, name, { ...args, ...(source === undefined ? {} : { source }) }, { signal: context.signal });
+      return (result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error ?? "tool failed" }) as ToolResult;
     } catch (error) {
       if (context.signal?.aborted) throw error;
+      if ((error as Error).message === "tool request exceeds 1 MiB") return { ok: false, error: "tool request exceeds 1 MiB; reduce the service source" };
       // Unlike model calls, a lost tool response never implies a payment; the
       // deploy is idempotent per slug, so the model may simply retry.
       return { ok: false, error: `hosted tool unavailable: ${(error as Error).message}` };

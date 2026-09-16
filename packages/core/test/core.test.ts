@@ -13,6 +13,7 @@ import {
   readLedger,
   createSession,
   DEFAULT_CONFIG,
+  executeTool,
   listArtifacts,
   loadConfig,
   openCrowdToolDefinition,
@@ -209,6 +210,20 @@ describe("shell policy", () => {
     await expect(runShell(enabled, "echo hi", root, 60_000)).rejects.toThrow("timeout_ms");
   });
 
+  it("clamps run_shell timeout_ms into the allowed range instead of failing the call", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+    for (const timeout_ms of [60_000, 0, -5, 2.5, "9000", undefined]) {
+      const result = await executeTool("run_shell", { command: "echo clamped", timeout_ms }, { session });
+      expect(result.ok, `timeout_ms=${String(timeout_ms)}`).toBe(true);
+      expect(result.data).toMatchObject({ exit_code: 0, stdout: expect.stringContaining("clamped") });
+    }
+    // A 1 ms ceiling still runs (and times out) rather than being rejected as invalid input.
+    const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms: -100 }, { session });
+    expect(tiny.ok).toBe(true);
+    expect(tiny.data).toMatchObject({ timed_out: true });
+  });
+
   it("resolves artifact cwd and returns spawn failures as tool results", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, shellEnabled: true });
@@ -318,6 +333,13 @@ describe("tool input summaries", () => {
     expect(summarizeToolInput("complete_session", { final_message: "y".repeat(300) })).toEqual({ summary: "y".repeat(200) });
     expect(summarizeToolInput("complete_session", {})).toEqual({});
     expect(summarizeToolInput("get_budget_status", {})).toBeUndefined();
+    expect(summarizeToolInput("find_paid_service", { query: "web search", limit: 3 })).toEqual({ query: "web search" });
+    expect(summarizeToolInput("find_paid_service", { origin: "https://stableenrich.dev" })).toEqual({ origin: "https://stableenrich.dev" });
+    expect(summarizeToolInput("inspect_paid_service", { url: "https://svc.example/api", method: "GET", sample_body: { secret: "x" } }))
+      .toEqual({ url: "https://svc.example/api", method: "GET" });
+    expect(summarizeToolInput("call_paid_service", { url: "https://svc.example/api", max_cost_cents: 5, body: { query: "private" } }))
+      .toEqual({ url: "https://svc.example/api", max_cost_cents: "5" });
+    expect(summarizeToolInput("review_paid_service", { purchase_id: "p-1", rating: 4, reason: "long text" })).toEqual({ purchase_id: "p-1", rating: "4" });
     expect(summarizeToolInput("spawn_subagent", { task: "secret task" })).toBeUndefined();
     expect(JSON.stringify(summarizeToolInput("save_file", { path: "p", content: "TOP SECRET BODY" }))).not.toContain("TOP SECRET");
   });

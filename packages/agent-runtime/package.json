@@ -34,9 +34,10 @@
   "dependencies": {
     "@blockrun/llm": "3.13.2",
     "@opencrowd/core": "0.1.0",
+    "@opencrowd/economy": "0.1.0",
+    "@opencrowd/protocol": "0.1.0",
     "venice-x402-client": "^0.2.0",
-    "x402": "^1.2.0",
-    "@opencrowd/protocol": "0.1.0"
+    "x402": "^1.2.0"
   },
   "scripts": {
     "build": "tsc -b"
