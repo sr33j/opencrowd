@@ -11,7 +11,8 @@ export type ToolName =
   | "spawn_subagent"
   | "check_subagents"
   | "complete_session"
-  | "deploy_service";
+  | "deploy_service"
+  | "request_secret";
 
 export const TOOL_NAMES: ToolName[] = [
   "get_budget_status",
@@ -22,14 +23,15 @@ export const TOOL_NAMES: ToolName[] = [
   "spawn_subagent",
   "check_subagents",
   "complete_session",
-  "deploy_service"
+  "deploy_service",
+  "request_secret"
 ];
 
 /**
  * Tools that only exist when a supervisor executes them on the agent's behalf.
  * Local runs never advertise them; the hosted worker routes them over the bridge.
  */
-export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service"];
+export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "request_secret"];
 
 /** Tools a spawned subagent may use: local capabilities only, one level deep. */
 export const SUBAGENT_TOOL_NAMES: ToolName[] = [
@@ -44,6 +46,7 @@ export interface JsonSchema {
   type?: string;
   description?: string;
   minimum?: number;
+  pattern?: string;
   properties?: Record<string, JsonSchema>;
   required?: string[];
   additionalProperties?: boolean | JsonSchema;
@@ -90,6 +93,8 @@ function toolDescription(name: ToolName): string {
       return "Finish the agent run and present a concise final answer.";
     case "deploy_service":
       return "Deploy a paid HTTP service you wrote to OpenCrowd's hosting. The entry file must be a JavaScript or TypeScript ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay the listed USDC price per call with x402; payments settle to this agent's own wallet. Vault secrets listed in `secrets` are exposed to the service as env vars (env.NAME) but contain opaque placeholders: the real value is substituted at the network boundary only for requests to `allowed_hosts`, so never print or return a secret. Redeploying the same slug updates the service in place. Returns the public URL and listing status.";
+    case "request_secret":
+      return "Ask the user to add a named secret (an API key or token) to this agent's encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into the chat and never expect to see the value yourself. Returns { status: \"requested\" | \"active\", placeholder? }: \"active\" means the secret already exists and can be used now, \"requested\" means the user has been asked and you should continue or finish without it. Reference the secret by name: list it in deploy_service `secrets` and read it in service code as env.NAME; the real value is substituted only on requests to `allowed_hosts`.";
   }
 }
 
@@ -149,6 +154,40 @@ function toolParameters(name: ToolName): JsonSchema {
         secrets: { type: "array", description: "Names of vault secrets the service needs as env vars.", items: stringSchema("Vault secret name.") },
         allowed_hosts: { type: "array", description: "Upstream hostnames the service is allowed to call, for example api.coingecko.com. Any other outbound host is blocked.", items: stringSchema("Hostname.") }
       }, ["slug", "name", "description", "price_usd", "entry", "routes"]);
+    case "request_secret":
+      return objectSchema({
+        name: { type: "string", pattern: "^[A-Z][A-Z0-9_]{1,63}$", description: "Secret name in SCREAMING_SNAKE_CASE, for example OPENAI_API_KEY. This is the env var name your service reads." },
+        allowed_hosts: { type: "array", description: "Hostnames the secret may be sent to, for example api.openai.com. The vault only substitutes the real value on requests to these hosts.", items: stringSchema("Hostname.") },
+        reason: stringSchema("One short sentence shown to the user explaining why the secret is needed.")
+      }, ["name", "allowed_hosts", "reason"]);
+  }
+}
+
+/**
+ * Redacted view of a tool call for progress events. Only names, paths and
+ * short commands are surfaced; file contents and secret values never are.
+ */
+export function summarizeToolInput(name: ToolName, args: Record<string, unknown>): Record<string, string | string[]> | undefined {
+  const text = (value: unknown, max = 200) => typeof value === "string" ? value.slice(0, max) : undefined;
+  const hosts = (value: unknown) => Array.isArray(value) ? value.filter((host): host is string => typeof host === "string").map((host) => host.slice(0, 200)) : undefined;
+  const pick = (fields: Record<string, string | string[] | undefined>) =>
+    Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Record<string, string | string[]>;
+  switch (name) {
+    case "run_shell":
+      return { command: String(args.command).slice(0, 200) };
+    case "save_file":
+    case "read_file":
+      return pick({ path: text(args.path) });
+    case "list_files":
+      return pick({ path: text(args.path ?? args.prefix) });
+    case "deploy_service":
+      return pick({ slug: text(args.slug), name: text(args.name), price_usd: text(args.price_usd) });
+    case "request_secret":
+      return pick({ name: text(args.name), allowed_hosts: hosts(args.allowed_hosts) });
+    case "complete_session":
+      return pick({ summary: text(args.final_message ?? args.summary ?? args.message) });
+    default:
+      return undefined;
   }
 }
 

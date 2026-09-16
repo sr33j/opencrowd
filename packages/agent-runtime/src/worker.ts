@@ -2,7 +2,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  atomicWrite, containedPath, createSession, executeTool, loadSession, resolveAgentPaths, HOSTED_ONLY_TOOL_NAMES,
+  atomicWrite, containedPath, createSession, executeTool, loadSession, resolveAgentPaths, summarizeToolInput, HOSTED_ONLY_TOOL_NAMES,
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
@@ -10,6 +10,7 @@ import {
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import { runAgentTaskDetailed, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
+import { HostedRequestError } from "./hosted-provider.js";
 
 export class RuntimePause extends Error {
   constructor(readonly outcome: RunOutcome, readonly operationId: string, message: string) {
@@ -224,7 +225,7 @@ export class MachineWorker {
           if (saved?.result) return saved.result;
           if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
           await this.mutate(() => { run.tools[id] = { digest }; });
-          await this.emit("tool.started", { toolCallId: id, toolName: name }, runId, run.commandId);
+          await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args) }, runId, run.commandId);
           const output = hosted && HOSTED_ONLY_TOOL_NAMES.includes(name) ? await hosted(name, args, context) : await local(name, args, context);
           await this.mutate(() => { run.tools[id].result = output; });
           await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
@@ -242,7 +243,8 @@ export class MachineWorker {
       else if (error instanceof RuntimePause) {
         await this.mutate(() => { run.pendingOperationId = error.operationId; });
         await this.finish(runId, run, error.outcome, error.message);
-      } else await this.finish(runId, run, "failed", "Execution failed; inspect the run diagnostics");
+      } else if (error instanceof HostedRequestError) await this.finish(runId, run, "failed", error.message);
+      else await this.finish(runId, run, "failed", "Execution failed; inspect the run diagnostics");
     }
   }
 
