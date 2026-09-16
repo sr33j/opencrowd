@@ -13,7 +13,7 @@ import {
   remainingBudgetCents,
   reserveBudget,
   OPEN_CROWD_TOOLS,
-  SUBAGENT_TOOL_NAMES,
+  HOSTED_ONLY_TOOL_NAMES, SUBAGENT_TOOL_NAMES,
   TOOL_NAMES,
   type ProgressEvent,
   type SessionState,
@@ -182,6 +182,10 @@ export function createMockToolExecutor(): ToolExecutor {
           return ok({ subagents: [] });
         case "complete_session":
           return ok(await completeSession(context.session, stringValue(args.final_message) ?? "Mock test mode session completed."));
+        case "deploy_service":
+          return { ok: false, error: "deploy_service is unavailable in mock mode" };
+        case "request_secret":
+          return { ok: false, error: "request_secret is unavailable in mock mode" };
       }
     } catch (error) {
       return { ok: false, error: (error as Error).message };
@@ -215,6 +219,10 @@ function mockToolArguments(
       return { task: `Mock subtask for: ${task.slice(0, 80)}` };
     case "complete_session":
       return { final_message: `Mock test mode completed task: ${task.slice(0, 120)}` };
+    case "deploy_service":
+      return { slug: "mock-service", name: "Mock service", description: task.slice(0, 120), price_usd: "0.001", entry: "service/index.js", routes: [] };
+    case "request_secret":
+      return { name: "MOCK_API_KEY", allowed_hosts: ["api.example.com"], reason: `Mock secret for: ${task.slice(0, 80)}` };
   }
 }
 
@@ -708,7 +716,7 @@ export async function runAgentTask(session: SessionState, task: string, options:
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools = options.tools
-    ?? (options.subagent ? TOOL_NAMES : TOOL_NAMES.filter((name) => name !== "spawn_subagent"));
+    ?? TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent"));
   const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
   const provider = options.provider ?? (options.llm
     ? new BudgetedLlmProvider(session, options.llm.provider, {
@@ -749,6 +757,19 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   } else {
     systemPromptParts.push(
       "Paid external services are unavailable in this run; work with local tools only and say so if the task truly requires external capability."
+    );
+  }
+  const hostedTools = options.hosted ? (options.tools ?? TOOL_NAMES) : [];
+  if (hostedTools.includes("deploy_service")) {
+    systemPromptParts.push(
+      "Hosting: you can publish paid HTTP services with deploy_service. Write the entry module with save_file (for example service/index.js) as an ES module with `export default { async fetch(request, env) { ... } }`, with no imports and no npm packages; the Workers runtime provides fetch, Request, Response, URL and crypto.",
+      "The platform enforces payment before your handler runs, so your code only implements the route logic. Vault secrets you list in `secrets` arrive as env.NAME placeholders that are swapped for the real value only on outbound requests to `allowed_hosts`; never log, hash locally, or return a secret, and never build URLs to hosts you did not declare.",
+      "After deploy_service succeeds, report the public URL, the price, and how to call each route."
+    );
+  }
+  if (hostedTools.includes("request_secret")) {
+    systemPromptParts.push(
+      "Secrets: when a service needs an API key or token, call request_secret with a SCREAMING_SNAKE_CASE name, the hosts it may be sent to, and a one-sentence reason. The user adds the value in their own UI; never ask them to paste a secret into the chat and never expect to see it. If the result is \"active\", list the name in deploy_service `secrets` and read it as env.NAME; if it is \"requested\", tell the user what to add and continue or finish without it."
     );
   }
   systemPromptParts.push("End by calling complete_session with a concise final message.");

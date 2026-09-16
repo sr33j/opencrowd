@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Trim the replayed conversation to 48 KB before each hosted model request
+  (`trimHostedMessages`): the system prompt, the original task and the last
+  four messages are always kept; older tool outputs are blanked first, then
+  whole older turns are dropped with their tool results, and only then is a
+  single oversized message cut down. Hosted agents no longer die once their
+  history nears the bridge's 64 KB limit.
+- Classify hosted bridge failures. A non-200 response whose JSON body says
+  `paid: false` now fails the run with the bridge's user-readable message
+  (`HostedRequestError`) instead of pausing with `payment_unknown`; every
+  ambiguous failure still pauses for payment reconciliation.
+- Add the hosted-only `request_secret` tool, which asks the user to add a
+  named secret to the agent's encrypted vault through the host UI. The model
+  references secrets by name (`env.NAME` via `deploy_service` `secrets`) and
+  is told never to ask for values in the chat.
+- Emit a redacted `input` summary on `tool.started` events (commands, paths
+  and identifiers only; never file contents or secret values).
+
 ## 0.4.0 — 2026-09-15
 
 - Add hosted workers with a versioned command/event protocol, explicit homes,
@@ -12,6 +31,10 @@
 - Publish GitHub releases to npm using Trusted Publishing, with package
   version checks and a packed-CLI smoke test.
 
+- Add the hosted-only `deploy_service` tool. Hosted workers advertise it to
+  the model and execute it through the supervisor over the existing
+  credential-free bridge socket (`POST /tool`), inlining the entry artifact.
+  Local runs never advertise it and refuse it if asked by name.
 - Preserve provider finish reasons, reject prematurely closed LLM streams,
   and make one bounded continuation when generation reaches its output-token
   limit instead of silently completing with a response cut off mid-word.

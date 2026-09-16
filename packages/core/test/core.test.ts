@@ -16,6 +16,7 @@ import {
   listArtifacts,
   loadConfig,
   openCrowdToolDefinition,
+  summarizeToolInput,
   readAgentCashWallet,
   requireAgentCashWallet,
   reserveBudget,
@@ -301,5 +302,23 @@ describe("ledger CSV round-trip", () => {
       notes
     });
     expect(rows[1]).toMatchObject({ resource_url: "https://svc.example/api/second", notes: "plain" });
+  });
+});
+
+describe("tool input summaries", () => {
+  it("surfaces identifiers only and never file contents or secret values", () => {
+    expect(summarizeToolInput("run_shell", { command: "x".repeat(500), cwd: "/tmp" })).toEqual({ command: "x".repeat(200) });
+    expect(summarizeToolInput("save_file", { path: "notes.md", content: "TOP SECRET BODY" })).toEqual({ path: "notes.md" });
+    expect(summarizeToolInput("read_file", { path: "notes.md" })).toEqual({ path: "notes.md" });
+    expect(summarizeToolInput("list_files", { prefix: "service/" })).toEqual({ path: "service/" });
+    expect(summarizeToolInput("deploy_service", { slug: "svc", name: "Svc", price_usd: "0.001", entry: "service/index.js", secrets: ["KEY"] }))
+      .toEqual({ slug: "svc", name: "Svc", price_usd: "0.001" });
+    expect(summarizeToolInput("request_secret", { name: "KEY", allowed_hosts: ["api.example.com", 42], reason: "why" }))
+      .toEqual({ name: "KEY", allowed_hosts: ["api.example.com"] });
+    expect(summarizeToolInput("complete_session", { final_message: "y".repeat(300) })).toEqual({ summary: "y".repeat(200) });
+    expect(summarizeToolInput("complete_session", {})).toEqual({});
+    expect(summarizeToolInput("get_budget_status", {})).toBeUndefined();
+    expect(summarizeToolInput("spawn_subagent", { task: "secret task" })).toBeUndefined();
+    expect(JSON.stringify(summarizeToolInput("save_file", { path: "p", content: "TOP SECRET BODY" }))).not.toContain("TOP SECRET");
   });
 });

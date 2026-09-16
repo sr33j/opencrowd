@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { MachineWorker, createWorkerDemoProvider, createHostedProvider } from "@opencrowd/agent-runtime";
+import { MachineWorker, createWorkerDemoProvider, createHostedProvider, createHostedToolExecutor } from "@opencrowd/agent-runtime";
 import { readOption } from "./shared.js";
 
 export async function workerCommand(args: string[]): Promise<void> {
@@ -9,6 +9,7 @@ export async function workerCommand(args: string[]): Promise<void> {
   if (args.includes("--demo") === !!socketPath) throw new Error("worker requires exactly one of --demo or --bridge-socket <path>");
   const worker = new MachineWorker({ agentHome: home, provider: (run, session) => socketPath
     ? createHostedProvider({ socketPath, runId: run.runId, sessionId: session.sessionId }) : createWorkerDemoProvider(),
+    hostedTools: socketPath ? (run, session) => createHostedToolExecutor({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,
     output: line => { process.stdout.write(line); } });
   await worker.initialize();
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });

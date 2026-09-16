@@ -41,6 +41,10 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         };
       case "complete_session":
         return ok(await completeSession(context.session, requiredString(args.final_message, "final_message")));
+      case "deploy_service":
+        return { ok: false, error: "deploy_service is only available to hosted OpenCrowd agents; this run has no hosting supervisor" };
+      case "request_secret":
+        return { ok: false, error: "request_secret is only available to hosted OpenCrowd agents" };
     }
   } catch (error) {
     context.signal?.throwIfAborted();
