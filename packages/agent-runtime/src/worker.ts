@@ -9,8 +9,11 @@ import {
   encodeEvent, parseCommandLine, type CommandOf, type Event, type EventType,
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
-import { runAgentTaskDetailed, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
+import type { EconomyGateway } from "@opencrowd/economy";
+import { runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { HostedRequestError } from "./hosted-provider.js";
+import { hostedDynamicTools } from "./hosted-economy.js";
+import { loadKnowledgeTree } from "./knowledge.js";
 
 export class RuntimePause extends Error {
   constructor(readonly outcome: RunOutcome, readonly operationId: string, message: string) {
@@ -42,12 +45,14 @@ export type HostedToolExecutor = (name: ToolName, args: Record<string, unknown>,
 
 export interface WorkerOptions {
   agentHome: string;
-  /** Inject a remote-only provider or demo. No local provider selection occurs. */
-  provider: (run: CommandOf<"run.start">, session: SessionState) => LlmProvider;
+  /** Inject a remote-only provider or demo. No local provider selection occurs. `extraTools` are the run's economy tool definitions. */
+  provider: (run: CommandOf<"run.start">, session: SessionState, extraTools: DynamicToolDefinition[]) => LlmProvider;
   output: (line: string) => void | Promise<void>;
   toolExecutor?: ToolExecutor;
   /** Supervisor-executed tools; absent means hosted-only tools report themselves unavailable. */
   hostedTools?: (run: CommandOf<"run.start">, session: SessionState) => HostedToolExecutor;
+  /** Paid-capability gateway (hosted adapters); absent means paid services are unavailable to the model. */
+  economy?: (run: CommandOf<"run.start">, session: SessionState) => EconomyGateway;
   now?: () => Date;
   id?: () => string;
 }
@@ -199,10 +204,40 @@ export class MachineWorker {
       await this.emit("run.state", { sessionId: session.sessionId, state: "running" }, runId, run.commandId);
       const local = this.options.toolExecutor ?? executeTool;
       const hosted = this.options.hostedTools?.(run.start, session);
+      const economy = this.options.economy?.(run.start, session);
+      const dynamicTools = economy ? hostedDynamicTools(economy) : undefined;
+      // Every tool call, built-in or economy, is recorded once per checkpoint turn and replayed from its stored result.
+      const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>): Promise<ToolResult> => {
+        const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
+        // Providers may reuse tool IDs on later turns. Results are scoped to
+        // their checkpoint turn so a later call cannot replay an old result.
+        const id = `${run.checkpoint?.turn ?? 0}:${call?.id ?? randomUUID()}`;
+        const digest = createHash("sha256").update(JSON.stringify({ name, args })).digest("hex");
+        const saved = run.tools[id];
+        if (saved && saved.digest !== digest) throw new Error("tool request digest mismatch");
+        if (saved?.result) return saved.result;
+        if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
+        if (saved && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
+        await this.mutate(() => { run.tools[id] = { digest }; });
+        await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args) }, runId, run.commandId);
+        const output = await invoke();
+        await this.mutate(() => { run.tools[id].result = output; });
+        await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
+          error: output.error }, runId, run.commandId);
+        if (name === "save_file" && output.ok) await this.emit("artifact.created", {
+          artifactId: id, name: String(args.path), path: String(args.path).replace(/^artifacts\//, "")
+        }, runId, run.commandId);
+        return output;
+      };
       const result = await runAgentTaskDetailed(session, run.start.payload.prompt, {
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
-        provider: this.options.provider(run.start, session),
+        provider: this.options.provider(run.start, session, dynamicTools?.definitions ?? []),
         history: run.checkpoint ? undefined : await this.history(session),
+        ...(dynamicTools ? {
+          dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args)) },
+          completionGate: async () => (await economy!.hasPendingRequiredReviews()) ? "a paid purchase still needs its review_paid_service call" : undefined,
+          knowledge: await this.knowledgeOption(session)
+        } : {}),
         onCheckpoint: async (checkpoint) => {
           await this.mutate(() => { run.checkpoint = checkpoint; run.checkpointId = randomUUID(); });
           // Human-readable mirror; worker.json is authoritative after an interrupted write.
@@ -214,27 +249,8 @@ export class MachineWorker {
             messageId: randomUUID(), content: message.content
           }, runId, run.commandId);
         },
-        toolExecutor: async (name, args, context) => {
-          const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
-          // Providers may reuse tool IDs on later turns. Results are scoped to
-          // their checkpoint turn so a later call cannot replay an old result.
-          const id = `${run.checkpoint?.turn ?? 0}:${call?.id ?? randomUUID()}`;
-          const digest = createHash("sha256").update(JSON.stringify({ name, args })).digest("hex");
-          const saved = run.tools[id];
-          if (saved && saved.digest !== digest) throw new Error("tool request digest mismatch");
-          if (saved?.result) return saved.result;
-          if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
-          await this.mutate(() => { run.tools[id] = { digest }; });
-          await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args) }, runId, run.commandId);
-          const output = hosted && HOSTED_ONLY_TOOL_NAMES.includes(name) ? await hosted(name, args, context) : await local(name, args, context);
-          await this.mutate(() => { run.tools[id].result = output; });
-          await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
-            error: output.error }, runId, run.commandId);
-          if (name === "save_file" && output.ok) await this.emit("artifact.created", {
-            artifactId: id, name: String(args.path), path: String(args.path).replace(/^artifacts\//, "")
-          }, runId, run.commandId);
-          return output;
-        }
+        toolExecutor: (name, args, context) => record(name, args, () =>
+          hosted && HOSTED_ONLY_TOOL_NAMES.includes(name) ? hosted(name, args, context) : local(name, args, context))
       });
       await this.finish(runId, run, result.outcome === "stopped" ? "user_stopped" : result.outcome,
         String(result.summary.final_message ?? ""));
@@ -246,6 +262,12 @@ export class MachineWorker {
       } else if (error instanceof HostedRequestError) await this.finish(runId, run, "failed", error.message);
       else await this.finish(runId, run, "failed", "Execution failed; inspect the run diagnostics");
     }
+  }
+
+  /** Keep the bundled knowledge tree when it loads; a broken snapshot must never fail a hosted run. */
+  private async knowledgeOption(session: SessionState): Promise<false | undefined> {
+    try { await loadKnowledgeTree(session, {}); return undefined; }
+    catch { return false; }
   }
 
   private async history(session: SessionState): Promise<LoopCheckpoint["messages"]> {

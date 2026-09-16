@@ -36,6 +36,7 @@ export * from "./llm-runtime.js";
 export * from "./runtime.js";
 export * from "./worker.js";
 export * from "./hosted-provider.js";
+export * from "./hosted-economy.js";
 export * from "./x402-proxy.js";
 export * from "./knowledge.js";
 
@@ -741,13 +742,18 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     : undefined;
   const capabilityIndex = options.capabilityIndex ?? (knowledge ? renderCapabilityIndex(knowledge.l0) : undefined);
   const systemPromptParts = [
-    "You are the local OpenCrowd agent, a CLI agent with a USDC wallet running on the user's personal machine.",
+    options.hosted
+      ? "You are a hosted OpenCrowd agent running in the cloud with your own USDC wallet on Base."
+      : "You are the local OpenCrowd agent, a CLI agent with a USDC wallet running on the user's personal machine.",
     "Try to solve the user's task completely. Use local files and bash when they are sufficient, but remember they are bounded by the user's installed tools, credentials, network, open ports, and process lifetime.",
     "Before repeatedly fighting the local environment, decide whether the task needs external capability such as hosting, persistent infrastructure, remote compute, specialized APIs, live data, or access the user's device does not have."
   ];
   if (options.dynamicTools) {
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
+      ...(options.hosted
+        ? ["Discovery goes through CrowdCode's payment-verified rankings; you can pay x402 services on Base automatically within the user's limits (typically $0.05 per call); MPP/Tempo services are listed but not payable here."]
+        : []),
       capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",

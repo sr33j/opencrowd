@@ -167,8 +167,8 @@ function toolParameters(name: ToolName): JsonSchema {
  * Redacted view of a tool call for progress events. Only names, paths and
  * short commands are surfaced; file contents and secret values never are.
  */
-export function summarizeToolInput(name: ToolName, args: Record<string, unknown>): Record<string, string | string[]> | undefined {
-  const text = (value: unknown, max = 200) => typeof value === "string" ? value.slice(0, max) : undefined;
+export function summarizeToolInput(name: string, args: Record<string, unknown>): Record<string, string | string[]> | undefined {
+  const text = (value: unknown, max = 200) => typeof value === "string" ? value.slice(0, max) : typeof value === "number" ? String(value) : undefined;
   const hosts = (value: unknown) => Array.isArray(value) ? value.filter((host): host is string => typeof host === "string").map((host) => host.slice(0, 200)) : undefined;
   const pick = (fields: Record<string, string | string[] | undefined>) =>
     Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as Record<string, string | string[]>;
@@ -186,6 +186,14 @@ export function summarizeToolInput(name: ToolName, args: Record<string, unknown>
       return pick({ name: text(args.name), allowed_hosts: hosts(args.allowed_hosts) });
     case "complete_session":
       return pick({ summary: text(args.final_message ?? args.summary ?? args.message) });
+    case "find_paid_service":
+      return pick({ query: text(args.query), origin: text(args.origin) });
+    case "inspect_paid_service":
+      return pick({ url: text(args.url), method: text(args.method) });
+    case "call_paid_service":
+      return pick({ url: text(args.url), method: text(args.method), max_cost_cents: text(args.max_cost_cents) });
+    case "review_paid_service":
+      return pick({ purchase_id: text(args.purchase_id), rating: text(args.rating) });
     default:
       return undefined;
   }

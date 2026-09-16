@@ -30,7 +30,7 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
           context.session,
           requiredString(args.command, "command"),
           optionalString(args.cwd, "cwd") ?? context.session.workspaceRoot,
-          optionalInteger(args.timeout_ms, "timeout_ms") ?? 10_000,
+          shellTimeoutMs(args.timeout_ms),
           { signal: context.signal }
         ));
       case "spawn_subagent":
@@ -109,14 +109,15 @@ function optionalString(value: unknown, label: string): string | undefined {
   return value;
 }
 
-function optionalInteger(value: unknown, label: string): number | undefined {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
+const DEFAULT_SHELL_TIMEOUT_MS = 10_000;
+const MAX_SHELL_TIMEOUT_MS = 30_000;
+
+/** Models routinely ask for longer timeouts than the shell allows; clamp instead of failing the call. */
+function shellTimeoutMs(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value)) {
-    throw new Error(`${label} must be an integer`);
+    return DEFAULT_SHELL_TIMEOUT_MS;
   }
-  return value;
+  return Math.min(MAX_SHELL_TIMEOUT_MS, Math.max(1, value));
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
