@@ -1,5 +1,5 @@
 import {
-  appendLedgerEntry,
+  appendLedgerEntry, SpendingApprovalRequired, SpendingDeclined,
   finalizeReservation,
   releaseReservation,
   reserveBudget,
@@ -70,6 +70,8 @@ export interface EconomyGatewayOptions {
   agentcash: AgentCashAdapter;
   crowdcode: CrowdCodeAdapter;
   approvalMode: ApprovalMode;
+  /** Hosted gateway owns the actual quote, spending policy and reservations. */
+  hostedSpending?: boolean;
   /** Human decision point for ask-mode; absent means un-ruled services are denied. */
   approvalHandler?: ApprovalHandler;
   /** Stored allow/block rules location (defaults to the user config dir). */
@@ -97,7 +99,7 @@ export class EconomyGateway {
     return (await pendingRequiredReviews(this.options.session)).length > 0;
   }
 
-  async execute(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  async execute(name: string, args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
     try {
       switch (name as GatewayToolName) {
         case "get_wallet_status":
@@ -107,7 +109,7 @@ export class EconomyGateway {
         case "inspect_paid_service":
           return await this.inspectPaidService(args);
         case "call_paid_service":
-          return await this.callPaidService(args);
+          return await this.callPaidService(args, operationId);
         case "review_paid_service":
           return await this.reviewPaidService(args);
         case "bridge_usdc":
@@ -116,6 +118,7 @@ export class EconomyGateway {
           return { ok: false, error: `unknown gateway tool: ${name}` };
       }
     } catch (error) {
+      if (error instanceof SpendingApprovalRequired || error instanceof SpendingDeclined || (error as Error).name === "RuntimePause") throw error;
       return { ok: false, error: (error as Error).message };
     }
   }
@@ -188,7 +191,7 @@ export class EconomyGateway {
     };
   }
 
-  private async callPaidService(args: Record<string, unknown>): Promise<ToolResult> {
+  private async callPaidService(args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
     const session = this.options.session;
     if (this.options.approvalMode === "off") {
       return {
@@ -220,7 +223,17 @@ export class EconomyGateway {
         error: "this endpoint settles on a payment rail OpenCrowd does not support for automatic payment (allowed: x402 USDC on Base, MPP USDC on Tempo)"
       };
     }
-    const quotedCostCents = intArg(args.max_cost_cents) ?? inspection.priceCeilingCents;
+    const requestedCostCents = intArg(args.max_cost_cents) ?? inspection.priceCeilingCents;
+    let quotedCostCents = requestedCostCents;
+    let quoteIdentity: unknown;
+    if (session.query && !this.options.hostedSpending) {
+      const fresh = await this.options.agentcash.checkEndpointSchema({ url: endpoint, method, body: args.body });
+      if (!fresh.ok) return { ok: false, error: fresh.error };
+      if (railFromSchema(fresh.data) !== inspection.rail) return { ok: false, error: "The payment rail changed; inspect this service again." };
+      const current = priceCeilingFromSchema(fresh.data);
+      if (current !== undefined) quotedCostCents = Math.max(current, requestedCostCents ?? 0);
+      quoteIdentity = fresh.data;
+    }
     if (quotedCostCents === undefined) {
       return { ok: false, error: "no price ceiling: pass `max_cost_cents` (the inspection did not report a price)" };
     }
@@ -247,20 +260,22 @@ export class EconomyGateway {
     }
 
     this.options.onProgress?.({ type: "reserving_spend", message: `Reserving ${quotedCostCents} cents` });
-    const reservation = await reserveBudget(session, quotedCostCents);
+    const reservation = this.options.hostedSpending ? { id: "hosted", amountCents: 0 } : await reserveBudget(session, quotedCostCents,
+      { description: `Paid tool · ${endpoint}`, identity: JSON.stringify({ operationId, endpoint, method, body: args.body, quoteIdentity }), forceApproval: requestedCostCents !== undefined && quotedCostCents > requestedCostCents });
 
     let result: PaidFetchResult;
     try {
       this.options.onProgress?.({ type: "calling_service", message: `Calling ${endpoint}` });
       result = await this.options.agentcash.fetch({
         url: endpoint,
+        operationId,
         method,
         body: args.body,
         maxAmountUsd: quotedCostCents / 100,
         rail: inspection.rail
       });
     } catch (error) {
-      await releaseReservation(session, reservation);
+      if (reservation) await releaseReservation(session, reservation);
       throw error;
     }
 
@@ -313,7 +328,7 @@ export class EconomyGateway {
         : result.error
     };
     await appendPurchase(session, record);
-    await finalizeReservation(session, reservation, outcome === "free" || outcome === "siwx" ? 0 : chargedCents);
+    if (reservation) await finalizeReservation(session, reservation, outcome === "free" || outcome === "siwx" ? 0 : chargedCents);
     await appendLedgerEntry(session.ledgerPath, {
       session_id: session.sessionId,
       type: "service_call",
@@ -426,6 +441,8 @@ export class EconomyGateway {
     if (caps.methods?.length && !caps.methods.map((item) => item.toUpperCase()).includes(method)) {
       return `method ${method} is not allowed for ${endpoint}`;
     }
+    // New queries use the shared spending thresholds; retain non-monetary service rules.
+    if (this.options.session.query) return undefined;
     if (caps.maxCostCents !== undefined && quotedCostCents > caps.maxCostCents) {
       return `quoted cost ${quotedCostCents}c exceeds the per-call cap ${caps.maxCostCents}c for ${endpoint}`;
     }

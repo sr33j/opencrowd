@@ -27,14 +27,17 @@ the model asks for:
   receipt → required review → audit entry. A CrowdCode outage blocks new
   payments. Only rails CrowdCode verifies end-to-end (x402 USDC on Base,
   MPP USDC on Tempo) may pay automatically.
-- **Approval policy** (`ask` by default) requires a human decision — allow
-  once, always-allow with caps, deny, or block — before the first payment to
-  any service. `auto` skips prompts but still enforces blocks, caps,
-  reputation checks, the lifecycle, and the budget. `off` prohibits
-  purchases entirely.
-- **Session budgets** are a local cumulative cap on LLM and service spend,
-  enforced with reserve/finalize accounting. A budget change never moves
-  money, and the budget can never be set below already-finalized spend.
+- **Spending approval** permits up to $1 per model/paid-tool call and $10 per
+  query by default. Calls above either threshold pause before payment for
+  approval, a query-only budget increase, or decline. Wallet settings change
+  defaults. Saved checkpoints and operation-bound approvals support resume.
+- **Service policy** retains explicit blocks, method restrictions, reputation
+  checks and the payment lifecycle. `auto` is the default but still asks above
+  spending limits; `ask` adds service confirmation and `off` prohibits external
+  service purchases. New queries replace old monetary service/session caps.
+- **Query accounting** uses locked reserve/finalize accounting shared by model
+  and tool calls and subagents. A budget change never moves money. Unknown
+  payment outcomes remain accounted for and must not be retried automatically.
 - **Payment evidence is quarantined.** Payment proofs, payer identity, and
   transaction hashes are captured by adapters into immutable receipts; they
   never enter prompts, model-visible tool results, or normal CLI output. The

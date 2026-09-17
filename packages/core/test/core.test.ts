@@ -100,15 +100,15 @@ describe("OpenCrowd session defaults", () => {
     expect((await loadConfig()).provider).toBe("openrouter-x402-proxy");
   });
 
-  it("defaults to ask mode, shell access, and the configured budget cap without any network lookup", async () => {
+  it("defaults to automatic spending, shell access, and the configured budget cap without any network lookup", async () => {
     const root = await tempRoot();
     process.env.OPENCROWD_CONFIG_DIR = join(root, "config");
 
     const session = await createOpenCrowdSession({ workspaceRoot: root });
 
-    expect(session.approvalMode).toBe("ask");
+    expect(session.approvalMode).toBe("auto");
     expect(session.shellEnabled).toBe(true);
-    expect(session.budgetCents).toBe(2000);
+    expect(session.budgetCents).toBe(1000);
   });
 
   it("uses the configured default budget cap", async () => {

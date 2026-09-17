@@ -1,4 +1,4 @@
-import type { ProgressEvent, SessionState } from "@opencrowd/core";
+import { setSpendingHandler, type SpendingHandler, type ProgressEvent, type SessionState } from "@opencrowd/core";
 import {
   EconomyGateway,
   MockAgentCashAdapter,
@@ -54,6 +54,7 @@ export interface PersistentAgentTaskOptions {
   onProgress?: (event: ProgressEvent) => void;
   /** Human decision point for ask-mode purchases; absent means they are denied. */
   approvalHandler?: ApprovalHandler;
+  spendingHandler?: SpendingHandler;
 }
 
 export async function runPersistentAgentTask(
@@ -88,6 +89,7 @@ export async function runPersistentAgentTaskDetailed(
  * default local-filesystem storage.
  */
 function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) {
+  setSpendingHandler(session, options.spendingHandler);
   return createOpenCrowdRuntime({
     workspace: session.workspaceRoot,
     llmProvider: async (current) => {

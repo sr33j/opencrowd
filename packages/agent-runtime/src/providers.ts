@@ -53,6 +53,8 @@ export interface WireToolDefinition {
 }
 
 export interface CompletionRequest {
+  /** Called with the real quote before signing a payment. Approval may pause. */
+  authorizePayment?: (amountCents: number, identity: string) => Promise<void>;
   signal?: AbortSignal;
   model: string;
   messages: WireMessage[];
@@ -76,12 +78,17 @@ export interface ProviderCompletion {
 }
 
 export interface TypedLlmProvider {
+  readonly quotesPayments?: boolean;
   readonly id: ProviderId;
   /** Model catalog; cached per instance with an explicit refresh path. */
   listModels(options?: { refresh?: boolean }): Promise<ProviderModel[]>;
   complete(request: CompletionRequest): Promise<ProviderCompletion>;
   /** Optional credit top-up (Venice). Bounded and invoked by the budget layer only. */
   topUpCredit?(amountUsd: number): Promise<void>;
+}
+
+export class PaymentUncertainError extends Error {
+  constructor(message: string) { super(message); this.name = "PaymentUncertainError"; }
 }
 
 /** Venice signals exhausted prepaid credit; the budget layer may perform one bounded top-up. */

@@ -37,6 +37,7 @@ import { asRecord, formatCents, parseUsd, renderKeyValues, renderTable } from ".
 
 export type CommandResult =
   | { kind: "text"; label?: string; body: string }
+  | { kind: "wallet" }
   | { kind: "clear" }
   | { kind: "exit" }
   | { kind: "new-session" }
@@ -211,7 +212,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   {
     name: "budget",
     usage: "/budget <usd>",
-    summary: "Set this session's cumulative local spend cap (never moves money)",
+    summary: "Change the current query budget (saved defaults stay the same)",
     execute: async (rest, { session }) => {
       if (!rest[0]) {
         return { kind: "text", label: "Budget", body: renderKeyValues(asRecord(budgetStatus(session))) };
@@ -281,20 +282,8 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   {
     name: "wallet",
     usage: "/wallet",
-    summary: "Show public AgentCash balances and deposit addresses",
-    execute: async (_rest, { state }) => {
-      if (state.testMode) {
-        return { kind: "text", label: "Wallet", body: renderKeyValues({ wallet: "demo", balance: "$25.00 (mock)" }) };
-      }
-      const summary = await walletSummary();
-      if (!summary.address) {
-        throw new Error("No AgentCash wallet found. Install agentcash (its wallet is created automatically) and retry.");
-      }
-      if (summary.error) {
-        return { kind: "text", label: "Wallet", body: renderKeyValues({ address: summary.address, balance: `unavailable (${summary.error})` }) };
-      }
-      return { kind: "text", label: "Wallet", body: renderKeyValues(asRecord(summary.raw ?? { address: summary.address })) };
-    }
+    summary: "Open Wallet: balance and editable spending limits",
+    execute: async () => ({ kind: "wallet" })
   },
   {
     name: "fund",

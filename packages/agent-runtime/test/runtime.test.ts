@@ -648,7 +648,7 @@ describe("failure hardening", () => {
     };
 
     // No handler in ask mode: the rescue is denied and the original error surfaces.
-    const askSession = await createSession({ workspaceRoot: root, budgetCents: 100 });
+    const askSession = await createSession({ workspaceRoot: root, budgetCents: 100, approvalMode: "ask" });
     await expect(new BudgetedLlmProvider(askSession, stalling, {
       model: "m", maxCostCentsPerCall: 10, fallback: { provider: backup, model: "b" }
     }).complete([{ role: "user", content: "hi" }])).rejects.toThrow("stalled");
@@ -683,7 +683,7 @@ describe("failure hardening", () => {
     };
     const options = { model: "m", maxCostCentsPerCall: 10, maxTopUpCentsPerAction: 500 };
 
-    const askSession = await createSession({ workspaceRoot: root, budgetCents: 2000 });
+    const askSession = await createSession({ workspaceRoot: root, budgetCents: 2000, approvalMode: "ask" });
     await expect(new BudgetedLlmProvider(askSession, insufficient, {
       ...options,
       confirmProviderAction: async (request) => {

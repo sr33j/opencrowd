@@ -1,9 +1,10 @@
-import { BlockrunClient } from "@blockrun/llm";
+import { BlockrunClient, createPaymentPayload } from "@blockrun/llm";
 import { requireAgentCashWallet } from "@opencrowd/core";
 import {
   normalizeProviderModels,
   readSseCompletion,
   toWireChatMessage,
+  parseChatCompletionResponse, PaymentUncertainError,
   type CompletionRequest,
   type ProviderCompletion,
   type ProviderModel,
@@ -28,6 +29,7 @@ export interface BlockRunProviderOptions {
 /** BlockRun's OpenAI-compatible, x402-v2 LLM gateway. */
 export class BlockRunProvider implements TypedLlmProvider {
   readonly id = "blockrun" as const;
+  get quotesPayments() { return !this.options.clientFactory; }
   private readonly apiUrl: string;
   private modelsCache?: ProviderModel[];
 
@@ -51,7 +53,6 @@ export class BlockRunProvider implements TypedLlmProvider {
   async complete(request: CompletionRequest): Promise<ProviderCompletion> {
     // A client per in-flight completion keeps the SDK's pending-payment and
     // spending counters isolated when subagents run concurrently.
-    const client = await this.createClient();
     const body: Record<string, unknown> = {
       model: request.model,
       messages: request.messages.map(toWireChatMessage),
@@ -69,6 +70,11 @@ export class BlockRunProvider implements TypedLlmProvider {
     if (request.maxOutputTokens) {
       body.max_tokens = request.maxOutputTokens;
     }
+
+    // The SDK auto-signs quotes. Use its signer explicitly when a spending
+    // policy is attached so approval happens before any signature leaves us.
+    if (request.authorizePayment && !this.options.clientFactory) return this.completeWithApproval(request, body);
+    const client = await this.createClient();
 
     const started = Date.now();
     const chunks = client.stream<Record<string, unknown>>("/v1/chat/completions", body);
@@ -107,6 +113,42 @@ export class BlockRunProvider implements TypedLlmProvider {
       return completion;
     } catch (error) {
       throw blockRunError(error);
+    }
+  }
+
+  private async completeWithApproval(request: CompletionRequest, body: Record<string, unknown>): Promise<ProviderCompletion> {
+    const url = `${this.apiUrl}/v1/chat/completions`, fetcher = this.options.fetchImpl ?? fetch;
+    const send = (signature?: string) => fetcher(url, { method: "POST", body: JSON.stringify(body),
+      headers: { "content-type": "application/json", ...(signature ? { "payment-signature": signature } : {}) },
+      signal: request.signal ? AbortSignal.any([request.signal, AbortSignal.timeout(this.options.timeoutMs ?? 300000)]) : AbortSignal.timeout(this.options.timeoutMs ?? 300000) });
+    let response = await send();
+    let quotedCents = 0, submitted = false;
+    if (response.status === 402) {
+      const header = response.headers.get("payment-required");
+      const envelope = header ? JSON.parse(Buffer.from(header, "base64").toString()) : await response.json();
+      const offer = envelope.accepts?.find((r: any) => r.scheme === "exact" && r.network === "eip155:8453"
+        && String(r.asset).toLowerCase() === "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" && /^[1-9][0-9]*$/.test(r.amount));
+      if (!offer || envelope.x402Version !== 2) throw new Error("Unsupported BlockRun payment quote");
+      quotedCents = Number(offer.amount) / 10000;
+      await request.authorizePayment!(quotedCents, JSON.stringify({ url, body, offer }));
+      request.signal?.throwIfAborted();
+      const wallet = await requireAgentCashWallet();
+      const signature = await createPaymentPayload(wallet.privateKey as `0x${string}`, wallet.address, offer.payTo, offer.amount, offer.network,
+        { resourceUrl: url, maxTimeoutSeconds: offer.maxTimeoutSeconds, extra: offer.extra });
+      submitted = true;
+      try { response = await send(signature); }
+      catch { throw new PaymentUncertainError("BlockRun payment was submitted but its result is unknown; do not retry automatically."); }
+    }
+    try {
+      if (!response.ok) throw new Error(`BlockRun inference returned HTTP ${response.status}`);
+      const completion = response.headers.get("content-type")?.includes("text/event-stream")
+        ? await readSseCompletion(response, request.onTextDelta, Date.now())
+        : parseChatCompletionResponse(await response.json());
+      if (submitted) completion.usage.costCents = quotedCents;
+      return completion;
+    } catch (error) {
+      if (submitted) throw new PaymentUncertainError(`BlockRun paid request did not complete: ${(error as Error).message}`);
+      throw error;
     }
   }
 

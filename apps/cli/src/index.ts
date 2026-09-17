@@ -1,17 +1,16 @@
 #!/usr/bin/env node
-import { copyFile, mkdir, readFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import {
-  createOpenCrowdSession,
+  createOpenCrowdSession, approvePendingSpending, SpendingDeclined, type SpendingHandler,
   loadConfig,
   loadSession,
   readAgentCashWallet,
   readLedger,
   saveSession,
   setApprovalMode,
-  setSessionBudget,
   updateConfig,
   type ApprovalMode,
   type OpenCrowdConfig,
@@ -69,6 +68,9 @@ async function main(argv: string[]): Promise<void> {
       await workerCommand(rest);
       return;
     }
+    case "resume":
+      await resumeCommand(rest);
+      return;
     case "run":
       await runCommand(rest);
       return;
@@ -160,7 +162,8 @@ async function runCommand(args: string[]): Promise<void> {
     });
   if (sessionId) {
     if (budgetArg !== undefined) {
-      await setSessionBudget(session, parseUsd(budgetArg));
+      session.budgetCents = parseUsd(budgetArg);
+      await saveSession(session);
     }
     if (approval !== undefined) {
       await setApprovalMode(session, approval as ApprovalMode);
@@ -175,6 +178,7 @@ async function runCommand(args: string[]): Promise<void> {
     testMode,
     testSeed,
     compactOutput: !verbose,
+    spendingHandler: input.isTTY ? terminalSpendingHandler : undefined,
     onProgress: progressLogger({ style: output.isTTY ? "pretty" : "compact", color: shouldUseColor(), width: terminalWidth() })
   });
   console.log(outputText);
@@ -256,6 +260,8 @@ async function headlessRunCommand(args: string[]): Promise<void> {
       total: Number(budget.total_spent_cents ?? budget.spent_cents ?? 0)
     },
     budget,
+    approval: result.summary.approval ?? null,
+    resume_command: result.outcome === "waiting_for_approval" ? `opencrowd resume ${session.sessionId} --approve-once --workspace ${workspaceRoot}` : undefined,
     artifacts: result.summary.artifacts ?? [],
     service_calls: result.summary.service_calls ?? []
   };
@@ -347,10 +353,50 @@ async function ledgerCommand(args: string[]): Promise<void> {
   });
 }
 
+const terminalSpendingHandler: SpendingHandler = async request => {
+  const rl = createInterface({ input, output });
+  try {
+    console.log(`Spending approval required: ${request.description}\nThis call: $${request.amountCents / 100}; query after call: $${request.projectedCents / 100} / $${request.queryLimitCents / 100}.`);
+    const answer = (await rl.question("[y] approve this call, [i] increase query budget, [n] decline: ")).trim().toLowerCase();
+    if (answer === "i") return { decision: "approve", queryBudgetCents: parseUsd(await rl.question("New budget for this query (USD): ")) };
+    return { decision: answer === "y" ? "approve" : "decline" };
+  } finally { rl.close(); }
+};
+
+async function resumeCommand(args: string[]) {
+  const id = args[0];
+  if (!id) throw new Error("resume requires a session ID");
+  const session = await loadSession(readOption(args, "--workspace") ?? process.cwd(), id);
+  const pending = session.query?.pending;
+  if (pending) {
+    if (args.includes("--decline")) {
+      try { await approvePendingSpending(session, { decision: "decline" }); } catch (e) { if (!(e instanceof SpendingDeclined)) throw e; }
+      await rm(join(session.sessionDir, "query-checkpoint.json"), { force: true });
+      console.log("Query declined. Nothing was paid for the pending call."); return;
+    }
+    const budget = readOption(args, "--query-budget");
+    if (args.includes("--approve-once") || budget !== undefined)
+      await approvePendingSpending(session, { decision: "approve", ...(budget === undefined ? {} : { queryBudgetCents: parseUsd(budget) }) });
+    else if (input.isTTY) await approvePendingSpending(session, await terminalSpendingHandler(pending));
+    else { console.log(JSON.stringify({ outcome: "waiting_for_approval", approval: pending }, null, 2)); return; }
+  }
+  const result = await runPersistentAgentTaskDetailed(session, "", { nonInteractive: !input.isTTY, spendingHandler: input.isTTY ? terminalSpendingHandler : undefined,
+    testMode: args.includes("--test-mode") });
+  console.log(JSON.stringify(result, null, 2));
+}
+
 async function walletCommand(args: string[]): Promise<void> {
   const json = args.includes("--json");
   args = args.filter((arg) => arg !== "--json");
   const [action] = args;
+  if (action === "limits") {
+    const call = readOption(args, "--per-call"), query = readOption(args, "--per-query");
+    const config = call !== undefined || query !== undefined ? await updateConfig({
+      ...(call === undefined ? {} : { llmMaxCostCentsPerCall: parseUsd(call) }),
+      ...(query === undefined ? {} : { defaultBudgetCents: parseUsd(query) })
+    }) : await loadConfig();
+    printValue("Spending limits", { per_call_usd: config.llmMaxCostCentsPerCall / 100, per_query_usd: config.defaultBudgetCents / 100 }, { json }); return;
+  }
   if (action === "address" || action === undefined) {
     const wallet = await readAgentCashWallet();
     if (!wallet) {
@@ -368,7 +414,7 @@ async function walletCommand(args: string[]): Promise<void> {
     printValue("Wallet", summary.raw ?? summary, { json, pretty: renderKeyValues(asRecord(summary.raw ?? summary)) });
     return;
   }
-  throw new Error("wallet supports address, balance");
+  throw new Error("wallet supports address, balance, limits [--per-call USD] [--per-query USD]");
 }
 
 async function modelsCommand(args: string[]): Promise<void> {
@@ -508,7 +554,9 @@ function printHelp(): void {
   opencrowd config show
   opencrowd config set provider|model|submodel|budget|approval <value>
   opencrowd ledger [--json] show [--session <id>]
+  opencrowd resume <session-id> [--approve-once | --query-budget <usd> | --decline] [--workspace <dir>]
   opencrowd wallet [--json] address|balance
+  opencrowd wallet limits [--per-call <usd>] [--per-query <usd>]
   opencrowd models [--json] list
   opencrowd doctor
   opencrowd --version

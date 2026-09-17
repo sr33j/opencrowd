@@ -2,7 +2,7 @@ import { createPaymentHeader } from "x402/client";
 import { createSigner } from "x402/types";
 import { requireAgentCashWallet } from "@opencrowd/core";
 import {
-  parseChatCompletionResponse,
+  parseChatCompletionResponse, PaymentUncertainError,
   readSseCompletion,
   toWireChatMessage,
   type CompletionRequest,
@@ -78,12 +78,14 @@ class Semaphore {
 class StreamLiveness {
   readonly controller = new AbortController();
   private idleTimer?: NodeJS.Timeout;
-  private readonly totalTimer: NodeJS.Timeout;
+  private totalTimer?: NodeJS.Timeout;
 
-  constructor(private readonly idleMs: number, totalMs: number) {
+  constructor(private readonly idleMs: number, private readonly totalMs: number) { this.restart(); }
+
+  restart() {
     this.totalTimer = setTimeout(() => {
-      this.controller.abort(new Error(`x402 proxy request timed out after ${totalMs}ms`));
-    }, totalMs);
+      this.controller.abort(new Error(`x402 proxy request timed out after ${this.totalMs}ms`));
+    }, this.totalMs);
     this.bump();
   }
 
@@ -102,6 +104,7 @@ class StreamLiveness {
 
 export class X402ProxyProvider implements TypedLlmProvider {
   readonly id = "openrouter-x402-proxy" as const;
+  readonly quotesPayments = true;
   private readonly baseUrl: string;
   private readonly slots: Semaphore;
   private modelsCache?: ProviderModel[];
@@ -180,12 +183,21 @@ export class X402ProxyProvider implements TypedLlmProvider {
       signal: request.signal ? AbortSignal.any([request.signal, liveness.controller.signal]) : liveness.controller.signal
     };
 
+    let submitted = false;
+    const sendSigned = async (challenge: unknown) => {
+      liveness.clear();
+      let headers: Headers;
+      try { headers = await this.paymentHeaders(challenge, url, request); }
+      finally { liveness.restart(); }
+      submitted = true;
+      const result = await this.fetchImpl()(url, { ...init, headers });
+      if (result.status === 402) submitted = false;
+      return result;
+    };
     try {
       const started = Date.now();
       // A previously seen challenge lets us pre-sign and skip the 402 round trip.
-      let response = await this.fetchImpl()(url, this.cachedChallenge
-        ? { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) }
-        : init);
+      let response = this.cachedChallenge ? await sendSigned(this.cachedChallenge) : await this.fetchImpl()(url, init);
       liveness.bump();
       // Sign the fresh (or changed) challenge and retry. Two signed attempts:
       // the proxy's payment validation measurably flakes (~25%) and a fresh
@@ -198,7 +210,7 @@ export class X402ProxyProvider implements TypedLlmProvider {
           throw new Error(`the x402 proxy demanded payment but returned no parseable challenge (${this.baseUrl})`);
         }
         liveness.bump();
-        response = await this.fetchImpl()(url, { ...init, headers: await this.paymentHeaders(this.cachedChallenge, url) });
+        response = await sendSigned(this.cachedChallenge);
         liveness.bump();
       }
       if (response.status === 402) {
@@ -216,12 +228,15 @@ export class X402ProxyProvider implements TypedLlmProvider {
         : parseChatCompletionResponse(await response.json().catch(() => undefined));
       completion.usage = withSettledCost(completion.usage, response);
       return completion;
+    } catch (error) {
+      if (submitted) throw new PaymentUncertainError(`The paid proxy request did not complete: ${(error as Error).message}`);
+      throw error;
     } finally {
       liveness.clear();
     }
   }
 
-  private async paymentHeaders(challenge: unknown, url: string): Promise<Headers> {
+  private async paymentHeaders(challenge: unknown, url: string, request: CompletionRequest): Promise<Headers> {
     const parsed = x402Challenge(challenge);
     if (!parsed?.accepts.length) {
       return new Headers({ "content-type": "application/json" });
@@ -229,6 +244,12 @@ export class X402ProxyProvider implements TypedLlmProvider {
     const selected = selectBasePaymentRequirement(parsed.accepts);
     const merged = mergeChallengeRequirement(selected, parsed.resource, url);
     const requirement = normalizePaymentRequirement(merged);
+    const quote = requirement as { maxAmountRequired?: string; asset?: string; network?: string };
+    if (!quote.maxAmountRequired || !/^[0-9]+$/.test(quote.maxAmountRequired)
+      || !["base", "eip155:8453"].includes(String(quote.network))
+      || String(quote.asset).toLowerCase() !== "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913") throw new Error("Unsupported Base USDC payment quote");
+    await request.authorizePayment?.(Number(quote.maxAmountRequired) / 10000, JSON.stringify({ url, model: request.model, messages: request.messages, tools: request.tools, requirement }));
+    request.signal?.throwIfAborted();
     const signer = await createSigner("base", await this.privateKey());
     const rawHeader = await createPaymentHeader(signer, parsed.x402Version, requirement as never);
     const header = compatiblePaymentHeader(rawHeader, parsed.x402Version, selected);

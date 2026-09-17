@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { contextLimits } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState } from "./context.js";
-import { appendFile, mkdir } from "node:fs/promises";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
 import {
@@ -8,7 +9,7 @@ import {
   conversationPath,
   appendLedgerEntry,
   budgetStatus,
-  BudgetExhaustedError,
+  BudgetExhaustedError, SpendingApprovalRequired, SpendingDeclined, type Reservation,
   completeSession,
   executeTool,
   finalizeReservation,
@@ -26,7 +27,7 @@ import {
   type ToolName
 } from "@opencrowd/core";
 import {
-  InsufficientCreditError,
+  InsufficientCreditError, PaymentUncertainError,
   type LlmUsage,
   type ProviderCompletion,
   type ProviderModel,
@@ -69,7 +70,7 @@ export interface DynamicToolDefinition {
 
 export interface DynamicToolsOption {
   definitions: DynamicToolDefinition[];
-  execute: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
+  execute: (name: string, args: Record<string, unknown>, operationId?: string) => Promise<ToolResult>;
 }
 
 export interface LlmResponse {
@@ -361,7 +362,7 @@ export class BudgetedLlmProvider implements LlmProvider {
   async complete(messages: LlmMessage[], context?: { signal?: AbortSignal }): Promise<LlmResponse> {
     context?.signal?.throwIfAborted();
     const definitions = wireToolDefinitions(this.options.tools, this.options.extraTools);
-    const reservation = await reserveBudget(this.session, this.options.maxCostCentsPerCall);
+    let reservation: Reservation | undefined;
     const started = Date.now();
     const fallback = this.options.fallback;
     // Degraded-first routing is skipped in ask mode: every backup call there
@@ -371,15 +372,26 @@ export class BudgetedLlmProvider implements LlmProvider {
     let used = degraded && fallback
       ? { provider: fallback.provider, model: fallback.model, note: `primary ${this.provider.id} degraded after repeated failovers` }
       : { provider: this.provider, model: this.options.model, note: undefined as string | undefined };
-    const attempt = (): Promise<ProviderCompletion> => used.provider.complete({
-      model: used.model,
-      messages,
-      tools: definitions,
-      promptCacheKey: this.options.promptCacheKey,
-      onTextDelta: this.options.onTextDelta,
-      maxOutputTokens: this.options.maxOutputTokens,
-      signal: context?.signal
-    });
+    const authorize = async (amountCents: number, identity: string) => {
+      if (reservation) await releaseReservation(this.session, reservation);
+      reservation = undefined;
+      reservation = await reserveBudget(this.session, amountCents, { description: `${used.provider.id} · ${used.model}`, identity });
+    };
+    const attempt = async (): Promise<ProviderCompletion> => {
+      if (!used.provider.quotesPayments) {
+        const model = this.options.catalog?.find(m => m.id === used.model);
+        const estimate = this.session.query && model?.inputCostCentsPer1k !== undefined && model.outputCostCentsPer1k !== undefined
+          ? Math.ceil(Buffer.byteLength(JSON.stringify({ messages, tools: definitions }), "utf8") * model.inputCostCentsPer1k / 1000
+            + (this.options.maxOutputTokens ?? 1024) * model.outputCostCentsPer1k / 1000)
+          : this.options.maxCostCentsPerCall;
+        await authorize(estimate, JSON.stringify({ provider: used.provider.id, model: used.model, messages, definitions }));
+      }
+      return used.provider.complete({
+        model: used.model, messages, tools: definitions, authorizePayment: authorize,
+        promptCacheKey: this.options.promptCacheKey, onTextDelta: this.options.onTextDelta,
+        maxOutputTokens: this.options.maxOutputTokens, signal: context?.signal
+      });
+    };
     try {
       let completion: ProviderCompletion;
       try {
@@ -425,15 +437,16 @@ export class BudgetedLlmProvider implements LlmProvider {
       if (used.provider === this.provider) {
         failoverCounts.delete(this.provider);
       }
-      const charged = chargedCostCents(completion.usage, used.model, this.options.catalog);
-      await finalizeReservation(this.session, reservation, charged);
+      const charged = used.provider.quotesPayments && completion.usage.costCents === undefined && reservation
+        ? reservation.amountCents : chargedCostCents(completion.usage, used.model, this.options.catalog);
+      if (reservation) await finalizeReservation(this.session, reservation, charged);
       await appendLedgerEntry(this.session.ledgerPath, {
         session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
         endpoint: used.provider.id,
         model: used.model,
         method: "POST",
-        quoted_cost_cents: this.options.maxCostCentsPerCall,
+        quoted_cost_cents: reservation?.amountCents ?? this.options.maxCostCentsPerCall,
         charged_cost_cents: charged,
         status: "charged",
         approval_mode: this.session.approvalMode,
@@ -450,16 +463,19 @@ export class BudgetedLlmProvider implements LlmProvider {
         usage: completion.usage
       };
     } catch (error) {
-      await releaseReservation(this.session, reservation);
+      if (reservation) {
+        if (error instanceof PaymentUncertainError) await finalizeReservation(this.session, reservation, reservation.amountCents);
+        else await releaseReservation(this.session, reservation);
+      }
       await appendLedgerEntry(this.session.ledgerPath, {
         session_id: this.options.ledgerSessionId ?? this.session.sessionId,
         type: "llm_call",
         endpoint: used.provider.id,
         model: used.model,
         method: "POST",
-        quoted_cost_cents: this.options.maxCostCentsPerCall,
-        charged_cost_cents: 0,
-        status: "failed",
+        quoted_cost_cents: reservation?.amountCents ?? this.options.maxCostCentsPerCall,
+        charged_cost_cents: error instanceof PaymentUncertainError ? reservation?.amountCents ?? 0 : 0,
+        status: error instanceof PaymentUncertainError ? "unknown" : "failed",
         approval_mode: this.session.approvalMode,
         latency_ms: Date.now() - started,
         notes: joinNotes(truncateNote((error as Error).message), used.note)
@@ -485,7 +501,7 @@ export class BudgetedLlmProvider implements LlmProvider {
       throw new Error(`${error.message} Automatic top-ups are disabled in approval mode \`off\`; top up manually with /fund.`);
     }
     const allowanceCents = remainingBudgetCents(this.session);
-    const amountCents = Math.min(ceilingCents, allowanceCents);
+    const amountCents = this.session.query ? Math.max(ceilingCents, Math.ceil((error.minimumTopUpUsd ?? 0) * 100)) : Math.min(ceilingCents, allowanceCents);
     const minimumCents = error.minimumTopUpUsd !== undefined ? Math.ceil(error.minimumTopUpUsd * 100) : 0;
     if (amountCents <= 0 || amountCents < minimumCents) {
       throw new Error(
@@ -503,7 +519,11 @@ export class BudgetedLlmProvider implements LlmProvider {
     if (!approved) {
       throw new Error(`${error.message} The automatic top-up was declined; top up manually with /fund or approve it next time.`);
     }
-    await provider.topUpCredit!(amountCents / 100);
+    const deposit = this.session.query ? await reserveBudget(this.session, amountCents, {
+      description: `${provider.id} prepaid credit deposit (not withdrawable)`, identity: `top-up:${provider.id}:${amountCents}`
+    }) : undefined;
+    try { await provider.topUpCredit!(amountCents / 100); }
+    finally { if (deposit) await releaseReservation(this.session, deposit); }
     await appendLedgerEntry(this.session.ledgerPath, {
       session_id: this.options.ledgerSessionId ?? this.session.sessionId,
       type: "wallet_top_up",
@@ -527,7 +547,7 @@ export class BudgetedLlmProvider implements LlmProvider {
 
 /** Timeouts, stalls, rate limits, server errors, and dropped connections merit the retry/failover ladder. */
 function isTransientProviderError(error: unknown): boolean {
-  if (error instanceof InsufficientCreditError || error instanceof BudgetExhaustedError) {
+  if (error instanceof InsufficientCreditError || error instanceof BudgetExhaustedError || error instanceof SpendingApprovalRequired || error instanceof SpendingDeclined || error instanceof PaymentUncertainError) {
     return false;
   }
   const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -712,7 +732,7 @@ interface BackgroundSubagent {
   result?: ToolResult;
 }
 
-export type AgentTaskOutcome = "completed" | "stopped" | "max_turns" | "budget_exhausted";
+export type AgentTaskOutcome = "completed" | "stopped" | "max_turns" | "budget_exhausted" | "waiting_for_approval";
 
 export interface AgentTaskResult {
   outcome: AgentTaskOutcome;
@@ -921,8 +941,12 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         subagentCount += 1;
         const index = subagentCount;
         const subagent = options.subagent;
-        const promise = subagentLimiter(() => runSubagentTask(session, call.arguments, subagent, index, options));
-        if (call.arguments.background === true) {
+        const key = options.runId ? createHash("sha256").update(`${options.runId}:${turn}:${call.id}`).digest("hex").slice(0,24) : undefined;
+        const promise = subagentLimiter(() => runSubagentTask(session, call.arguments, subagent, index, options, key));
+        void promise.catch(() => undefined);
+        // Query spending must checkpoint the entire fan-out before advancing.
+        // Work still runs concurrently; join it so approval can resume each child exactly.
+        if (call.arguments.background === true && !session.query) {
           const entry: BackgroundSubagent = {
             index,
             task: String(call.arguments.task ?? ""),
@@ -961,9 +985,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       if (completedTools[call.id]) {
         result = completedTools[call.id];
       } else if (call.name === "spawn_subagent") {
-        result = options.subagent
-          ? await (spawnedThisTurn.get(call.id) ?? Promise.resolve({ ok: false, error: "subagent launch failed" }))
-          : { ok: false, error: "subagents are not enabled for this session" };
+        try {
+          result = options.subagent
+            ? await (spawnedThisTurn.get(call.id) ?? Promise.resolve({ ok: false, error: "subagent launch failed" }))
+            : { ok: false, error: "subagents are not enabled for this session" };
+        } catch (error) { await Promise.allSettled(spawnedThisTurn.values()); throw error; }
       } else if (call.name === "check_subagents") {
         if (call.arguments.wait === true) {
           result = { ok: true, data: { subagents: await drainBackground() } };
@@ -1112,14 +1138,15 @@ async function runSubagentTask(
   args: Record<string, unknown>,
   subagent: SubagentOptions,
   index: number,
-  parentOptions: AgentRunOptions
+  parentOptions: AgentRunOptions,
+  operationKey?: string
 ): Promise<ToolResult> {
   const task = typeof args.task === "string" ? args.task : "";
   if (!task) {
     return { ok: false, error: "spawn_subagent requires a task" };
   }
   const subagentId = `${session.sessionId}#sub${index}`;
-  const trajectoryDir = join(session.sessionDir, "subagents", String(index));
+  const trajectoryDir = join(session.sessionDir, "subagents", operationKey ?? String(index));
   const trajectoryPath = join(trajectoryDir, "messages.jsonl");
   await mkdir(trajectoryDir, { recursive: true });
   const record = async (message: LlmMessage) => {
@@ -1131,7 +1158,7 @@ async function runSubagentTask(
   const forwardProgress = (event: ProgressEvent) => {
     parentOptions.onProgress?.({ ...event, message: `[subagent ${index}] ${event.message}` });
   };
-  const messages: LlmMessage[] = [
+  let messages: LlmMessage[] = [
     {
       role: "system",
       content: [
@@ -1150,15 +1177,24 @@ async function runSubagentTask(
       ].filter(Boolean).join("\n\n")
     }
   ];
-  for (const message of messages) {
-    await record(message);
-  }
-
+  const statePath = join(trajectoryDir, "checkpoint.json");
+  type Saved = { messages: LlmMessage[]; turn: number; response?: LlmResponse; completed: string[]; context: ContextState;
+    outputContinuationNudges: number; outputContinuationPrefix: string; artifactsWritten: string[]; result?: ToolResult };
+  let saved: Saved | undefined;
+  if (operationKey) try { saved = JSON.parse(await readFile(statePath, "utf8")); } catch (e) { if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e; }
+  if (saved?.result) return saved.result;
+  if (saved) messages = saved.messages;
+  else for (const message of messages) await record(message);
   const repeatedFailures = new Map<string, number>();
-  let outputContinuationNudges = 0;
-  let outputContinuationPrefix = "";
-  const artifactsWritten: string[] = [];
-  const contextState: ContextState = {};
+  let outputContinuationNudges = saved?.outputContinuationNudges ?? 0;
+  let outputContinuationPrefix = saved?.outputContinuationPrefix ?? "";
+  const artifactsWritten: string[] = saved?.artifactsWritten ?? [];
+  const contextState: ContextState = saved?.context ?? {};
+  let turn = saved?.turn ?? 0;
+  const persist = async (response?: LlmResponse, completed: string[] = [], result?: ToolResult) => {
+    if (operationKey) await atomicWrite(statePath, JSON.stringify({ messages, turn, response, completed, context: contextState,
+      outputContinuationNudges, outputContinuationPrefix, artifactsWritten, result } satisfies Saved));
+  };
   const model = subagent.llm?.catalog?.find(m => m.id === subagent.model);
   const finish = async (outcome: SubagentCompletion["outcome"], finalMessage: string, turns: number): Promise<ToolResult> => {
     const completion: SubagentCompletion = {
@@ -1170,31 +1206,37 @@ async function runSubagentTask(
       trajectory_path: trajectoryPath,
       artifacts_written: artifactsWritten
     };
-    return { ok: true, data: completion };
+    const result = { ok: true, data: completion };
+    await persist(undefined, [], result);
+    return result;
   };
 
   try {
-    for (let turn = 0; turn < maxTurns; turn += 1) {
+    for (; turn < maxTurns; turn += 1) {
       parentOptions.signal?.throwIfAborted();
       forwardProgress({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
       let response: LlmResponse;
       try {
-        response = provider instanceof MockLlmProvider
+        await persist(saved?.response, saved?.completed);
+        response = saved?.response ?? (provider instanceof MockLlmProvider
           ? await completeMockLlmCall(session, provider, messages, turn + 1)
-          : await completeWithContext(session, messages, { provider, tools: wireToolDefinitions(SUBAGENT_TOOL_NAMES), state: contextState, contextWindowTokens: model?.contextWindowTokens, maxOutputTokens: model?.maxOutputTokens, signal: parentOptions.signal });
+          : await completeWithContext(session, messages, { provider, tools: wireToolDefinitions(SUBAGENT_TOOL_NAMES), state: contextState, contextWindowTokens: model?.contextWindowTokens, maxOutputTokens: model?.maxOutputTokens, signal: parentOptions.signal, checkpoint: () => persist() }));
       } catch (error) {
         if (error instanceof BudgetExhaustedError) {
           return finish("stopped", "Subagent stopped: the shared session budget is exhausted.", turn + 1);
         }
         throw error;
       }
-      if (response.content || response.toolCalls.length > 0) {
+      if (!saved?.response && (response.content || response.toolCalls.length > 0)) {
         const assistantMessage = assistantMessageFromResponse(isOutputLimitFinishReason(response.finishReason)
           ? { ...response, toolCalls: [] }
           : response);
         messages.push(assistantMessage);
         await record(assistantMessage);
       }
+      const completed = saved?.completed ?? [];
+      saved = undefined;
+      await persist(response, completed);
       if (isOutputLimitFinishReason(response.finishReason)) {
         outputContinuationPrefix += response.content;
         if (outputContinuationNudges >= 1) {
@@ -1213,6 +1255,7 @@ async function runSubagentTask(
         return finish("completed", outputContinuationPrefix + (response.content || "Subagent finished."), turn + 1);
       }
       for (const call of response.toolCalls) {
+        if (completed.includes(call.id)) continue;
         if (call.name === "complete_session") {
           const finalMessage = typeof call.arguments.final_message === "string" && call.arguments.final_message
             ? call.arguments.final_message
@@ -1248,6 +1291,8 @@ async function runSubagentTask(
         } as LlmMessage;
         messages.push(toolMessage);
         await record(toolMessage);
+        completed.push(call.id);
+        await persist(response, completed);
         if (!result.ok) {
           const key = `${call.name}:${JSON.stringify(call.arguments)}:${result.error}`;
           const count = (repeatedFailures.get(key) ?? 0) + 1;
@@ -1260,6 +1305,7 @@ async function runSubagentTask(
     }
     return finish("max_turns", "Subagent stopped after reaching its maximum turns.", maxTurns);
   } catch (error) {
+    if (error instanceof SpendingApprovalRequired || error instanceof SpendingDeclined) throw error;
     return { ok: false, error: `subagent ${index} failed: ${(error as Error).message}` };
   }
 }
@@ -1478,7 +1524,7 @@ function renderPrettyProgress(event: ProgressEvent, options: RenderProgressOptio
   }
 }
 
-function renderAgentSummary(summary: Record<string, unknown>, options: AgentRunOptions): string {
+export function renderAgentSummary(summary: Record<string, unknown>, options: AgentRunOptions): string {
   return options.compactOutput ? renderCompactPurchaseSummary(summary) : renderPurchaseSummary(summary);
 }
 

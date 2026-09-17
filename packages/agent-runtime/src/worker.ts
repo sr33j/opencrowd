@@ -1,3 +1,4 @@
+import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -31,7 +32,7 @@ interface DurableRun {
   checkpointId: string;
   pendingOperationId?: string;
   summary?: string;
-  tools: Record<string, { digest: string; result?: ToolResult }>;
+  tools: Record<string, { digest: string; result?: ToolResult; approvalPending?: boolean }>;
 }
 interface WorkerState {
   version: 1;
@@ -201,6 +202,7 @@ export class MachineWorker {
         session = await createSession({ workspaceRoot: this.paths.workspace, sessionId: run.sessionId,
           budgetCents: Number(cents), approvalMode: run.start.payload.approvalMode, shellEnabled: true });
       }
+      await beginQuery(session, runId);
       await this.emit("run.state", { sessionId: session.sessionId, state: "running" }, runId, run.commandId);
       const local = this.options.toolExecutor ?? executeTool;
       const hosted = this.options.hostedTools?.(run.start, session);
@@ -217,10 +219,19 @@ export class MachineWorker {
         if (saved && saved.digest !== digest) throw new Error("tool request digest mismatch");
         if (saved?.result) return saved.result;
         if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
-        if (saved && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
+        if (saved && !saved.approvalPending && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
         await this.mutate(() => { run.tools[id] = { digest }; });
         await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args) }, runId, run.commandId);
-        const output = await invoke();
+        let output: ToolResult;
+        try {
+          if (saved?.approvalPending && name === "call_paid_service" && economy)
+            await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
+          output = await invoke();
+        } catch (error) {
+          if (error instanceof RuntimePause && error.outcome === "waiting_for_approval")
+            await this.mutate(() => { run.tools[id].approvalPending = true; });
+          throw error;
+        }
         await this.mutate(() => { run.tools[id].result = output; });
         await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
           error: output.error }, runId, run.commandId);
@@ -236,7 +247,7 @@ export class MachineWorker {
         provider: this.options.provider(run.start, session, dynamicTools?.definitions ?? []),
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
-          dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args)) },
+          dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
           completionGate: () => dynamicTools!.completionGate(),
           knowledge: await this.knowledgeOption(session)
         } : {}),
@@ -261,7 +272,8 @@ export class MachineWorker {
       else if (error instanceof RuntimePause) {
         await this.mutate(() => { run.pendingOperationId = error.operationId; });
         await this.finish(runId, run, error.outcome, error.message);
-      } else if (error instanceof HostedRequestError) await this.finish(runId, run, "failed", error.message);
+      } else if (error instanceof SpendingDeclined) await this.finish(runId, run, "user_stopped", error.message);
+      else if (error instanceof HostedRequestError) await this.finish(runId, run, "failed", error.message);
       else await this.finish(runId, run, "failed", "Execution failed; inspect the run diagnostics");
     }
   }

@@ -78,11 +78,11 @@ describe("architecture invariants", () => {
     expect(tsconfig).not.toMatch(/mcp|local-api|connectors/);
   });
 
-  it("keeps core vendor-neutral: no runtime dependencies", async () => {
+  it("keeps core vendor-neutral: only the shared protocol dependency", async () => {
     const corePackage = JSON.parse(await readFile(join(ROOT, "packages/core/package.json"), "utf8")) as {
       dependencies?: Record<string, string>;
     };
-    expect(Object.keys(corePackage.dependencies ?? {})).toEqual([]);
+    expect(Object.keys(corePackage.dependencies ?? {})).toEqual(["@opencrowd/protocol"]);
   });
 
   it("publishes only the opencrowd CLI package", async () => {

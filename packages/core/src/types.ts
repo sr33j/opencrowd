@@ -28,6 +28,7 @@ export interface SessionOptions {
   workspaceRoot?: string;
   sessionId?: string;
   budgetCents?: number;
+  perCallCents?: number;
   approvalMode?: ApprovalMode;
   shellEnabled?: boolean;
 }
@@ -39,6 +40,13 @@ export interface SessionState {
   artifactsDir: string;
   ledgerPath: string;
   budgetCents: number;
+  perCallCents?: number;
+  /** A query is one user task; lifetime spend remains in spentCents/ledger. */
+  query?: {
+    id: string; limitCents: number; startSpentCents: number;
+    pending?: import("./budget.js").SpendingApproval;
+    approved?: Record<string, number>;
+  };
   reservedCents: number;
   spentCents: number;
   approvalMode: ApprovalMode;
@@ -124,4 +132,3 @@ export interface ToolResult {
   data?: unknown;
   error?: string;
 }
-

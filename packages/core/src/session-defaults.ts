@@ -16,6 +16,7 @@ export async function createOpenCrowdSession(options: OpenCrowdSessionOptions = 
   return createSession({
     ...options,
     budgetCents,
+    perCallCents: options.perCallCents ?? config.llmMaxCostCentsPerCall,
     approvalMode: options.approvalMode ?? envApprovalMode() ?? config.approval,
     shellEnabled: options.shellEnabled ?? defaultShellEnabled()
   });

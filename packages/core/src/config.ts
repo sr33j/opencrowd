@@ -1,3 +1,4 @@
+import { DEFAULT_PER_CALL_ATOMIC, DEFAULT_PER_QUERY_ATOMIC } from "@opencrowd/protocol";
 import { mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { atomicWrite, resolveAgentPaths, type AgentPaths } from "./paths.js";
@@ -18,7 +19,7 @@ export interface ProviderModelDefaults {
 
 export interface OpenCrowdConfig {
   /** Persisted schema version for deterministic upgrades. */
-  configVersion: 2;
+  configVersion: 3;
   /** Vendor MCP servers (AgentCash, CrowdCode). Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
   /** Default LLM provider for new sessions. */
@@ -31,18 +32,18 @@ export interface OpenCrowdConfig {
   openrouterX402ProxyUrl: string;
   /** Per-request LLM timeout; reasoning models can think for minutes. */
   llmTimeoutMs: number;
-  /** Local budget reservation ceiling per LLM request, reconciled to actual cost. */
+  /** Automatic spending limit for every model or paid tool call. */
   llmMaxCostCentsPerCall: number;
   /** Ceiling for one automatic Venice credit top-up; also bounded by session allowance. */
   veniceMaxTopUpCents: number;
-  /** Default cumulative session spend cap in cents; local policy, not funds. */
+  /** Default per-query automatic spend limit in cents; local policy, not funds. */
   defaultBudgetCents: number;
   /** Default external-service approval mode for new sessions. */
   approval: ApprovalMode;
 }
 
 export const DEFAULT_CONFIG: OpenCrowdConfig = {
-  configVersion: 2,
+  configVersion: 3,
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
     crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
@@ -60,12 +61,12 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   openrouter: { model: "auto", submodel: "auto" },
   openrouterX402ProxyUrl: "https://x402-tokens.fly.dev/v1",
   llmTimeoutMs: 300_000,
-  llmMaxCostCentsPerCall: 100,
+  llmMaxCostCentsPerCall: Number(DEFAULT_PER_CALL_ATOMIC) / 10000,
   // Venice credit is deposit-only (no withdrawals), so keep single top-ups
   // small; in ask mode each top-up additionally requires user confirmation.
   veniceMaxTopUpCents: 500,
-  defaultBudgetCents: 2000,
-  approval: "ask"
+  defaultBudgetCents: Number(DEFAULT_PER_QUERY_ATOMIC) / 10000,
+  approval: "auto"
 };
 
 export function configDir(paths?: AgentPaths): string {
@@ -117,7 +118,7 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
   );
   const mcpServers = recordValue(raw.mcpServers);
   return {
-    configVersion: 2,
+    configVersion: 3,
     mcpServers: mcpServers ? mcpServers as OpenCrowdConfig["mcpServers"] : DEFAULT_CONFIG.mcpServers,
     provider,
     blockrun: providerDefaults(raw.blockrun, DEFAULT_CONFIG.blockrun),
@@ -128,10 +129,10 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
       ?? stringValue(raw.x402ProxyUrl)
       ?? DEFAULT_CONFIG.openrouterX402ProxyUrl,
     llmTimeoutMs: numberValue(raw.llmTimeoutMs) ?? DEFAULT_CONFIG.llmTimeoutMs,
-    llmMaxCostCentsPerCall: numberValue(raw.llmMaxCostCentsPerCall) ?? DEFAULT_CONFIG.llmMaxCostCentsPerCall,
+    llmMaxCostCentsPerCall: raw.configVersion === 3 ? numberValue(raw.llmMaxCostCentsPerCall) ?? DEFAULT_CONFIG.llmMaxCostCentsPerCall : DEFAULT_CONFIG.llmMaxCostCentsPerCall,
     veniceMaxTopUpCents: numberValue(raw.veniceMaxTopUpCents) ?? DEFAULT_CONFIG.veniceMaxTopUpCents,
-    defaultBudgetCents: numberValue(raw.defaultBudgetCents) ?? DEFAULT_CONFIG.defaultBudgetCents,
-    approval: raw.approval === "auto" || raw.approval === "off" ? raw.approval : "ask"
+    defaultBudgetCents: raw.configVersion === 3 ? numberValue(raw.defaultBudgetCents) ?? DEFAULT_CONFIG.defaultBudgetCents : DEFAULT_CONFIG.defaultBudgetCents,
+    approval: raw.approval === "off" ? "off" : raw.configVersion === 3 && raw.approval === "ask" ? "ask" : "auto"
   };
 }
 

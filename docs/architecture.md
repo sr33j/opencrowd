@@ -87,7 +87,7 @@ One session persists:
 - session ID and workspace;
 - conversation history and compaction archives;
 - resolved provider, main model, and subagent model;
-- session budget, spent amount, and in-flight reservations;
+- saved spending defaults, current query allowance, lifetime spend, and in-flight reservations;
 - external-service approval mode;
 - artifacts;
 - LLM usage entries;
@@ -96,40 +96,48 @@ One session persists:
 Session-resolved provider/model choices survive `opencrowd run --session`.
 Interactive model overrides are session state, never UI-process memory.
 
-### Budget
+### Spending approval
 
-The budget is a local cumulative cap on value consumed for the session:
+The shared protocol evaluates two automatic-spending thresholds: $1 per paid
+call and $10 per user query. Wallet settings override these defaults. Queries
+include main-model, tool and subagent spending, including in-flight reservations.
+The conversation's lifetime ledger remains separate from each fresh allowance.
 
-- LLM inference counts against it.
-- External paid-service use counts against it.
-- Reservations are local and require no network request.
-- A budget change does not move funds.
-- A budget cannot be set below already finalized session spend.
-- Wallet/provider balance is funding availability, not the budget.
-- Provider credit top-ups and LLM usage are never double-counted: both
-  cash-flow and usage facts may be persisted, but one unambiguous total spend
-  is exposed.
-- Any automatic top-up is bounded by the remaining session allowance and a
-  configured per-top-up maximum.
+```mermaid
+flowchart TD
+    A[Model or paid tool quote] --> B[Shared spending policy]
+    B -->|Within call and query limits| E[Reserve and execute]
+    B -->|Above either limit| C[Persist checkpoint and ask user]
+    C -->|Approve once| E
+    C -->|Increase current query budget| D[Update this query only]
+    D --> E
+    C -->|Decline| F[Stop before payment]
+    E --> G[Record cost and continue query]
+```
 
-The default cap is a fixed configurable value from local configuration.
-Session creation never requires a live wallet-balance lookup.
+CLI adapters check an x402 quote before signing; providers without quotes use
+an estimated maximum from catalog pricing. Parallel subagents share one locked
+reservation ledger and persist their own checkpoints; query runs join each
+fan-out at its turn boundary so approval/restart cannot orphan background work.
+CLI headless approval survives process exit through the query checkpoint and
+`opencrowd resume`. Cloud's gateway owns the reservation ledger and binds each
+approval to its operation and quote. Its worker resumes the same operation ID.
+Changed quotes ask again; uncertain submitted payments remain accounted for.
+
+Approving a call never changes defaults. Increasing a query budget changes only
+that query, and future calls still respect the per-call threshold. A budget
+change does not move funds. Prepaid provider deposits are checked before transfer;
+usage consumes the credit without counting the deposit twice.
 
 ### External-service approval
 
-Approval governs external service purchases only. LLM calls do not prompt per
-turn; they are governed by the session budget. The mode type is
-`ApprovalMode`:
-
-- `ask`: require approval unless a stored rule authorizes the service.
-- `auto`: skip prompts, while still enforcing blocks, caps, reputation checks,
-  payment lifecycle, and the session budget.
-- `off`: prohibit external-service purchases. Local tools and LLM inference
-  continue to work.
-
-The approval UI supports: allow once; always allow this service with optional
-method/per-call/session caps; deny once; block service. The legacy names
-`PermissionMode`, `ask_first`, `yolo`, and `blocked` do not exist in the code.
+`auto` is the default, with spending prompts above the automatic limits.
+Explicit service blocks, allowed methods, reputation checks and receipt/review
+requirements still apply. Legacy `ask` adds service-level approval; `off`
+disables external-service purchases in the CLI. New queries do not enforce
+legacy per-service monetary/session caps; the shared spending policy replaces
+them. The low-level session API retains compatibility for callers that have
+not started a query.
 
 ### Wallet
 
@@ -349,7 +357,7 @@ command, which affects future sessions, never a running one.
 | `/models` | List models for the active provider. No mutation. |
 | `/model [id\|auto]` | Show or set the current session's main model. |
 | `/submodel [id\|auto\|off]` | Show, set, auto-select, or disable the session's subagent model. |
-| `/budget <usd>` | Set the session's cumulative local spend cap; never move money. |
+| `/budget <usd>` | Set the current query allowance; never move money. |
 | `/approval ask\|auto\|off` | Control external-service purchase approval for this session. |
 | `/approvals` | List/manage stored service allow/block rules and caps. |
 | `/wallet` | Show public AgentCash balances and deposit addresses. |

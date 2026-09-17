@@ -1,12 +1,11 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, render, Static, Text, useApp, useInput, usePaste, useStdout } from "ink";
 import {
-  budgetStatus,
+  budgetStatus, updateConfig, saveSession, type SpendingApproval, type SpendingAnswer,
   clearConversation,
   createOpenCrowdSession,
   loadConfig,
   setApprovalMode,
-  setSessionBudget,
   type ApprovalMode,
   type ProgressEvent,
   type SessionState
@@ -23,7 +22,7 @@ import {
   sessionHasPendingReviews,
   type CommandResult
 } from "../registry.js";
-import { envFlag, formatCents, shortUrl, truncateMiddle } from "../shared.js";
+import { envFlag, parseUsd, formatCents, shortUrl, truncateMiddle } from "../shared.js";
 import { insertInputText } from "./input.js";
 
 let nextItemId = 1;
@@ -44,6 +43,8 @@ type Item =
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
 
 type Modal =
+  | { type: "wallet"; tab: "overview" | "limits"; field: "call" | "query"; call: string; query: string }
+  | { type: "spending"; request: SpendingApproval; resolve: (answer: SpendingAnswer) => void; budget?: string }
   | { type: "approval"; request: ApprovalRequest; resolve: (answer: ApprovalAnswer) => void };
 
 type Wizard =
@@ -176,8 +177,7 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
           return;
         }
         if (cents > 0) {
-          const budgetCents = Math.min(2000, cents);
-          await setSessionBudget(session, budgetCents);
+          const budgetCents = session.budgetCents;
           if (!cancelled) {
             setWizard({ step: "done", funded: true, budgetCents });
             void refreshWallet();
@@ -284,6 +284,10 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
         mockToolExecutor: testMode ? state.mockToolExecutor : undefined,
         compactOutput: true,
         onProgress: handleProgress,
+        spendingHandler: (request) => new Promise<SpendingAnswer>((resolve) => {
+          setModal({ type: "spending", request, resolve: answer => { setModal(null); resolve(answer); } });
+          setActivity("waiting for spending approval…");
+        }),
         approvalHandler: (request) => new Promise<ApprovalAnswer>((resolve) => {
           setModal({
             type: "approval",
@@ -307,6 +311,9 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
 
   const handleCommandResult = useCallback(async (result: CommandResult) => {
     switch (result.kind) {
+      case "wallet":
+        setModal({ type: "wallet", tab: "overview", field: "call", call: String((session.perCallCents ?? 100) / 100), query: String(session.budgetCents / 100) });
+        return;
       case "text":
         push({ kind: "block", label: result.label, text: result.body });
         return;
@@ -413,6 +420,42 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
       setTimeout(() => {
         ctrlCArmedRef.current = false;
       }, 1500);
+      return;
+    }
+    if (modal?.type === "wallet") {
+      if (key.escape) { setModal(null); return; }
+      if (key.leftArrow || key.rightArrow || key.tab) { setModal({ ...modal, tab: modal.tab === "overview" ? "limits" : "overview" }); return; }
+      if (modal.tab === "limits") {
+        if (key.upArrow || key.downArrow) { setModal({ ...modal, field: modal.field === "call" ? "query" : "call" }); return; }
+        if (isReturn) {
+          void (async () => {
+            try {
+              const perCall = parseUsd(modal.call), perQuery = parseUsd(modal.query);
+              await updateConfig({ llmMaxCostCentsPerCall: perCall, defaultBudgetCents: perQuery });
+              session.perCallCents = perCall; session.budgetCents = perQuery; await saveSession(session);
+              setModal(null); push({ kind: "note", text: "Spending limits saved. Each new query gets a fresh budget." });
+            } catch (e) { push({ kind: "error", text: (e as Error).message }); }
+          })(); return;
+        }
+        const field = modal.field;
+        if (key.backspace || key.delete) setModal({ ...modal, [field]: modal[field].slice(0, -1) });
+        else if (/^[0-9.]+$/.test(char)) setModal({ ...modal, [field]: modal[field] + char });
+      }
+      return;
+    }
+    if (modal?.type === "spending") {
+      if (key.escape || char.toLowerCase() === "n") { modal.resolve({ decision: "decline" }); return; }
+      if (modal.budget !== undefined) {
+        if (isReturn) {
+          try {
+            const cents = parseUsd(modal.budget);
+            if (cents <= modal.request.queryLimitCents || cents < modal.request.projectedCents) throw new Error("Enter a higher budget covering this call and committed spending.");
+            modal.resolve({ decision: "approve", queryBudgetCents: cents });
+          } catch (e) { push({ kind: "error", text: (e as Error).message }); }
+        } else if (key.backspace || key.delete) setModal({ ...modal, budget: modal.budget.slice(0,-1) });
+        else if (/^[0-9.]+$/.test(char)) setModal({ ...modal, budget: modal.budget + char });
+      } else if (char.toLowerCase() === "y") modal.resolve({ decision: "approve" });
+      else if (char.toLowerCase() === "i") setModal({ ...modal, budget: String(Math.ceil(Math.max(modal.request.projectedCents, modal.request.queryLimitCents + 1) / 1000) * 10) });
       return;
     }
     if (modal?.type === "approval") {
@@ -534,6 +577,26 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
       <Static items={items}>
         {(item) => <TranscriptLine key={item.id} item={item} width={width} sessionId={session.sessionId} modeLabel={modeLabel} modelLabel={modelLabel} testMode={state.testMode} />}
       </Static>
+      {modal?.type === "wallet" && <Box borderStyle="round" borderColor="cyan" flexDirection="column" paddingX={1}>
+        <Text bold>Wallet · {modal.tab === "overview" ? "[balance]   spending limits" : "balance   [spending limits]"}</Text>
+        {modal.tab === "overview" ? <Text>{wallet.label ?? "Agent wallet"} · {formatCents(wallet.balanceCents ?? 0)}</Text> : <>
+          <Text>Calls within these limits run automatically. Larger payments ask first.</Text>
+          <Text color={modal.field === "call" ? "cyan" : undefined}>Per call  $ {modal.call}{modal.field === "call" ? "▏" : ""}</Text>
+          <Text color={modal.field === "query" ? "cyan" : undefined}>Per query $ {modal.query}{modal.field === "query" ? "▏" : ""}</Text>
+          <Text dimColor>One query includes its model, tool and subagent calls. Defaults apply to new queries.</Text>
+          <Text dimColor>↑/↓ field · enter save · backspace edit</Text>
+        </>}
+        <Text dimColor>←/→ tabs · esc close</Text>
+      </Box>}
+      {modal?.type === "spending" && <Box borderStyle="round" borderColor="yellow" flexDirection="column" paddingX={1}>
+        <Text color="yellow" bold>Spending approval required</Text>
+        <Text>{modal.request.description}</Text>
+        <Text>This call: {formatCents(modal.request.amountCents)} · per-call limit {formatCents(modal.request.perCallCents)}</Text>
+        <Text>Query after call: {formatCents(modal.request.projectedCents)} / {formatCents(modal.request.queryLimitCents)}</Text>
+        {modal.budget !== undefined ? <><Text>New query budget: $ {modal.budget}▏</Text><Text dimColor>enter approve and increase · esc decline</Text></>
+          : <Text dimColor>[y] approve this call · [i] increase query budget · [n]/esc decline</Text>}
+        <Text dimColor>Saved defaults stay the same. Future calls still respect the per-call limit.</Text>
+      </Box>}
       {modal?.type === "approval" ? <ApprovalModal request={modal.request} /> : null}
       {wizard?.step === "fund" ? <FundPanel address={wizard.address} qr={wizard.qr} spinnerFrame={spinnerFrame} /> : null}
       {wizard?.step === "done" ? <DonePanel funded={wizard.funded} budgetCents={wizard.budgetCents} /> : null}
@@ -691,7 +754,7 @@ function DonePanel({ funded, budgetCents }: { funded: boolean; budgetCents: numb
       {funded ? (
         <>
           <Text color="green" bold>Funds received — you're ready to go</Text>
-          <Text>Session budget set to {formatCents(budgetCents)}. The agent asks before paying any new service.</Text>
+          <Text>Each query can spend up to {formatCents(budgetCents)} automatically; larger payments ask first. Edit /wallet → spending limits.</Text>
         </>
       ) : (
         <>
