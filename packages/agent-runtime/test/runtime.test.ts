@@ -84,7 +84,7 @@ describe("typed providers and budget accounting", () => {
       maxCostCentsPerCall: 10
     });
 
-    await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toEqual({ content: "done", toolCalls: [] });
+    await expect(provider.complete([{ role: "user", content: "hi" }])).resolves.toMatchObject({ content: "done", toolCalls: [], usage: { inputTokens: 11, outputTokens: 3 } });
     expect(session.reservedCents).toBe(0);
     expect(session.spentCents).toBe(4);
     const rows = await readLedger(session.ledgerPath);
