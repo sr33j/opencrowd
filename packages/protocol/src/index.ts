@@ -7,3 +7,4 @@ export * from "./redact.js";
 export * from "./seq.js";
 export * from "./codec.js";
 export * from "./context.js";
+export * from "./spending.js";

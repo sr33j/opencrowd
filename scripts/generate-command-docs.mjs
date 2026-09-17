@@ -16,8 +16,8 @@ const content = `# OpenCrowd interactive commands
 
 <!-- Generated from the live command registry by scripts/generate-command-docs.mjs. Do not edit by hand. -->
 
-All interactive slash commands mutate or inspect the current session.
-Persistent defaults change only through \`opencrowd config\`.
+Interactive slash commands act on the current session. Wallet → spending limits also saves defaults for future queries.
+Persistent defaults can also change through \`opencrowd config\` or \`opencrowd wallet limits\`.
 
 ${renderCommandHelpMarkdown()}
 

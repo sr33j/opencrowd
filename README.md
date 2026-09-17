@@ -84,30 +84,47 @@ There is one wallet: AgentCash's. OpenCrowd shows public addresses,
 balances, and funding links (`/wallet`, `/fund`) and never manages, copies,
 or exports keys. See [SECURITY.md](SECURITY.md) for the enforcement model.
 
-## Budget
+## Spending limits
 
-The session budget is a local cumulative cap on value consumed — LLM
-inference and paid services both count against it. Reservations are local,
-a budget change never moves money, and the cap can never drop below already
-finalized spend. Defaults come from configuration
-(`opencrowd config set budget 20`); session creation never needs a network
-lookup.
+By default, each model or paid tool call can spend up to **$1** automatically,
+and each user query can spend up to **$10** across its model calls, tools,
+retries and subagents. Every new query receives a fresh allowance; conversation
+history and lifetime spending remain available.
+
+Open **/wallet → spending limits** to save defaults, or use:
+
+```sh
+opencrowd wallet limits --per-call 1 --per-query 10
+```
+
+A call above either threshold pauses before payment. Approve that call once,
+approve it and increase the current query budget, or decline. Increasing a
+query budget leaves saved defaults unchanged; later calls still respect the
+per-call limit. Changing a budget does not move funds.
+
+Headless runs return `waiting_for_approval` with the pending amount. Resume the
+saved query without repeating completed work:
+
+```sh
+opencrowd resume <session-id> --approve-once --workspace <dir>
+opencrowd resume <session-id> --query-budget 20 --workspace <dir>
+opencrowd resume <session-id> --decline --workspace <dir>
+```
+
+Cloud applies the same thresholds in its payment gateway and exposes them in
+Wallet → spending limits. Cloud and CLI save settings independently.
 
 ## Approval
 
-Approval governs external service purchases only (LLM calls are governed by
-the budget):
+Spending thresholds apply to model and paid tool calls. External services also
+retain reputation checks, explicit service blocks and method restrictions.
+`auto` is the default and still asks for spending above either threshold.
+Legacy `ask` adds service confirmations; `off` disables external-service
+purchases in the CLI. Stored rules remain available through `/approvals`;
+old monetary service/session caps are replaced by query spending limits.
 
-- `ask` (default) — a human approves each new service: allow once,
-  always-allow with per-call/session caps, deny, or block.
-- `auto` — no prompts; blocks, caps, reputation checks, the payment
-  lifecycle, and the budget still apply.
-- `off` — external purchases are prohibited; local tools and inference keep
-  working.
-
-Stored rules are managed with `/approvals`. Every confirmed paid call —
-success or failure — requires a signed CrowdCode review before the next
-purchase; pending reviews survive restarts.
+Every confirmed paid service call requires a signed CrowdCode review before
+the next purchase; pending reviews survive restarts.
 
 ## Commands
 

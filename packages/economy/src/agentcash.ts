@@ -9,6 +9,7 @@ import { McpConnection, type McpCallResult } from "./mcp.js";
 export type PaymentRail = "x402-base" | "mppx" | "unsupported";
 
 export interface PaidFetchRequest {
+  operationId?: string;
   url: string;
   method: string;
   body?: unknown;

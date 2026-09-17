@@ -312,3 +312,41 @@ describe("hosted economy: review gate", () => {
     expect(await tools.completionGate()).toBeUndefined();
   });
 });
+
+
+it("resumes an approved paid tool after worker restart with the same purchase ID", async () => {
+  const home = await root(); const events: Event[] = []; let approved = false; let turn = 0;
+  const { fetcher } = fakeFetch();
+  const { socketPath, requests } = await bridge(() => approved
+    ? { ok: true, data: { outcome: "paid_success", status: 200, body: "ok", content_type: "text/plain", amount_atomic: "10000", transaction: "0xtx", pay_to: "0xpayee" } }
+    : { ok: false, code: "approval_required", error: "Approve this call" });
+  const provider = { complete: vi.fn(async () => {
+    switch (turn++) {
+      case 0: return { content: "", toolCalls: [{ id: "i", name: "inspect_paid_service", arguments: { url: SEARCH, method: "POST" } }] };
+      case 1: return { content: "", toolCalls: [{ id: "p", name: "call_paid_service", arguments: { url: SEARCH, method: "POST", body: { query: "q" } } }] };
+      default: return { content: "done", toolCalls: [] };
+    }
+  }) };
+  const options = { agentHome: home, output: (line: string) => { events.push(JSON.parse(line)); }, provider: () => provider,
+    economy: (run: any, session: any) => {
+      const gateway = createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE });
+      gateway.hasPendingRequiredReviews = async () => false;
+      return gateway;
+    } };
+  const worker = new MachineWorker(options); await worker.initialize();
+  await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "start", runId: "run-1", seq: 1, emittedAt: "2026-09-16T00:00:00Z", type: "run.start",
+    payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "Search", modelPolicy: {}, budget: { limit: "10000000" }, approvalMode: "auto" } }));
+  await worker.drain();
+  const waiting = events.filter(e => e.type === "run.finished").at(-1)!;
+  expect(waiting.payload.outcome).toBe("waiting_for_approval"); expect(provider.complete).toHaveBeenCalledTimes(2);
+  approved = true;
+  const restarted = new MachineWorker(options); await restarted.initialize();
+  await restarted.handleLine(JSON.stringify({ protocolVersion: 1, id: "resume", runId: "run-1", seq: 2, emittedAt: "2026-09-16T00:01:00Z", type: "run.resume",
+    payload: { sessionId: "session-1", cause: "approval_granted", operationId: waiting.payload.pendingOperationId } }));
+  await restarted.drain();
+  expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
+  const payments = requests.filter(r => r.name === "economy.pay");
+  expect(payments).toHaveLength(2);
+  expect(payments[0].arguments.purchase_request_id).toBe(payments[1].arguments.purchase_request_id);
+  expect(provider.complete).toHaveBeenCalledTimes(3);
+});

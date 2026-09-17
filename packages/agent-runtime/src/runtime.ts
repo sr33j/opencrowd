@@ -1,5 +1,8 @@
+import { readFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import {
-  appendConversationMessage,
+  appendConversationMessage, beginQuery, budgetStatus, atomicWrite, SpendingApprovalRequired, SpendingDeclined,
   createOpenCrowdSession,
   loadSession,
   readConversationMessages,
@@ -10,7 +13,7 @@ import {
   type ToolResult
 } from "@opencrowd/core";
 import {
-  runAgentTask,
+  renderAgentSummary,
   runAgentTaskDetailed,
   type AgentRunOptions,
   type AgentTaskResult,
@@ -117,7 +120,10 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
         ? {
           dynamicTools: {
             definitions: economy.definitions(),
-            execute: (name, args) => economy.execute(name, args)
+            execute: async (name, args) => {
+              if (runOptions.resume && name === "call_paid_service") await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
+              return economy.execute(name, args);
+            }
           },
           completionGate: async () => (await economy.hasPendingRequiredReviews())
             ? "a confirmed paid purchase still needs its required review; submit it with review_paid_service"
@@ -127,15 +133,43 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
     };
   }
 
+  async function execute(session: SessionState, task: string, runOptions: RuntimeRunOptions = {}): Promise<AgentTaskResult> {
+    const path = join(session.sessionDir, "query-checkpoint.json");
+    let persisted: { id: string; task: string; checkpoint?: LoopCheckpoint } | undefined;
+    try { persisted = JSON.parse(await readFile(path, "utf8")); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    const resuming = task === "" && !!persisted;
+    if (persisted && !resuming) throw new Error("A query is unfinished. Resume it or decline its pending approval before starting another query.");
+    const saved = resuming ? persisted! : { id: runOptions.runId ?? randomUUID(), task };
+    await beginQuery(session, saved.id);
+    const checkpoint = async (value: LoopCheckpoint) => {
+      saved.checkpoint = value;
+      await atomicWrite(path, JSON.stringify(saved));
+      await runOptions.onCheckpoint?.(value);
+    };
+    await atomicWrite(path, JSON.stringify(saved));
+    try {
+      const prepared = await prepare(session, { ...runOptions, runId: saved.id, resume: saved.checkpoint ?? runOptions.resume, onCheckpoint: checkpoint });
+      const result = await runAgentTaskDetailed(session, saved.task, prepared);
+      await rm(path, { force: true });
+      return result;
+    } catch (error) {
+      if (error instanceof SpendingApprovalRequired) return { outcome: "waiting_for_approval", turns: saved.checkpoint?.turn ?? 0,
+        summary: { final_message: error.message, approval: error.approval, budget: budgetStatus(session) } };
+      if (error instanceof SpendingDeclined) {
+        await rm(path, { force: true });
+        return { outcome: "stopped", turns: saved.checkpoint?.turn ?? 0, summary: { final_message: error.message, budget: budgetStatus(session) } };
+      }
+      throw error;
+    }
+  }
   return {
     storage,
     createSession: (sessionOptions = {}) => storage.createSession({ ...sessionOptions, workspaceRoot: options.workspace }),
     resumeSession: (sessionId) => storage.loadSession(options.workspace, sessionId),
-    async runTask(session, task, runOptions = {}) {
-      return runAgentTaskDetailed(session, task, await prepare(session, runOptions));
-    },
+    runTask: execute,
     async runTaskRendered(session, task, runOptions = {}) {
-      return runAgentTask(session, task, await prepare(session, runOptions));
+      return renderAgentSummary((await execute(session, task, runOptions)).summary, runOptions);
     }
   };
 }

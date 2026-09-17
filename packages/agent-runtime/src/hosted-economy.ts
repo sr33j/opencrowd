@@ -1,6 +1,7 @@
-import { randomUUID } from "node:crypto";
+import { RuntimePause } from "./worker.js";
+import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
-import type { SessionState } from "@opencrowd/core";
+import { SpendingDeclined, type SessionState } from "@opencrowd/core";
 import {
   EconomyGateway,
   originOf,
@@ -239,10 +240,12 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }
     const method = request.method.toUpperCase();
     const body = request.body === undefined ? undefined : typeof request.body === "string" ? request.body : JSON.stringify(request.body);
+    const hash = request.operationId ? createHash("sha256").update(`${this.socket.runId}:${request.operationId}`).digest("hex") : undefined;
+    const purchaseId = hash ? `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}` : randomUUID();
     let reply;
     try {
       reply = await postHostedTool(this.socket, "economy.pay", {
-        purchase_request_id: randomUUID(),
+        purchase_request_id: purchaseId,
         service_id: serviceId,
         url: request.url,
         method,
@@ -278,6 +281,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
         }
       };
     }
+    if (reply.code === "payment_declined") throw new SpendingDeclined();
+    if (reply.code === "approval_required") throw new RuntimePause("waiting_for_approval", purchaseId, "Spending approval required. Review the quoted amount to continue.");
     if (reply.code === "expected_payment_required") {
       return this.fetchUnpaid(request.url, method, body, request.headers);
     }
@@ -388,6 +393,7 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
     agentcash: new HostedAgentCashAdapter(directory, socket, fetcher),
     crowdcode: new HostedCrowdCodeAdapter(directory, socket),
     approvalMode: "auto",
+    hostedSpending: true,
     minServiceScore: 2,
     // Hosted rules live with the agent's session, never in a user config dir.
     approvalRulesPath: join(options.session.sessionDir, "approval-rules.json")
@@ -411,8 +417,8 @@ export function hostedDynamicTools(economy: EconomyGateway): HostedDynamicTools 
   let failedReviews = 0;
   return {
     definitions: economy.definitions().filter((definition) => !HIDDEN_HOSTED_TOOLS.has(definition.name)),
-    execute: async (name, args) => {
-      const result = await economy.execute(name, args);
+    execute: async (name, args, operationId) => {
+      const result = await economy.execute(name, args, operationId);
       if (name === "review_paid_service" && !result.ok) failedReviews += 1;
       return result;
     },

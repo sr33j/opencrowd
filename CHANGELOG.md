@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.0 — 2026-09-17
+
+- Replace cumulative budgets with configurable automatic limits of $1 per paid
+  call and $10 per query. Model calls, paid tools and subagents share the query
+  allowance; calls above a limit pause for approval before payment.
+- Add Wallet spending limits and choices to approve once, decline, or raise only
+  the current query budget. Persist approvals and checkpoints for CLI resume and
+  hosted worker restarts without repeating completed calls.
+- Use the same spending decision logic in the CLI and hosted payment gateway.
+- Compact context before payment and preserve exact prepared requests across
+  approval restarts, including parallel subagent checkpoints.
+
 - Trim the replayed conversation to 48 KB before each hosted model request
   (`trimHostedMessages`): the system prompt, the original task and the last
   four messages are always kept; older tool outputs are blanked first, then

@@ -83,7 +83,7 @@ describe("session mutation commands", () => {
 
   it("/approval controls the session's external-purchase policy", async () => {
     const ctx = await context();
-    expect(ctx.session.approvalMode).toBe("ask");
+    expect(ctx.session.approvalMode).toBe("auto");
     await runSlashCommand(ctx, "approval auto");
     expect(ctx.session.approvalMode).toBe("auto");
     await runSlashCommand(ctx, "approval off");
@@ -163,7 +163,7 @@ describe("inspection commands", () => {
     expect(body).toContain("venice");
     expect(body).toContain("model-a");
     expect(body).toContain("model-b");
-    expect(body).toContain("ask");
+    expect(body).toContain("auto");
   });
 
   it("/model and /submodel show the session's resolved models", async () => {
