@@ -44,6 +44,13 @@ async function bridge(handler: (res: import("node:http").ServerResponse) => void
 }
 
 describe("hosted bridge failure classification", () => {
+  it("fails a settled model response with its real error instead of requesting reconciliation", async () => {
+    const message = "The paid model returned an error; its receipt is saved";
+    const b = await bridge(res => { res.statusCode = 502; res.end(JSON.stringify({ error: "model_failed", message, paid: true })); });
+    try { expect(await b.run()).toMatchObject({ outcome: "failed", summary: message }); }
+    finally { await b.close(); }
+  });
+
   it("fails the run with the bridge's message when the request was rejected unpaid", async () => {
     const b = await bridge(res => { res.statusCode = 400; res.end(JSON.stringify({ error: "context_too_large", message: "The conversation is too long for this model.", status: 400, paid: false })); });
     try {

@@ -3,6 +3,11 @@ export const MODEL_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
 export const MODEL_MAX_MESSAGES = 1000;
 export const DEFAULT_CONTEXT_WINDOW = 64_000;
 
+/** Shared by model transports and the agent loop: partial tools cannot execute. */
+export function isOutputLimitFinishReason(reason: string | undefined): boolean {
+  return reason === "length" || reason === "max_tokens" || reason === "max_output_tokens";
+}
+
 /** A definitive context rejection, with payment state already resolved. */
 export class ContextWindowExceeded extends Error {
   readonly code = "context_window_exceeded";

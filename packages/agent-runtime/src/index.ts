@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { contextLimits } from "@opencrowd/protocol";
+import { contextLimits, isOutputLimitFinishReason } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState } from "./context.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -557,10 +557,6 @@ function isTransientProviderError(error: unknown): boolean {
   return /TIMEOUT|timed out|stalled|429|rate limit|HTTP 5\d\d|rejected a signed payment|payment was rejected|ECONNRESET|ECONNREFUSED|socket hang up|fetch failed|network|terminated|unexpected EOF/i.test(message);
 }
 
-function isOutputLimitFinishReason(reason: string | undefined): boolean {
-  return reason === "length" || reason === "max_tokens" || reason === "max_output_tokens";
-}
-
 function truncateNote(text: string): string {
   return text.length > 300 ? `${text.slice(0, 300)}…` : text;
 }
@@ -907,7 +903,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       outputContinuationNudges += 1;
       const nudge: LlmMessage = {
         role: "user",
-        content: "Your previous response hit the provider output limit. Continue exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
+        content: "Your previous response hit the provider output limit. Any tool calls in that response were discarded and did not execute. If you were calling a tool, issue a complete, shorter tool call. Otherwise continue the answer exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
       };
       messages.push(nudge);
       await options.onMessage?.(nudge);
@@ -1245,7 +1241,7 @@ async function runSubagentTask(
         outputContinuationNudges += 1;
         const nudge: LlmMessage = {
           role: "user",
-          content: "Your previous response hit the provider output limit. Continue exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
+          content: "Your previous response hit the provider output limit. Any tool calls in that response were discarded and did not execute. If you were calling a tool, issue a complete, shorter tool call. Otherwise continue the answer exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
         };
         messages.push(nudge);
         await record(nudge);

@@ -1269,7 +1269,7 @@ describe("completion gating", () => {
           };
         }
         expect(messages.at(-2)).toMatchObject({ role: "assistant", content: "The first half ends mid-sen", toolCalls: [] });
-        expect(messages.at(-1)?.content).toContain("Continue exactly where it stopped");
+        expect(messages.at(-1)?.content).toContain("continue the answer exactly where it stopped");
         return { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "tence." } }] };
       }
     };
