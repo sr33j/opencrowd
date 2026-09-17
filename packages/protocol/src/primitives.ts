@@ -48,6 +48,8 @@ export type ApprovalMode = z.infer<typeof ApprovalModeSchema>;
 export const ModelPolicySchema = z.looseObject({
   provider: z.string().min(1).optional(),
   model: z.string().min(1).optional(),
+  contextWindowTokens: z.int().min(1024).max(4_000_000).optional(),
+  maxOutputTokens: z.int().positive().optional(),
   submodel: z.string().min(1).optional()
 });
 export type ModelPolicy = z.infer<typeof ModelPolicySchema>;

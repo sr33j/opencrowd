@@ -16,6 +16,7 @@ export interface ProviderModel {
   id: string;
   name?: string;
   contextWindowTokens?: number;
+  maxOutputTokens?: number;
   inputCostCentsPer1k?: number;
   outputCostCentsPer1k?: number;
   supportsTools?: boolean;
@@ -262,6 +263,10 @@ export async function readSseCompletion(
 
   const consumeChunk = (chunk: unknown) => {
     const record = chunk && typeof chunk === "object" ? chunk as Record<string, unknown> : {};
+    if (record.error) {
+      const error = objectValue(record.error);
+      throw new Error(typeof record.error === "string" ? record.error : String(error?.message ?? error?.code ?? "Provider stream error"));
+    }
     if (record.usage) {
       usage = normalizeUsage(record.usage);
     }
@@ -568,6 +573,7 @@ function normalizeModel(record: unknown): ProviderModel | null {
   return {
     id,
     name: stringValue(item.name ?? item.display_name ?? spec?.name),
+    maxOutputTokens: numberValue(item.max_output ?? item.max_output_tokens ?? objectValue(item.top_provider)?.max_completion_tokens),
     contextWindowTokens: plausibleContextWindow(numberValue(
       item.context_length ?? item.context_window ?? spec?.availableContextTokens ?? spec?.contextLength
     )),

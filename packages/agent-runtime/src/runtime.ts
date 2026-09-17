@@ -1,6 +1,5 @@
 import {
   appendConversationMessage,
-  compactConversationIfNeeded,
   createOpenCrowdSession,
   loadSession,
   readConversationMessages,
@@ -37,7 +36,7 @@ export interface RuntimeStorage {
   createSession(options: SessionOptions): Promise<SessionState>;
   loadSession(workspaceRoot: string, sessionId: string): Promise<SessionState>;
   appendMessage(session: SessionState, message: LlmMessage): Promise<void>;
-  /** Conversation history for the next run, compacting under context pressure. */
+  /** Conversation history; the shared loop compacts the complete pending request. */
   history(session: SessionState, contextWindowTokens: number, onProgress?: (event: ProgressEvent) => void): Promise<LlmMessage[]>;
 }
 
@@ -45,16 +44,8 @@ export const localRuntimeStorage: RuntimeStorage = {
   createSession: (options) => createOpenCrowdSession(options),
   loadSession: (workspaceRoot, sessionId) => loadSession(workspaceRoot, sessionId),
   appendMessage: (session, message) => appendConversationMessage(session, message as ConversationMessage),
-  async history(session, contextWindowTokens, onProgress) {
-    const compaction = await compactConversationIfNeeded(session, { contextWindowTokens });
-    if (compaction.compacted) {
-      onProgress?.({
-        type: "complete",
-        message: `Compacted prior conversation into ${compaction.archivePath}`,
-        data: { archive_path: compaction.archivePath, tokens_before: compaction.tokensBefore }
-      });
-    }
-    return (compaction.compacted ? compaction.messages : await readConversationMessages(session)) as LlmMessage[];
+  async history(session) {
+    return await readConversationMessages(session) as LlmMessage[];
   }
 };
 

@@ -1,7 +1,11 @@
+import { contextLimits } from "@opencrowd/protocol";
+import { completeWithContext, type ContextState } from "./context.js";
 import { appendFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
 import {
+  atomicWrite,
+  conversationPath,
   appendLedgerEntry,
   budgetStatus,
   BudgetExhaustedError,
@@ -39,8 +43,11 @@ export * from "./hosted-provider.js";
 export * from "./hosted-economy.js";
 export * from "./x402-proxy.js";
 export * from "./knowledge.js";
+export * from "./context.js";
 
 export interface LlmMessage {
+  /** Internal archive marker; adapters omit it from provider requests. */
+  contextArchive?: string;
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   toolCallId?: string;
@@ -66,6 +73,7 @@ export interface DynamicToolsOption {
 }
 
 export interface LlmResponse {
+  usage?: LlmUsage;
   content: string;
   toolCalls: LlmToolCall[];
   /** OpenAI-compatible reason the provider stopped generating. */
@@ -438,7 +446,8 @@ export class BudgetedLlmProvider implements LlmProvider {
       return {
         content: completion.content,
         toolCalls: completion.toolCalls.filter((toolCall) => valid.has(toolCall.name)),
-        finishReason: completion.finishReason
+        finishReason: completion.finishReason,
+        usage: completion.usage
       };
     } catch (error) {
       await releaseReservation(this.session, reservation);
@@ -611,6 +620,7 @@ export interface TypedLlmRuntime {
 }
 
 export interface LoopCheckpoint {
+  context?: ContextState;
   messages: LlmMessage[];
   turn: number;
   response?: LlmResponse;
@@ -668,10 +678,10 @@ export interface AgentRunOptions {
    */
   knowledge?: false | KnowledgeOptions;
   /**
-   * When set, the in-memory context is compacted mid-run once it exceeds
-   * ~70% of this window. The persisted trajectory keeps full fidelity.
+   * Compaction triggers at 80%, targeting 40%; raw context is archived first.
    */
   contextWindowTokens?: number;
+  maxOutputTokens?: number;
   /**
    * Session-completion gate: returns a blocking reason (e.g. a pending
    * required review) or undefined. The loop refuses to complete while it
@@ -717,11 +727,16 @@ export async function runAgentTask(session: SessionState, task: string, options:
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools = options.tools
-    ?? TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent"));
+    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents"].includes(name))
+      : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));
   const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
+  const model = options.llm?.catalog?.find((m) => m.id === options.llm?.model);
+  const limits = contextLimits(options.contextWindowTokens ?? model?.contextWindowTokens, options.maxOutputTokens ?? model?.maxOutputTokens);
+  const contextState: ContextState = { ...options.resume?.context };
   const provider = options.provider ?? (options.llm
     ? new BudgetedLlmProvider(session, options.llm.provider, {
       model: options.llm.model,
+      maxOutputTokens: limits.outputTokens,
       maxCostCentsPerCall: options.llm.maxCostCentsPerCall,
       maxTopUpCentsPerAction: options.llm.maxTopUpCentsPerAction,
       tools: enabledTools,
@@ -804,7 +819,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
   let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
-    await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools,
+    await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState,
       completionNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
       repeatedFailures: [...repeatedFailures.entries()] }));
   };
@@ -826,22 +841,20 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     options.signal?.throwIfAborted();
     const restored = turn === options.resume?.turn ? options.resume : undefined;
     const completedTools: Record<string, ToolResult> = Object.assign(Object.create(null), restored?.completedTools ?? {});
-    if (!restored?.response) await checkpoint(turn);
-    if (options.contextWindowTokens) {
-      const compacted = compactMessagesInPlace(messages, options.contextWindowTokens);
-      if (compacted) {
-        options.onProgress?.({
-          type: "complete",
-          message: `Compacted ${compacted.droppedMessages} earlier messages mid-run (~${compacted.tokensBefore} tokens; trajectory keeps full history)`
-        });
-      }
-    }
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     let response: LlmResponse;
     try {
-      response = restored?.response ?? (provider instanceof MockLlmProvider
-        ? await completeMockLlmCall(session, provider, messages, turn + 1)
-        : await provider.complete(messages, { signal: options.signal, operationId: `${options.runId ?? session.sessionId}:llm:${turn}` }));
+      response = restored?.response ?? await completeWithContext(session, messages, {
+          provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
+          contextWindowTokens: limits.contextWindow, maxOutputTokens: limits.outputTokens,
+          hosted: options.hosted, signal: options.signal, operationId: `${options.runId ?? session.sessionId}:llm:${turn}`,
+          checkpoint: () => checkpoint(turn),
+          onCompaction: async (result) => {
+            await atomicWrite(conversationPath(session), messages.filter(m => m.role !== "system")
+              .map(message => JSON.stringify({ type: "message", message }) + "\n").join(""));
+            options.onProgress?.({ type: "complete", message: `Compacted context: ~${result.tokensBefore} → ~${result.tokensAfter} tokens. Archive: ${result.archivePath}`, data: result });
+          }
+        });
       options.signal?.throwIfAborted();
     } catch (error) {
       if (error instanceof BudgetExhaustedError) {
@@ -1145,6 +1158,8 @@ async function runSubagentTask(
   let outputContinuationNudges = 0;
   let outputContinuationPrefix = "";
   const artifactsWritten: string[] = [];
+  const contextState: ContextState = {};
+  const model = subagent.llm?.catalog?.find(m => m.id === subagent.model);
   const finish = async (outcome: SubagentCompletion["outcome"], finalMessage: string, turns: number): Promise<ToolResult> => {
     const completion: SubagentCompletion = {
       subagent_id: subagentId,
@@ -1166,7 +1181,7 @@ async function runSubagentTask(
       try {
         response = provider instanceof MockLlmProvider
           ? await completeMockLlmCall(session, provider, messages, turn + 1)
-          : await provider.complete(messages, { signal: parentOptions.signal });
+          : await completeWithContext(session, messages, { provider, tools: wireToolDefinitions(SUBAGENT_TOOL_NAMES), state: contextState, contextWindowTokens: model?.contextWindowTokens, maxOutputTokens: model?.maxOutputTokens, signal: parentOptions.signal });
       } catch (error) {
         if (error instanceof BudgetExhaustedError) {
           return finish("stopped", "Subagent stopped: the shared session budget is exhausted.", turn + 1);
@@ -1264,6 +1279,7 @@ function subagentProvider(
   if (subagent.llm) {
     return new BudgetedLlmProvider(session, subagent.llm.provider, {
       model: subagent.llm.model,
+      maxOutputTokens: contextLimits(subagent.llm.catalog?.find(m => m.id === subagent.llm?.model)?.contextWindowTokens, subagent.llm.catalog?.find(m => m.id === subagent.llm?.model)?.maxOutputTokens).outputTokens,
       maxCostCentsPerCall: subagent.llm.maxCostCentsPerCall,
       maxTopUpCentsPerAction: subagent.llm.maxTopUpCentsPerAction,
       tools: SUBAGENT_TOOL_NAMES,
@@ -1275,60 +1291,6 @@ function subagentProvider(
     });
   }
   throw new Error("subagent has no provider: pass subagent.provider (tests) or subagent.llm (typed runtime)");
-}
-
-/**
- * Mid-run in-memory compaction: keep the system prompt and the most recent
- * messages under ~30% of the window, replace the dropped middle with a
- * short summary message. The persisted trajectory is untouched, so graders
- * keep full fidelity. Costs one cache miss per compaction.
- */
-function compactMessagesInPlace(
-  messages: LlmMessage[],
-  contextWindowTokens: number
-): { droppedMessages: number; tokensBefore: number } | undefined {
-  const estimate = (items: LlmMessage[]) => items.reduce((total, message) => {
-    const toolCalls = message.toolCalls ? JSON.stringify(message.toolCalls) : "";
-    return total + Math.ceil((message.role.length + message.content.length + toolCalls.length) / 4);
-  }, 0);
-  const tokensBefore = estimate(messages);
-  if (tokensBefore <= contextWindowTokens * 0.7 || messages.length < 8) {
-    return undefined;
-  }
-  const system = messages[0];
-  const keepBudget = Math.floor(contextWindowTokens * 0.3);
-  const recent: LlmMessage[] = [];
-  let recentTokens = 0;
-  for (let index = messages.length - 1; index > 0; index -= 1) {
-    const tokens = estimate([messages[index]]);
-    if (recent.length > 0 && recentTokens + tokens > keepBudget) {
-      break;
-    }
-    recent.unshift(messages[index]);
-    recentTokens += tokens;
-  }
-  // Never let the kept window start with an orphaned tool result.
-  while (recent[0]?.role === "tool") {
-    recent.shift();
-  }
-  const dropped = messages.length - 1 - recent.length;
-  if (dropped <= 0) {
-    return undefined;
-  }
-  const droppedSlice = messages.slice(1, 1 + dropped);
-  const firstUser = droppedSlice.find((message) => message.role === "user")?.content.trim();
-  const lastAssistant = [...droppedSlice].reverse().find((message) => message.role === "assistant" && message.content.trim())?.content.trim();
-  const summary: LlmMessage = {
-    role: "user",
-    content: [
-      `Earlier context was compacted mid-run to stay within the model window (${dropped} messages, ~${tokensBefore} tokens before).`,
-      firstUser ? `Original task: ${firstUser.slice(0, 800)}` : undefined,
-      lastAssistant ? `Most recent progress before compaction: ${lastAssistant.slice(0, 1200)}` : undefined,
-      "Continue from the retained recent messages below."
-    ].filter(Boolean).join("\n")
-  };
-  messages.splice(0, messages.length, system, summary, ...recent);
-  return { droppedMessages: dropped, tokensBefore };
 }
 
 function assistantMessageFromResponse(response: LlmResponse): LlmMessage {

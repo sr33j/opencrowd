@@ -231,6 +231,8 @@ export class MachineWorker {
       };
       const result = await runAgentTaskDetailed(session, run.start.payload.prompt, {
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
+        contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
+        maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
         provider: this.options.provider(run.start, session, dynamicTools?.definitions ?? []),
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {

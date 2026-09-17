@@ -6,7 +6,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   appendLedgerEntry,
   clearConversation,
-  compactConversationIfNeeded,
   appendConversationMessage,
   readConversationMessages,
   createOpenCrowdSession,
@@ -166,25 +165,6 @@ describe("conversation clearing", () => {
     expect(archived).toContain("first task");
 
     await expect(clearConversation(session)).resolves.toMatchObject({ cleared: false, messagesCleared: 0 });
-  });
-});
-
-describe("conversation compaction", () => {
-  it("archives older messages and keeps a compacted continuation", async () => {
-    const session = await createSession({ workspaceRoot: await tempRoot() });
-    for (let index = 0; index < 10; index += 1) {
-      await appendConversationMessage(session, { role: "user", content: `message ${index} ${"x".repeat(200)}` });
-    }
-
-    const result = await compactConversationIfNeeded(session, {
-      contextWindowTokens: 1_000,
-      thresholdRatio: 0.2,
-      keepRecentTokens: 120
-    });
-
-    expect(result.compacted).toBe(true);
-    expect(result.archivePath).toMatch(/^context\//);
-    expect(result.messages[0]?.content).toContain("Original transcript archive:");
   });
 });
 

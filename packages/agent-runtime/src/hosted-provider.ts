@@ -1,7 +1,8 @@
+import { ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
-import type { DynamicToolDefinition, LlmMessage, LlmProvider, LlmResponse } from "./index.js";
+import type { DynamicToolDefinition, LlmProvider, LlmResponse } from "./index.js";
 import { RuntimePause, type HostedToolExecutor } from "./worker.js";
 
 /** The bridge refused the request before any payment was made (`paid: false`);
@@ -11,53 +12,6 @@ export class HostedRequestError extends Error {
     super(message);
     this.name = "HostedRequestError";
   }
-}
-
-const TRUNCATED_TOOL_OUTPUT = JSON.stringify({ truncated: true, note: "older tool output removed to fit the model context; re-run the tool if you need it" });
-const TRIMMED_PREFIX = "[…trimmed…]";
-const TRIMMED_TAIL_CHARS = 6000;
-
-/**
- * Fit a replayed conversation under the bridge's request budget without
- * touching the system prompt, the original task, or the last four messages.
- * Older tool outputs are blanked first, then whole older turns are dropped
- * (an assistant message always takes its tool results with it so no orphan
- * result remains), and only then is a single oversized message cut down.
- * Pure and deterministic: the input array and its messages are never mutated.
- */
-export function trimHostedMessages(messages: LlmMessage[], budgetBytes = 48_000): LlmMessage[] {
-  const size = (list: LlmMessage[]) => Buffer.byteLength(JSON.stringify(list));
-  if (size(messages) <= budgetBytes) return messages;
-  let list = messages.slice();
-  const firstUser = list.findIndex(m => m.role === "user");
-  const eligible = (i: number) => i > firstUser && i < list.length - 4 && list[i].role !== "system";
-  for (let i = 0; i < list.length && size(list) > budgetBytes; i++) {
-    if (eligible(i) && list[i].role === "tool" && list[i].content.length > 300) list[i] = { ...list[i], content: TRUNCATED_TOOL_OUTPUT };
-  }
-  while (size(list) > budgetBytes) {
-    let drop: number[] | undefined;
-    for (let i = 0; i < list.length && !drop; i++) {
-      if (!eligible(i)) continue;
-      const m = list[i];
-      if (m.role === "tool" && list.some(a => a.role === "assistant" && a.toolCalls?.some(c => c.id === m.toolCallId))) continue;
-      const ids = new Set((m.toolCalls ?? []).map(c => c.id));
-      const results = ids.size ? list.flatMap((r, j) => r.role === "tool" && r.toolCallId !== undefined && ids.has(r.toolCallId) ? [j] : []) : [];
-      if (results.every(eligible)) drop = [i, ...results];
-    }
-    if (!drop) break;
-    list = list.filter((_, i) => !drop!.includes(i));
-  }
-  const lastUser = list.map(m => m.role).lastIndexOf("user");
-  while (size(list) > budgetBytes) {
-    let largest = -1;
-    for (let i = 0; i < list.length; i++) {
-      if (list[i].role === "system" || i === lastUser || list[i].content.length <= TRIMMED_PREFIX.length + TRIMMED_TAIL_CHARS) continue;
-      if (largest < 0 || list[i].content.length > list[largest].content.length) largest = i;
-    }
-    if (largest < 0) break;
-    list[largest] = { ...list[largest], content: TRIMMED_PREFIX + list[largest].content.slice(-TRIMMED_TAIL_CHARS) };
-  }
-  return list;
 }
 
 /** Narrow local transport. The supervisor owns remote authorization; neither
@@ -71,8 +25,8 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
     async complete(messages, context) {
       const operationId = context?.operationId;
       if (!operationId?.startsWith(`${options.runId}:llm:`)) throw new Error("Hosted model operation scope is missing");
-      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: trimHostedMessages(messages), tools });
-      if (Buffer.byteLength(body) > 64000) throw new Error("Hosted model context exceeds 64 KiB");
+      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: messages.map(({ contextArchive: _archive, ...message }) => message), tools });
+      if (Buffer.byteLength(body) > MODEL_REQUEST_MAX_BYTES) throw new Error("Hosted request exceeds the transport byte limit");
       const result = await new Promise<any>((resolve, reject) => {
         const req = request({ socketPath: options.socketPath, path: "/model", method: "POST", signal: context?.signal,
           headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, res => {
@@ -94,11 +48,13 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
         req.setTimeout(90000, () => req.destroy(new Error("Hosted bridge timed out")));
         req.on("error", reject); req.end(body);
       }).catch(error => {
-        if (context?.signal?.aborted || error instanceof HostedRequestError) throw error;
+        if (context?.signal?.aborted || error instanceof HostedRequestError || error instanceof ContextWindowExceeded) throw error;
         // An interrupted bridge may have submitted payment. Pause this exact
         // operation; never switch providers or create a fresh purchase.
         throw new RuntimePause("payment_unknown", operationId, "Model request interrupted; payment status needs reconciliation.");
       });
+      if (result.status === "context_exceeded" && result.operationId === operationId && ["settled", "unpaid"].includes(result.payment))
+        throw new ContextWindowExceeded("Provider context window exceeded");
       if (result.status === "paused") {
         if (!["waiting_for_approval", "waiting_for_funds", "waiting_for_delegation", "payment_unknown"].includes(result.outcome)
           || result.operationId !== operationId) throw new Error("Invalid hosted pause response");
@@ -116,10 +72,11 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
 }
 
 /** Only an explicit `paid: false` proves no charge happened; anything else stays ambiguous. */
-function rejectedRequest(status: number, text: string): HostedRequestError | undefined {
+function rejectedRequest(status: number, text: string): Error | undefined {
   try {
     const body = JSON.parse(text);
     if (!body || typeof body !== "object" || body.paid !== false) return undefined;
+    if (isContextWindowError({ code: body.error, message: body.message })) return new ContextWindowExceeded(String(body.message ?? "Provider context window exceeded"));
     const code = typeof body.error === "string" && body.error ? body.error : `http_${status}`;
     return new HostedRequestError(code, status, typeof body.message === "string" && body.message ? body.message : `The model request was rejected (${code})`);
   } catch { return undefined; }
