@@ -5,8 +5,8 @@ import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core
 import type { DynamicToolDefinition, LlmProvider, LlmResponse } from "./index.js";
 import { RuntimePause, type HostedToolExecutor } from "./worker.js";
 
-/** The bridge refused the request before any payment was made (`paid: false`);
- * the run fails with this message instead of pausing for reconciliation. */
+/** A definitive request failure with resolved payment state; fail with the
+ * gateway's message instead of pausing for reconciliation. */
 export class HostedRequestError extends Error {
   constructor(readonly code: string, readonly status: number, message: string) {
     super(message);
@@ -71,11 +71,14 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
   };
 }
 
-/** Only an explicit `paid: false` proves no charge happened; anything else stays ambiguous. */
+/** Unpaid rejections and saved, settled model failures need no reconciliation. */
 function rejectedRequest(status: number, text: string): Error | undefined {
   try {
     const body = JSON.parse(text);
-    if (!body || typeof body !== "object" || body.paid !== false) return undefined;
+    if (!body || typeof body !== "object") return undefined;
+    if (body.paid === true && body.error === "model_failed")
+      return new HostedRequestError("model_failed", status, String(body.message ?? "The model response failed after payment settled. Its receipt is saved."));
+    if (body.paid !== false) return undefined;
     if (isContextWindowError({ code: body.error, message: body.message })) return new ContextWindowExceeded(String(body.message ?? "Provider context window exceeded"));
     const code = typeof body.error === "string" && body.error ? body.error : `http_${status}`;
     return new HostedRequestError(code, status, typeof body.message === "string" && body.message ? body.message : `The model request was rejected (${code})`);
