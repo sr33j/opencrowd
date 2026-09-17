@@ -193,15 +193,17 @@ describe("shell policy", () => {
   it("clamps run_shell timeout_ms into the allowed range instead of failing the call", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, shellEnabled: true });
-    for (const timeout_ms of [60_000, 0, -5, 2.5, "9000", undefined]) {
+    for (const timeout_ms of [60_000, 2.5, "9000", undefined]) {
       const result = await executeTool("run_shell", { command: "echo clamped", timeout_ms }, { session });
       expect(result.ok, `timeout_ms=${String(timeout_ms)}`).toBe(true);
       expect(result.data).toMatchObject({ exit_code: 0, stdout: expect.stringContaining("clamped") });
     }
     // A 1 ms ceiling still runs (and times out) rather than being rejected as invalid input.
-    const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms: -100 }, { session });
-    expect(tiny.ok).toBe(true);
-    expect(tiny.data).toMatchObject({ timed_out: true });
+    for (const timeout_ms of [0, -5, -100]) {
+      const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms }, { session });
+      expect(tiny.ok).toBe(true);
+      expect(tiny.data).toMatchObject({ timed_out: true });
+    }
   });
 
   it("resolves artifact cwd and returns spawn failures as tool results", async () => {
