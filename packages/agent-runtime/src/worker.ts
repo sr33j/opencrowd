@@ -7,12 +7,11 @@ import {
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
-  encodeEvent, parseCommandLine, type CommandOf, type Event, type EventType,
+  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, type CommandOf, type Event, type EventType,
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
 import { runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
-import { HostedRequestError } from "./hosted-provider.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { loadKnowledgeTree } from "./knowledge.js";
 
@@ -271,10 +270,12 @@ export class MachineWorker {
       if (signal.aborted) await this.finish(runId, run, "cancelled", "Run cancelled");
       else if (error instanceof RuntimePause) {
         await this.mutate(() => { run.pendingOperationId = error.operationId; });
-        await this.finish(runId, run, error.outcome, error.message);
+        // Payment uncertainty belongs to the ledger, not the conversation.
+        // End this task so a new user request can proceed while it reconciles.
+        await this.finish(runId, run, error.outcome === "payment_unknown" ? "failed" : error.outcome,
+          error.outcome === "payment_unknown" ? RUN_FAILURE_MESSAGE : error.message);
       } else if (error instanceof SpendingDeclined) await this.finish(runId, run, "user_stopped", error.message);
-      else if (error instanceof HostedRequestError) await this.finish(runId, run, "failed", error.message);
-      else await this.finish(runId, run, "failed", "Execution failed; inspect the run diagnostics");
+      else await this.finish(runId, run, "failed", RUN_FAILURE_MESSAGE);
     }
   }
 
@@ -297,7 +298,7 @@ export class MachineWorker {
   private async finish(runId: string, run: DurableRun, outcome: RunOutcome, summary: string): Promise<void> {
     await this.mutate(() => {
       run.outcome = outcome; run.summary = summary; run.checkpointId = randomUUID();
-      if (!isWaiting(outcome)) this.state.activeRunId = undefined;
+      if (!isWaiting(outcome) && this.state.activeRunId === runId) this.state.activeRunId = undefined;
     });
     await this.emit("checkpoint.completed", { checkpointId: run.checkpointId, sessionId: run.sessionId,
       reason: outcome === "cancelled" ? "cancel" : isWaiting(outcome) ? "waiting" : "terminal",
