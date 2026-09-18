@@ -1,4 +1,4 @@
-import { ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES } from "@opencrowd/protocol";
+import { ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
@@ -45,7 +45,7 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
             } catch (error) { reject(error); }
           });
         });
-        req.setTimeout(90000, () => req.destroy(new Error("Hosted bridge timed out")));
+        req.setTimeout(MODEL_BRIDGE_TIMEOUT_MS, () => req.destroy(new Error("Hosted bridge timed out")));
         req.on("error", reject); req.end(body);
       }).catch(error => {
         if (context?.signal?.aborted || error instanceof HostedRequestError || error instanceof ContextWindowExceeded) throw error;

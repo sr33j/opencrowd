@@ -1,6 +1,11 @@
 /** Shared by the runtime and hosted gateway. Transport limits are bytes, not tokens. */
 export const MODEL_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
 export const MODEL_MAX_MESSAGES = 1000;
+/** Non-streaming generation can take minutes. Outer hops also allow quoting,
+ * signing and receipt verification; they must not abandon a live paid call. */
+export const MODEL_PROVIDER_TIMEOUT_MS = 300_000;
+export const MODEL_GATEWAY_TIMEOUT_MS = 420_000;
+export const MODEL_BRIDGE_TIMEOUT_MS = 450_000;
 export const DEFAULT_CONTEXT_WINDOW = 64_000;
 
 /** Shared by model transports and the agent loop: partial tools cannot execute. */
