@@ -7,7 +7,7 @@ import { atomicWrite, containedPath } from "./paths.js";
 export async function saveArtifact(
   state: SessionState,
   path: string,
-  content: string,
+  content: string | Uint8Array,
   metadata?: Record<string, unknown>
 ): Promise<ArtifactRecord> {
   const target = await safeArtifactPath(state, path);

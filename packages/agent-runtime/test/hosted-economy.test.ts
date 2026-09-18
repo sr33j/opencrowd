@@ -8,6 +8,8 @@ import type { Command, Event } from "@opencrowd/protocol";
 import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired } from "../src/hosted-economy.js";
 import { MachineWorker } from "../src/worker.js";
 
+const discovery = vi.hoisted(() => ({ check: vi.fn(), discover: vi.fn() }));
+vi.mock("@agentcash/discovery", () => ({ checkEndpointSchema: discovery.check, discoverOriginSchema: discovery.discover }));
 const roots: string[] = [];
 const servers: Server[] = [];
 afterEach(async () => {
@@ -60,6 +62,15 @@ function fakeFetch(options: { endpointStatus?: number; header?: string; detailSt
     }
     return new Response("nope", { status: 404 });
   }) as unknown as typeof fetch & { mock: { calls: unknown[] } };
+  discovery.check.mockImplementation(async ({ url, sampleInputBody }) => {
+    const method = url === WEATHER ? "GET" : "POST";
+    const r = await fetcher(url, { method, ...(sampleInputBody ? { body: JSON.stringify(sampleInputBody) } : {}) });
+    if (r.status >= 400 && r.status !== 402) return { found: false, message: `HTTP ${r.status}` };
+    const p = r.status === 402 ? JSON.parse(Buffer.from(r.headers.get("payment-required")!, "base64").toString()) : undefined;
+    return { found: true, advisories: [{ method, authMode: p ? "paid" : "unprotected", summary: "Web search over the live index",
+      inputSchema: { type: "object" }, outputSchema: { results: [] }, paymentOptions: p?.accepts.map((a: any) => ({ ...a, protocol: "x402", asset: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" })) }] };
+  });
+  discovery.discover.mockResolvedValue({ found: true, origin: "https://weather.example", endpoints: [{ path: "/api/forecast", method: "GET", protocols: ["x402"] }] });
   return { fetcher, calls };
 }
 
@@ -84,21 +95,13 @@ async function economy(fetcher: typeof fetch, socketPath: string) {
 }
 
 describe("hosted economy: discovery and inspection", () => {
-  it("ranks the CrowdCode list by token overlap, flags x402 rows payable, and caches the list", async () => {
-    const { fetcher, calls } = fakeFetch();
-    const { gateway } = await economy(fetcher, "/nonexistent/bridge.sock");
+  it("uses authenticated AgentCash search and verifies Base endpoints", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath } = await bridge(() => ({ ok: true, data: { status: 200, body: JSON.stringify({ results: [{ origin: { url: "https://stableenrich.dev" }, path: "/api/search", method: "POST", summary: "Web search" }] }) } }));
+    const { gateway } = await economy(fetcher, socketPath);
     const result = await gateway.execute("find_paid_service", { query: "web search", limit: 2 });
     expect(result.ok).toBe(true);
-    const services = (result.data as any).services;
-    expect(services.map((s: any) => s.service_id)).toEqual(["svc_search", "svc_social"]);
-    expect(services[0]).toMatchObject({ endpoint: SEARCH, payment_provider: "x402", payable: true, match: 2, crowdcode_score: 4.6, n_eff: 12, num_reviews: 15 });
-    expect(services[1]).toMatchObject({ payment_provider: "mppx", payable: false, match: 1 });
-    expect((result.data as any).note).toMatch(/MPP\/Tempo/);
-    const byOrigin = await gateway.execute("find_paid_service", { origin: "https://weather.example" });
-    expect((byOrigin.data as any).services.map((s: any) => s.service_id)).toEqual(["svc_weather"]);
-    const nothing = await gateway.execute("find_paid_service", { query: "quantum llama" });
-    expect((nothing.data as any).services).toEqual([]);
-    expect(calls.filter(c => c.url === `${CROWDCODE}/api/services`)).toHaveLength(1);
+    expect((result.data as any).services).toEqual([expect.objectContaining({ endpoint: SEARCH, network: "eip155:8453", payable: true })]);
   });
 
   it("decodes an x402 v2 payment-required header into rail, price, payee and schema", () => {
@@ -119,8 +122,8 @@ describe("hosted economy: discovery and inspection", () => {
     expect(result.ok).toBe(true);
     expect(result.data).toMatchObject({
       endpoint: SEARCH, method: "POST", rail: "x402-base", price_ceiling_cents: 1,
-      schema: { status: 402, rail: "x402-base", payable: true, price_usd: 0.01, payTo: "0xpayee", network: "eip155:8453", service_id: "svc_search",
-        input_schema: { type: "object" }, output_example: { results: [] }, description: "Web search over the live index" },
+      schema: { rail: "x402-base", payable: true, price_usd: 0.01,
+        input_schema: { type: "object" }, output_schema: { results: [] }, description: "Web search over the live index" },
       reputation: { score: 4.6, n_eff: 12, unproven: false, summary: "Fast, relevant results. Occasional stale snippets." }
     });
     const probe = calls.find(c => c.url === SEARCH)!;
@@ -132,11 +135,11 @@ describe("hosted economy: discovery and inspection", () => {
     const tempo = fakeFetch({ header: offer("tempo:mainnet") });
     const { gateway } = await economy(tempo.fetcher, "/nonexistent/bridge.sock");
     const social = await gateway.execute("inspect_paid_service", { url: SOCIAL });
-    expect(social.data).toMatchObject({ rail: "mppx", schema: { rail: "mppx", payable: false } });
+    expect(social.data).toMatchObject({ rail: "unsupported", schema: { rail: "unsupported", payable: false } });
     const free = fakeFetch({ endpointStatus: 200 });
     const unlisted = await economy(free.fetcher, "/nonexistent/bridge.sock");
     const result = await unlisted.gateway.execute("inspect_paid_service", { url: "https://weather.example/api/forecast", method: "GET" });
-    expect(result.data).toMatchObject({ schema: { status: 200, rail: "free" }, reputation: { unproven: true, summary: "not yet reviewed on CrowdCode" } });
+    expect(result.data).toMatchObject({ schema: { authMode: "unprotected", rail: "x402-base" }, reputation: { unproven: true, summary: "not yet reviewed on CrowdCode" } });
     const broken = fakeFetch({ endpointStatus: 500 });
     const failing = await economy(broken.fetcher, "/nonexistent/bridge.sock");
     const error = await failing.gateway.execute("inspect_paid_service", { url: SEARCH });
@@ -210,8 +213,9 @@ describe("hosted economy: payment over the bridge", () => {
     const mpp = await directory.fetch({ url: SOCIAL, method: "POST", maxAmountUsd: 0.01, rail: "mppx" });
     expect(mpp).toMatchObject({ ok: false, ambiguous: false, error: expect.stringMatching(/MPP\/Tempo/) });
     const unlisted = await directory.fetch({ url: "https://unknown.example/api", method: "POST", maxAmountUsd: 0.01, rail: "x402-base" });
-    expect(unlisted).toMatchObject({ ok: false, ambiguous: false, error: expect.stringContaining("not a CrowdCode-listed service") });
-    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(1);
+    expect(unlisted).toMatchObject({ ok: false, ambiguous: false, error: expect.stringContaining("per_call_cap") });
+    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(2);
+    expect(requests.at(-1)?.arguments.service_id).toMatch(/^url:/);
     expect(await directory.bridge()).toMatchObject({ ok: false, error: expect.stringContaining("not available for hosted agents") });
   });
 
@@ -235,20 +239,21 @@ describe("hosted economy: worker wiring", () => {
     }) };
     const command: Command = { protocolVersion: 1, id: "command-1", runId: "run-1", seq: 1, emittedAt: "2026-09-16T00:00:00Z", type: "run.start",
       payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "Find a search API", modelPolicy: {}, budget: { limit: "1000000" }, approvalMode: "auto" } };
+    const { socketPath: awaitBridgePath } = await bridge(() => ({ ok: true, data: { status: 200, body: JSON.stringify({ results: [{ endpoint: SEARCH, method: "POST" }] }) } }));
     const worker = new MachineWorker({ agentHome: home, output: line => { events.push(JSON.parse(line)); },
       provider: (_run, _session, extraTools) => { advertised = extraTools.map(t => t.name); return provider; },
-      economy: (run, session) => createHostedEconomy({ socketPath: join(home, "bridge.sock"), runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
+      economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
-    expect(advertised).toEqual(["find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
+    expect(advertised).toEqual(["read_service", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
     expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallet on Base");
-    expect(systemPrompt).toContain("MPP/Tempo services are listed but not payable here");
+    expect(systemPrompt).toContain("Only x402 USDC on Base is payable");
     expect(systemPrompt).not.toContain("Paid external services are unavailable");
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
     expect(events.filter(e => e.type === "tool.started").map(e => [e.payload.toolName, e.payload.input])).toEqual([
       ["find_paid_service", { query: "web search" }], ["complete_session", { summary: "found it" }]]);
     expect(events.filter(e => e.type === "tool.finished").map(e => e.payload.status)).toEqual(["ok", "ok"]);
     const toolMessage = provider.complete.mock.calls[1][0].find((m: { role: string }) => m.role === "tool")!;
-    expect(JSON.parse(toolMessage.content).result.data.services[0].service_id).toBe("svc_search");
+    expect(JSON.parse(toolMessage.content).result.data.services[0].endpoint).toBe(SEARCH);
   });
 
   it("keeps the model from finishing while a paid purchase still needs its review", async () => {
@@ -285,7 +290,7 @@ describe("hosted economy: worker wiring", () => {
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
     // The loop mutates one messages array; the completion-gate nudge is the only user message after the prompt.
     const nudges = (provider.complete.mock.calls[3][0] as { role: string; content: string }[]).filter(m => m.role === "user").slice(1);
-    expect(nudges).toEqual([{ role: "user", content: "You cannot finish yet: a paid purchase still needs its review_paid_service call" }]);
+    expect(nudges).toEqual([{ role: "user", content: "You cannot finish yet: a paid purchase still needs its required review; submit it with review_paid_service" }]);
     expect(provider.complete).toHaveBeenCalledTimes(4);
     expect(events.filter(e => e.type === "tool.started").map(e => e.payload.input)).toEqual([
       { url: SEARCH, method: "POST" }, { url: SEARCH, method: "POST" }, { purchase_id: purchaseId, rating: "4" }, { summary: "reviewed" }]);

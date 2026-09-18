@@ -42,6 +42,8 @@ export * from "./runtime.js";
 export * from "./worker.js";
 export * from "./hosted-provider.js";
 export * from "./hosted-economy.js";
+export * from "./inbox.js";
+import type { SteeringInbox } from "./inbox.js";
 export * from "./x402-proxy.js";
 export * from "./knowledge.js";
 export * from "./context.js";
@@ -636,6 +638,7 @@ export interface TypedLlmRuntime {
 }
 
 export interface LoopCheckpoint {
+  deliveredMessageIds?: string[];
   context?: ContextState;
   messages: LlmMessage[];
   turn: number;
@@ -653,6 +656,7 @@ export const DEFAULT_CAPABILITY_INDEX =
   "Paid capability index — fast paths the wallet can buy in one call, typically under a cent: web search and news (Exa-grade) plus page scraping via https://stableenrich.dev; social media data via https://stablesocial.dev; more via find_paid_service.";
 
 export interface AgentRunOptions {
+  inbox?: SteeringInbox;
   signal?: AbortSignal;
   runId?: string;
   resume?: LoopCheckpoint;
@@ -783,7 +787,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
       ...(options.hosted
-        ? ["Discovery goes through CrowdCode's payment-verified rankings; you can pay x402 services on Base automatically within the user's limits (typically $0.05 per call); MPP/Tempo services are listed but not payable here."]
+        ? ["Discover services through AgentCash search and provider catalogs. You can use new services without prior CrowdCode reviews. Only x402 USDC on Base is payable, within the user's configured limits; over-limit quotes request approval. Use read_service for authenticated job polling and never resubmit a pending generation job."]
         : []),
       capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
@@ -834,10 +838,23 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   let outputContinuationNudges = options.resume?.outputContinuationNudges ?? 0;
   let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
   let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
+  const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
-    await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState,
+    await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState, deliveredMessageIds: [...deliveredMessageIds],
       completionNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
       repeatedFailures: [...repeatedFailures.entries()] }));
+  };
+  const injectMessages = async (turn: number) => {
+    const pending = await options.inbox?.pending() ?? [];
+    const fresh = pending.filter(m => !deliveredMessageIds.has(m.id));
+    for (const message of fresh) {
+      messages.push({ role: "user", content: message.prompt });
+      deliveredMessageIds.add(message.id);
+    }
+    if (fresh.length) await checkpoint(turn);
+    for (const message of fresh) await options.onMessage?.({ role: "user", content: message.prompt });
+    if (pending.length) await options.inbox?.delivered(pending.map(m => m.id));
+    return fresh.length > 0;
   };
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
@@ -856,6 +873,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   for (let turn = options.resume?.turn ?? 0; turn < maxTurns; turn += 1) {
     options.signal?.throwIfAborted();
     const restored = turn === options.resume?.turn ? options.resume : undefined;
+    // Never change a checkpointed paid request on resume, or split an
+    // assistant tool-call batch from its results with a user message.
+    if (!restored) await injectMessages(turn);
     const completedTools: Record<string, ToolResult> = Object.assign(Object.create(null), restored?.completedTools ?? {});
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     let response: LlmResponse;
@@ -910,6 +930,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       continue;
     }
     if (response.toolCalls.length === 0) {
+      if (await injectMessages(turn + 1)) continue;
       const blocker = await options.completionGate?.();
       if (blocker) {
         if (completionNudges >= 1) {
@@ -1048,7 +1069,13 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
       }
-      if (call.name === "complete_session") {
+    }
+    // Finish the entire tool batch before injecting messages or completing.
+    const completionCall = response.toolCalls.find(call => call.name === "complete_session");
+    if (completionCall) {
+      const call = completionCall;
+      const result = completedTools[call.id];
+      if (await injectMessages(turn + 1)) continue;
         const blocker = await options.completionGate?.();
         if (blocker) {
           if (completionNudges >= 1) {
@@ -1081,7 +1108,6 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           summary.background_subagents = backgroundResults;
         }
         return { outcome: "completed", summary, turns: turn + 1 };
-      }
     }
   }
   if (backgroundSubagents.size > 0) {

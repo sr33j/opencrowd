@@ -1,10 +1,10 @@
+import { economyTools } from "./economy-tools.js";
 import { RuntimePause } from "./worker.js";
 import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { SpendingDeclined, type SessionState } from "@opencrowd/core";
 import {
-  EconomyGateway,
-  originOf,
+  EconomyGateway, BaseServiceDiscovery,
   type AgentCashAdapter,
   type CrowdCodeAdapter,
   type McpCallResult,
@@ -17,7 +17,6 @@ import {
   type ServiceQuery,
   type WalletStatusResult
 } from "@opencrowd/economy";
-import type { DynamicToolsOption } from "./index.js";
 import { postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
 
 /**
@@ -30,7 +29,6 @@ import { postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
 
 export const DEFAULT_CROWDCODE_BASE = "https://crowdcode-backend.onrender.com";
 const LIST_CACHE_MS = 60_000;
-const PROBE_TIMEOUT_MS = 8_000;
 const PAY_TIMEOUT_MS = 120_000;
 const FREE_FETCH_TIMEOUT_MS = 30_000;
 const USDC_ATOMIC_PER_USD = 1_000_000;
@@ -107,7 +105,24 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     private readonly directory: ServiceDirectory,
     private readonly socket: HostedBridgeOptions,
     private readonly fetcher: typeof fetch
-  ) {}
+  ) {
+    this.discovery = new BaseServiceDiscovery(async (query, options) => {
+      const reply = await postHostedTool(this.socket, "economy.read", {
+        url: "https://agentcash.dev/api/search", method: "POST", body: JSON.stringify({ query, ...options })
+      });
+      const result = reply.data as any;
+      if (!reply.ok || result?.status !== 200) return { ok: false, error: reply.error ?? "AgentCash search unavailable" };
+      return { ok: true, data: JSON.parse(result.body) };
+    });
+  }
+  private readonly discovery: BaseServiceDiscovery;
+  async read(url: string): Promise<McpCallResult> {
+    const reply = await postHostedTool(this.socket, "economy.read", { url, method: "GET" });
+    const result = reply.data as any;
+    if (!reply.ok) return reply;
+    return { ok: result.status < 400, data: decodeBody(result.body, result.content_type),
+      error: result.status >= 400 ? `Read returned HTTP ${result.status}; no payment was made` : undefined };
+  }
 
   async getBalance(): Promise<WalletStatusResult> {
     try {
@@ -118,112 +133,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }
   }
 
-  async discoverEndpoints(origin: string): Promise<McpCallResult> {
-    let services: ListedService[];
-    try {
-      services = await this.directory.list();
-    } catch (error) {
-      return { ok: false, error: (error as Error).message };
-    }
-    const wanted = originOf(origin.includes("://") ? origin : `https://${origin}`).toLowerCase();
-    const matches = services.filter((service) => originOf(service.endpoint).toLowerCase() === wanted);
-    return {
-      ok: true,
-      data: {
-        services: matches.map((service) => presentService(service, 0)),
-        note: matches.length === 0
-          ? `no CrowdCode-listed services at ${wanted}; only listed x402 services can be paid from a hosted agent`
-          : PAYABLE_NOTE
-      }
-    };
-  }
-
-  async search(query: string, options: { limit?: number; broad?: boolean } = {}): Promise<McpCallResult> {
-    let services: ListedService[];
-    try {
-      services = await this.directory.list();
-    } catch (error) {
-      return { ok: false, error: (error as Error).message };
-    }
-    const tokens = tokenize(query);
-    const ranked = services
-      .map((service) => ({ service, score: overlapScore(tokens, service) }))
-      .filter((entry) => entry.score > 0)
-      .sort((left, right) => right.score - left.score
-        || Number(right.service.payment_provider === "x402") - Number(left.service.payment_provider === "x402")
-        || (right.service.score ?? 0) - (left.service.score ?? 0))
-      .slice(0, options.limit ?? 8);
-    return {
-      ok: true,
-      data: {
-        services: ranked.map((entry) => presentService(entry.service, entry.score)),
-        note: ranked.length === 0
-          ? "no CrowdCode-listed services matched; try different words or pass a known origin"
-          : PAYABLE_NOTE
-      }
-    };
-  }
-
-  async checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult> {
-    const method = (input.method ?? "POST").toUpperCase();
-    let response: Response;
-    try {
-      response = await this.fetcher(input.url, {
-        method,
-        signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
-        ...(input.body !== undefined && method !== "GET"
-          ? { headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify(input.body) }
-          : { headers: { accept: "application/json" } })
-      });
-    } catch (error) {
-      return { ok: false, error: `could not reach ${input.url}: ${(error as Error).message}` };
-    }
-    const text = await response.text().catch(() => "");
-    const key = `${method} ${input.url}`;
-    const serviceId = await this.directory.resolveServiceId(input.url);
-    if (response.status === 402) {
-      const offer = parsePaymentRequired(response.headers.get("payment-required") ?? response.headers.get("x-payment-required"), text);
-      if (!offer) {
-        return { ok: false, error: `${input.url} requires payment but sent no decodable x402 payment-required offer` };
-      }
-      this.inspectedRails.set(key, offer.rail);
-      return {
-        ok: true,
-        data: {
-          status: 402,
-          rail: offer.rail,
-          payable: offer.rail === "x402-base" && serviceId !== undefined,
-          price_usd: offer.priceUsd,
-          payTo: offer.payTo,
-          network: offer.network,
-          input_schema: offer.inputSchema,
-          output_example: offer.outputExample,
-          description: offer.description,
-          service_id: serviceId,
-          note: offer.rail === "x402-base"
-            ? (serviceId ? undefined : "not a CrowdCode-listed service; hosted agents can only pay listed x402 services")
-            : offer.rail === "mppx"
-              ? "settles on MPP/Tempo, which hosted agents cannot pay"
-              : "settles on a payment network hosted agents cannot pay"
-        }
-      };
-    }
-    if (response.ok) {
-      this.inspectedRails.set(key, "free");
-      return {
-        ok: true,
-        data: {
-          status: response.status,
-          rail: "free",
-          price_usd: 0,
-          note: "the endpoint answered without requiring payment",
-          service_id: serviceId,
-          output_example: previewBody(text, response.headers.get("content-type"))
-        }
-      };
-    }
-    return { ok: false, error: `${input.url} answered HTTP ${response.status}${text ? `: ${text.slice(0, 300)}` : ""}` };
-  }
+  discoverEndpoints(origin: string): Promise<McpCallResult> { return this.discovery.discoverEndpoints(origin); }
+  search(query: string, options: { limit?: number; broad?: boolean } = {}): Promise<McpCallResult> { return this.discovery.search(query, options); }
+  checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult> { return this.discovery.inspect(input); }
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
     const refuse = (error: string): PaidFetchResult => ({ ok: false, ambiguous: false, data: undefined, error });
@@ -234,10 +146,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     if (request.rail === "unsupported" || inspected === "unsupported") {
       return refuse("this service settles on a payment network hosted agents cannot pay (only x402 USDC on Base)");
     }
-    const serviceId = await this.directory.resolveServiceId(request.url);
-    if (!serviceId) {
-      return refuse("not a CrowdCode-listed service; only listed x402 services can be paid");
-    }
+    const serviceId = await this.directory.resolveServiceId(request.url)
+      ?? `url:${createHash("sha256").update(request.url).digest("hex")}`;
     const method = request.method.toUpperCase();
     const body = request.body === undefined ? undefined : typeof request.body === "string" ? request.body : JSON.stringify(request.body);
     const hash = request.operationId ? createHash("sha256").update(`${this.socket.runId}:${request.operationId}`).digest("hex") : undefined;
@@ -400,36 +310,13 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
   });
 }
 
-/** Failed review submissions tolerated before a run may finish with the review still pending. */
-export const MAX_REVIEW_ATTEMPTS = 2;
-
-export interface HostedDynamicTools extends DynamicToolsOption {
-  /** Blocks completion while a paid purchase awaits its review, until CrowdCode has rejected the review twice. */
-  completionGate(): Promise<string | undefined>;
+export { MAX_REVIEW_ATTEMPTS } from "./economy-tools.js";
+export type { EconomyTools as HostedDynamicTools } from "./economy-tools.js";
+/** Cloud exposes the same completion policy, excluding local wallet actions. */
+export function hostedDynamicTools(economy: EconomyGateway) {
+  return economyTools(economy, { hidden: HIDDEN_HOSTED_TOOLS });
 }
 
-/**
- * The gateway's dynamic tool surface for a hosted run, minus tools that have
- * no hosted counterpart. A review the backend keeps rejecting must not hold
- * the user's answer hostage, so the gate releases after repeated failures.
- */
-export function hostedDynamicTools(economy: EconomyGateway): HostedDynamicTools {
-  let failedReviews = 0;
-  return {
-    definitions: economy.definitions().filter((definition) => !HIDDEN_HOSTED_TOOLS.has(definition.name)),
-    execute: async (name, args, operationId) => {
-      const result = await economy.execute(name, args, operationId);
-      if (name === "review_paid_service" && !result.ok) failedReviews += 1;
-      return result;
-    },
-    completionGate: async () => {
-      if (failedReviews >= MAX_REVIEW_ATTEMPTS || !(await economy.hasPendingRequiredReviews())) return undefined;
-      return "a paid purchase still needs its review_paid_service call";
-    }
-  };
-}
-
-const PAYABLE_NOTE = "payable=true means x402 on Base, which hosted agents pay automatically; MPP/Tempo listings are shown for reference only";
 
 interface PaymentOffer {
   rail: PaymentRail;
@@ -504,21 +391,6 @@ function parseListedService(raw: unknown): ListedService | undefined {
   };
 }
 
-function presentService(service: ListedService, score: number): Record<string, unknown> {
-  return {
-    service_id: service.service_id,
-    name: service.name,
-    endpoint: service.endpoint,
-    payment_provider: service.payment_provider,
-    payable: service.payment_provider === "x402",
-    match: score,
-    crowdcode_score: service.score,
-    n_eff: service.n_eff,
-    unproven: service.unproven,
-    num_reviews: service.num_reviews
-  };
-}
-
 function summarizeEvidence(body: Record<string, unknown>): string | undefined {
   const summary = objectValue(body.summary);
   const lines = [...stringList(summary?.strengths), ...stringList(summary?.caveats)];
@@ -535,17 +407,6 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
-function tokenize(text: string): string[] {
-  return [...new Set(text.toLowerCase().split(/[^a-z0-9]+/).filter((token) => token.length > 1))];
-}
-
-/** Count query tokens present in the listing's name, endpoint, and slug (case-insensitive). */
-function overlapScore(tokens: string[], service: ListedService): number {
-  const haystack = `${service.name} ${service.endpoint} ${service.directory_slug ?? ""}`.toLowerCase();
-  return tokens.filter((token) => haystack.includes(token)).length;
-}
-
-/** Origin plus path, ignoring case, trailing slashes, and query strings. */
 function endpointKey(url: string): string {
   try {
     const parsed = new URL(url);
@@ -563,11 +424,6 @@ function decodeBody(body: unknown, contentType: unknown): unknown {
     return parseJson(body) ?? body;
   }
   return body;
-}
-
-function previewBody(text: string, contentType: string | null): unknown {
-  const parsed = contentType && /json/i.test(contentType) ? parseJson(text) : undefined;
-  return parsed ?? (text ? text.slice(0, 500) : undefined);
 }
 
 function parseJson(text: string): unknown {

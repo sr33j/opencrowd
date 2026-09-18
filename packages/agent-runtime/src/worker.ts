@@ -23,6 +23,7 @@ export class RuntimePause extends Error {
 }
 
 interface DurableRun {
+  inbox?: Array<{ id: string; prompt: string }>;
   start: CommandOf<"run.start">;
   sessionId: string;
   commandId: string;
@@ -140,6 +141,17 @@ export class MachineWorker {
       else if (!run.outcome || isWaiting(run.outcome)) await this.finish(command.runId, run, "cancelled", command.payload.reason);
       return;
     }
+    if (command.type === "run.message") {
+      const run = this.state.runs[command.runId];
+      if (!run || (run.outcome && !isWaiting(run.outcome))) return reject("run_not_resumable", "Message arrived after the run ended; queue it as a new turn");
+      await this.mutate(() => {
+        this.state.commands[command.id] = digest;
+        run.inbox ??= [];
+        if (!run.inbox.some(m => m.id === command.id)) run.inbox.push({ id: command.id, prompt: command.payload.prompt });
+      });
+      await this.emit("command.accepted", { commandType: command.type, duplicate: !!previous }, command.runId, command.id);
+      return;
+    }
     if (this.running) {
       if (previous) {
         await this.emit("command.accepted", { commandType: command.type, duplicate: true }, command.runId, command.id);
@@ -150,6 +162,8 @@ export class MachineWorker {
     let run = this.state.runs[command.runId];
     if (previous && run?.outcome) {
       await this.emit("command.accepted", { commandType: command.type, duplicate: true }, command.runId, command.id);
+      for (const message of run.inbox ?? []) if (run.checkpoint?.deliveredMessageIds?.includes(message.id))
+        await this.emit("user.message", { messageId: message.id, content: message.prompt }, command.runId, message.id);
       await this.emit("run.finished", { sessionId: run.sessionId, outcome: run.outcome, checkpointId: run.checkpointId,
         summary: run.summary, pendingOperationId: run.pendingOperationId }, command.runId, command.id);
       return;
@@ -239,7 +253,16 @@ export class MachineWorker {
         }, runId, run.commandId);
         return output;
       };
+      const acknowledgedMessages = new Set<string>();
       const result = await runAgentTaskDetailed(session, run.start.payload.prompt, {
+        inbox: {
+          pending: async () => { await this.writes; return (run.inbox ?? []).filter(m => !acknowledgedMessages.has(m.id)); },
+          delivered: async ids => {
+            for (const message of run.inbox ?? []) if (ids.includes(message.id))
+              await this.emit("user.message", { messageId: message.id, content: message.prompt }, runId, message.id);
+            for (const id of ids) acknowledgedMessages.add(id);
+          }
+        },
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,

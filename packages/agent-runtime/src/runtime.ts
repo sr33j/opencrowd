@@ -1,3 +1,4 @@
+import { economyTools } from "./economy-tools.js";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -26,6 +27,7 @@ import {
   type TypedLlmRuntime
 } from "./index.js";
 import { fallbackContextWindowTokens } from "./providers.js";
+import type { SteeringInbox } from "./inbox.js";
 
 /**
  * The dependency-injected local runtime. The CLI is one adapter around it; a
@@ -74,6 +76,7 @@ export interface OpenCrowdRuntimeOptions {
 }
 
 export interface RuntimeRunOptions {
+  inbox?: SteeringInbox;
   signal?: AbortSignal;
   runId?: string;
   resume?: LoopCheckpoint;
@@ -98,10 +101,12 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
   async function prepare(session: SessionState, runOptions: RuntimeRunOptions): Promise<AgentRunOptions> {
     const llm = await options.llmProvider(session);
     const economy = await options.economy?.(session);
+    const paidTools = economy ? economyTools(economy, { resuming: !!runOptions.resume }) : undefined;
     const contextWindowTokens = llm.contextWindowTokens
       ?? (llm.kind === "typed" ? fallbackContextWindowTokens(llm.main.model) : fallbackContextWindowTokens(undefined));
     const history = await storage.history(session, contextWindowTokens, runOptions.onProgress);
     return {
+      inbox: runOptions.inbox,
       signal: runOptions.signal,
       runId: runOptions.runId,
       resume: runOptions.resume,
@@ -116,20 +121,7 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
       ...(llm.kind === "typed"
         ? { llm: llm.main, subagent: llm.subagent, promptSections: llm.promptSections }
         : { provider: llm.provider, toolExecutor: llm.toolExecutor }),
-      ...(economy
-        ? {
-          dynamicTools: {
-            definitions: economy.definitions(),
-            execute: async (name, args) => {
-              if (runOptions.resume && name === "call_paid_service") await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
-              return economy.execute(name, args);
-            }
-          },
-          completionGate: async () => (await economy.hasPendingRequiredReviews())
-            ? "a confirmed paid purchase still needs its required review; submit it with review_paid_service"
-            : undefined
-        }
-        : {})
+      ...(paidTools ? { dynamicTools: paidTools, completionGate: paidTools.completionGate } : {})
     };
   }
 

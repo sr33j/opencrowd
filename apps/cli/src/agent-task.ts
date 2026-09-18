@@ -38,6 +38,7 @@ export function ensureMockRuntime(state: ReplState): ReplState {
 
 
 export interface PersistentAgentTaskOptions {
+  inbox?: import("@opencrowd/agent-runtime").SteeringInbox;
   model?: string;
   /** Explicit subagent model; overrides the configured preference. */
   subagentModel?: string;
@@ -64,6 +65,7 @@ export async function runPersistentAgentTask(
 ): Promise<string> {
   const runtime = cliRuntime(session, options);
   return runtime.runTaskRendered(session, task, {
+    inbox: options.inbox,
     maxTurns: options.maxTurns,
     compactOutput: options.compactOutput ?? options.testMode ?? false,
     onProgress: options.onProgress
@@ -77,6 +79,7 @@ export async function runPersistentAgentTaskDetailed(
 ): Promise<AgentTaskResult> {
   const runtime = cliRuntime(session, options);
   return runtime.runTask(session, task, {
+    inbox: options.inbox,
     maxTurns: options.maxTurns,
     compactOutput: options.compactOutput ?? options.testMode ?? false,
     onProgress: options.onProgress

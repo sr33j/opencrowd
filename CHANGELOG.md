@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.5.1 — 2026-09-18
+
+- Share AgentCash search and endpoint inspection between CLI and cloud, filtering
+  to x402 USDC on Base and allowing services without prior CrowdCode reviews.
+- Queue steering messages during active work and deliver them after a complete
+  tool batch. Preserve cloud message delivery across checkpoints and restarts.
+- Support authenticated job polling and save inline generated media as binary
+  artifacts instead of including base64 in model context.
+- Keep retries recoverable after cancellation and allow long-running hosted
+  requests to finish without duplicating a paid operation.
+
+
 ## 0.5.0 — 2026-09-17
 
 - Replace cumulative budgets with configurable automatic limits of $1 per paid

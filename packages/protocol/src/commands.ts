@@ -62,6 +62,10 @@ export const RunCancelCommandSchema = z.looseObject({
     reason: z.string().min(1)
   })
 });
+export const RunMessageCommandSchema = z.looseObject({
+  ...commandBase, type: z.literal("run.message"), runId: IdSchema,
+  payload: z.object({ prompt: z.string().min(1).max(100000) })
+});
 
 /** Checkpoint any active run, then exit. */
 export const WorkerShutdownCommandSchema = z.looseObject({
@@ -74,7 +78,7 @@ export const WorkerShutdownCommandSchema = z.looseObject({
   })
 });
 
-export const COMMAND_TYPES = ["run.start", "run.resume", "run.cancel", "worker.shutdown"] as const;
+export const COMMAND_TYPES = ["run.start", "run.resume", "run.cancel", "run.message", "worker.shutdown"] as const;
 export const CommandTypeSchema = z.enum(COMMAND_TYPES);
 export type CommandType = z.infer<typeof CommandTypeSchema>;
 
@@ -82,6 +86,7 @@ export const CommandSchema = z.discriminatedUnion("type", [
   RunStartCommandSchema,
   RunResumeCommandSchema,
   RunCancelCommandSchema,
+  RunMessageCommandSchema,
   WorkerShutdownCommandSchema
 ]);
 export type Command = z.infer<typeof CommandSchema>;

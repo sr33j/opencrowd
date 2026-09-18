@@ -1,3 +1,4 @@
+import { extractMedia } from "./media.js";
 import {
   appendLedgerEntry, SpendingApprovalRequired, SpendingDeclined,
   finalizeReservation,
@@ -40,6 +41,7 @@ import {
  */
 
 export const GATEWAY_TOOL_NAMES = [
+  "read_service",
   "get_wallet_status",
   "find_paid_service",
   "inspect_paid_service",
@@ -112,6 +114,8 @@ export class EconomyGateway {
           return await this.callPaidService(args, operationId);
         case "review_paid_service":
           return await this.reviewPaidService(args);
+        case "read_service":
+          return this.options.agentcash.read ? await this.options.agentcash.read(String(args.url ?? "")) : { ok: false, error: "Authenticated reads are unavailable" };
         case "bridge_usdc":
           return await this.bridgeUsdc(args);
         default:
@@ -217,10 +221,10 @@ export class EconomyGateway {
       return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
     }
     // Only rails CrowdCode verifies end-to-end may pay automatically.
-    if (inspection.rail === "unsupported") {
+    if (inspection.rail !== "x402-base") {
       return {
         ok: false,
-        error: "this endpoint settles on a payment rail OpenCrowd does not support for automatic payment (allowed: x402 USDC on Base, MPP USDC on Tempo)"
+        error: "this endpoint settles on a payment rail OpenCrowd does not support for automatic payment (allowed: x402 USDC on Base)"
       };
     }
     const requestedCostCents = intArg(args.max_cost_cents) ?? inspection.priceCeilingCents;
@@ -298,6 +302,7 @@ export class EconomyGateway {
 
     // A transport failure may have no trustworthy response body. Missing
     // receipt metadata occurs after a real response, so preserve that body.
+    if (result.data) result.data = await extractMedia(session, result.data);
     const artifact = result.ambiguityReason === "transport" ? undefined : await saveArtifact(
       session,
       `service-calls/${Date.now()}-${slugUrl(endpoint)}.json`,
@@ -565,6 +570,7 @@ export function originOf(endpoint: string): string {
 
 /** Determine the settlement rail from inspection data; unknown defaults to Base x402. */
 function railFromSchema(schema: unknown): PaymentRail {
+  if (schema && typeof schema === "object" && "rail" in schema) return (schema as { rail: PaymentRail }).rail;
   const text = JSON.stringify(schema ?? {}).toLowerCase();
   const mentionsTempo = text.includes("tempo") || text.includes("mpp");
   const mentionsBase = text.includes("x402") || text.includes("base");
@@ -620,6 +626,8 @@ function slugUrl(url: string): string {
  * immutable stored receipts.
  */
 const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
+  { name: "read_service", description: "Read a service URL without payment, authenticating with the wallet when required (SIWX). Use this to poll a paid generation job until complete; never resubmit a pending job. Download returned media URLs with run_shell.",
+    parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"], additionalProperties: false } },
   {
     name: "get_wallet_status",
     description: "Show the shared AgentCash wallet's public balances, deposit addresses, and funding links. Read-only.",

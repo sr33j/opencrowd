@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Box, render, Static, Text, useApp, useInput, usePaste, useStdout } from "ink";
 import {
@@ -12,7 +14,7 @@ import {
 } from "@opencrowd/core";
 import type { ApprovalAnswer, ApprovalRequest } from "@opencrowd/economy";
 import { metamaskDeepLink, qrTerminal, SUGGESTED_FUND_CENTS, usdcTransferUri } from "./funding.js";
-import { buildSessionSummary, normalizeProviderId } from "@opencrowd/agent-runtime";
+import { buildSessionSummary, normalizeProviderId, FileSteeringInbox } from "@opencrowd/agent-runtime";
 import { walletSummary } from "../wallet.js";
 import { ensureMockRuntime, runPersistentAgentTask, warmStartEconomy, type ReplState } from "../agent-task.js";
 import {
@@ -84,6 +86,10 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   const [busy, setBusy] = useState(false);
+  const runningRef = useRef(false);
+  const inboxPausedRef = useRef(false);
+  const [inboxRevision, setInboxRevision] = useState(0);
+  const inbox = useMemo(() => new FileSteeringInbox(join(session.sessionDir, "inbox.json")), [session.sessionDir]);
   const [activity, setActivity] = useState("");
   const [spinnerFrame, setSpinnerFrame] = useState(0);
   const [modal, setModal] = useState<Modal | null>(null);
@@ -268,16 +274,22 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
   }, [push]);
 
   const submitTask = useCallback(async (task: string) => {
+    if (runningRef.current) return;
+    runningRef.current = true;
+    inboxPausedRef.current = false;
     const state = stateRef.current;
     const testMode = state.testMode;
     if (testMode) {
       ensureMockRuntime(state);
     }
-    push({ kind: "user", text: task });
+    if (task) push({ kind: "user", text: task });
     setBusy(true);
     setActivity("starting…");
     try {
       const outputText = await runPersistentAgentTask(session, task, {
+        inbox: { pending: () => inbox.pending(), delivered: async ids => {
+          await inbox.delivered(ids); push({ kind: "note", text: `${ids.length} queued message(s) delivered` });
+        } },
         testMode,
         testSeed: state.testSeed,
         mockProvider: testMode ? state.mockProvider : undefined,
@@ -302,12 +314,26 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
       });
       push({ kind: "agent", text: outputText });
     } catch (error) {
+      inboxPausedRef.current = true;
       push({ kind: "error", text: (error as Error).message });
     }
+    runningRef.current = false;
     setBusy(false);
     setActivity("");
     void refreshWallet();
-  }, [handleProgress, push, refreshWallet, session]);
+  }, [handleProgress, push, refreshWallet, session, inbox]);
+
+  // A message can arrive after the last model response. Keep it durable and
+  // start a follow-up automatically, including after reopening the session.
+  useEffect(() => {
+    if (busy || wizard || modal || exiting || inboxPausedRef.current) return;
+    let cancelled = false;
+    void inbox.pending().then(messages => {
+      if (!cancelled && messages.length && !runningRef.current)
+        void submitTask("");
+    }).catch(error => push({ kind: "error", text: error.message }));
+    return () => { cancelled = true; };
+  }, [busy, inbox, inboxRevision, wizard, modal, exiting, submitTask, push]);
 
   const handleCommandResult = useCallback(async (result: CommandResult) => {
     switch (result.kind) {
@@ -498,7 +524,11 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
     }
     if (isReturn) {
       if (busy) {
-        push({ kind: "note", text: "a task is still running — wait for it to finish" });
+        const text = input.trim();
+        if (text) {
+          setInput(""); setCursor(0);
+          void inbox.push({ id: randomUUID(), prompt: text }).then(() => { push({ kind: "user", text: `${text} (queued)` }); setInboxRevision(n => n + 1); }).catch(e => push({ kind: "error", text: e.message }));
+        }
         return;
       }
       void handleSubmit(input);
