@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.2 — 2026-09-18
+
+- Persist failed review attempts and defer repeatedly rejected reviews without
+  discarding receipts. Limit review completion gates to the query that made the
+  purchase, so a registry rejection cannot stop a later retry or continuation.
+
+
 ## 0.5.1 — 2026-09-18
 
 - Share AgentCash search and endpoint inspection between CLI and cloud, filtering

@@ -23,7 +23,7 @@ import {
   listPurchases,
   newPurchaseId,
   pendingRequiredReviews,
-  recordReviewSubmitted,
+  recordReviewSubmitted, recordReviewFailed, MAX_REVIEW_ATTEMPTS,
   redactPurchase,
   type PurchaseOutcome,
   type PurchaseRecord
@@ -316,6 +316,7 @@ export class EconomyGateway {
     const record: PurchaseRecord = {
       purchase_id: purchaseId,
       session_id: session.sessionId,
+      query_id: session.query?.id,
       created_at: new Date().toISOString(),
       endpoint,
       method,
@@ -505,7 +506,9 @@ export class EconomyGateway {
       taskContext: stringArg(args.task_context)
     });
     if (!result.ok) {
-      return { ok: false, error: `CrowdCode review failed (${result.error}); the review stays pending — retry review_paid_service` };
+      await recordReviewFailed(this.options.session, purchaseId);
+      const deferred = (state.reviewAttempts ?? 0) + 1 >= MAX_REVIEW_ATTEMPTS;
+      return { ok: false, error: `CrowdCode review failed (${result.error}); the review stays pending${deferred ? " for manual retry, without blocking completion or later purchases" : " — retry review_paid_service"}` };
     }
     await recordReviewSubmitted(this.options.session, purchaseId, rating);
     return { ok: true, data: { purchase_id: purchaseId, review: "submitted", rating } };

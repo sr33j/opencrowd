@@ -11,11 +11,15 @@ import type { PaymentEvidence } from "./agentcash.js";
  * belong in artifacts, not here.
  */
 
+export const MAX_REVIEW_ATTEMPTS = 2;
+
 export type PurchaseOutcome = "free" | "siwx" | "paid_success" | "paid_failure" | "unknown";
 
 export interface PurchaseRecord {
   purchase_id: string;
   session_id: string;
+  /** Review gates belong to the query that made this purchase. */
+  query_id?: string;
   created_at: string;
   endpoint: string;
   method: string;
@@ -37,12 +41,14 @@ export interface PurchaseRecord {
 
 export type PurchaseEvent =
   | { type: "purchase"; record: PurchaseRecord }
+  | { type: "review_failed"; purchase_id: string; attempted_at: string }
   | { type: "review_submitted"; purchase_id: string; rating: number; submitted_at: string };
 
 export interface PurchaseState {
   record: PurchaseRecord;
   reviewStatus: "not_required" | "pending" | "submitted";
   reviewRating?: number;
+  reviewAttempts?: number;
 }
 
 export function purchasesPath(session: SessionState): string {
@@ -64,6 +70,10 @@ export async function recordReviewSubmitted(session: SessionState, purchaseId: s
     rating,
     submitted_at: new Date().toISOString()
   });
+}
+
+export async function recordReviewFailed(session: SessionState, purchaseId: string): Promise<void> {
+  await appendPurchaseEvent(session, { type: "review_failed", purchase_id: purchaseId, attempted_at: new Date().toISOString() });
 }
 
 async function appendPurchaseEvent(session: SessionState, event: PurchaseEvent): Promise<void> {
@@ -98,6 +108,9 @@ export async function listPurchases(session: SessionState): Promise<PurchaseStat
         record: event.record,
         reviewStatus: event.record.review_required ? "pending" : "not_required"
       });
+    } else if (event.type === "review_failed") {
+      const state = states.get(event.purchase_id);
+      if (state) state.reviewAttempts = (state.reviewAttempts ?? 0) + 1;
     } else if (event.type === "review_submitted") {
       const state = states.get(event.purchase_id);
       if (state) {
@@ -110,7 +123,9 @@ export async function listPurchases(session: SessionState): Promise<PurchaseStat
 }
 
 export async function pendingRequiredReviews(session: SessionState): Promise<PurchaseState[]> {
-  return (await listPurchases(session)).filter((state) => state.reviewStatus === "pending");
+  return (await listPurchases(session)).filter((state) => state.reviewStatus === "pending"
+    && (state.reviewAttempts ?? 0) < MAX_REVIEW_ATTEMPTS
+    && (!session.query || state.record.query_id === session.query.id));
 }
 
 /** Model-visible view of a purchase: no payment proof, payer, or tx hashes. */
@@ -126,6 +141,7 @@ export function redactPurchase(state: PurchaseState): Record<string, unknown> {
     charged_cost_cents: record.charged_cost_cents,
     artifact_path: record.artifact_path,
     review_status: state.reviewStatus,
+    review_deferred: state.reviewStatus === "pending" && (state.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS,
     created_at: record.created_at
   };
 }
