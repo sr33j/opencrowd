@@ -4,6 +4,7 @@ export * from "./outcomes.js";
 export * from "./commands.js";
 export * from "./events.js";
 export * from "./redact.js";
+export * from "./telemetry.js";
 export * from "./seq.js";
 export * from "./codec.js";
 export * from "./context.js";

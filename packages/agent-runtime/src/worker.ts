@@ -1,3 +1,4 @@
+import { captureDetail, scrubText } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -234,7 +235,8 @@ export class MachineWorker {
         if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
         if (saved && !saved.approvalPending && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
         await this.mutate(() => { run.tools[id] = { digest }; });
-        await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args) }, runId, run.commandId);
+        await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args), details: captureDetail({ input: args }), turn: run.checkpoint?.turn ?? 0 }, runId, run.commandId);
+        const started = Date.now();
         let output: ToolResult;
         try {
           if (saved?.approvalPending && name === "call_paid_service" && economy)
@@ -243,15 +245,44 @@ export class MachineWorker {
         } catch (error) {
           if (error instanceof RuntimePause && error.outcome === "waiting_for_approval")
             await this.mutate(() => { run.tools[id].approvalPending = true; });
+          await this.emit("tool.finished", { toolCallId: id, toolName: name,
+            status: error instanceof RuntimePause ? "blocked" : signal.aborted ? "cancelled" : "error",
+            durationMs: Date.now() - started, turn: run.checkpoint?.turn ?? 0,
+            error: scrubText(error instanceof Error ? error.message : String(error)),
+            details: captureDetail({ error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) })
+          }, runId, run.commandId);
           throw error;
         }
         await this.mutate(() => { run.tools[id].result = output; });
         await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
-          error: output.error }, runId, run.commandId);
+          error: output.error ? scrubText(output.error) : undefined, durationMs: Date.now() - started,
+          turn: run.checkpoint?.turn ?? 0, details: captureDetail({ output }) }, runId, run.commandId);
         if (name === "save_file" && output.ok) await this.emit("artifact.created", {
           artifactId: id, name: String(args.path), path: String(args.path).replace(/^artifacts\//, "")
         }, runId, run.commandId);
         return output;
+      };
+      const baseProvider = this.options.provider(run.start, session, dynamicTools?.definitions ?? []);
+      const provider: LlmProvider = {
+        complete: async (messages, context) => {
+          const callId = randomUUID(), started = Date.now(), turn = run.checkpoint?.turn ?? 0;
+          await this.emit("model.started", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn,
+            details: captureDetail({ input: messages }) }, runId, run.commandId);
+          try {
+            const result = await baseProvider.complete(messages, context);
+            await this.emit("model.finished", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn, status: "ok",
+              durationMs: Date.now() - started, usage: result.usage,
+              details: captureDetail({ output: result }) }, runId, run.commandId);
+            return result;
+          } catch (error) {
+            await this.emit("model.finished", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn,
+              status: error instanceof RuntimePause ? "blocked" : signal.aborted ? "cancelled" : "error",
+              durationMs: Date.now() - started, error: scrubText(error instanceof Error ? error.message : String(error)),
+              details: captureDetail({ error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) })
+            }, runId, run.commandId);
+            throw error;
+          }
+        }
       };
       const acknowledgedMessages = new Set<string>();
       const result = await runAgentTaskDetailed(session, run.start.payload.prompt, {
@@ -266,7 +297,7 @@ export class MachineWorker {
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
-        provider: this.options.provider(run.start, session, dynamicTools?.definitions ?? []),
+        provider,
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
@@ -290,6 +321,10 @@ export class MachineWorker {
       await this.finish(runId, run, result.outcome === "stopped" ? "user_stopped" : result.outcome,
         String(result.summary.final_message ?? ""));
     } catch (error) {
+      if (!(error instanceof RuntimePause) && !signal.aborted) await this.emit("runtime.error", {
+        code: "run_exception", message: scrubText(error instanceof Error ? error.message : String(error)), fatal: false,
+        details: captureDetail({ error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) })
+      }, runId, run.commandId);
       if (signal.aborted) await this.finish(runId, run, "cancelled", "Run cancelled");
       else if (error instanceof RuntimePause) {
         await this.mutate(() => { run.pendingOperationId = error.operationId; });
