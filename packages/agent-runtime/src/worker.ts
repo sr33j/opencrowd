@@ -7,12 +7,11 @@ import {
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
-  encodeEvent, parseCommandLine, type CommandOf, type Event, type EventType,
+  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, type CommandOf, type Event, type EventType,
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
 import { runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
-import { HostedRequestError } from "./hosted-provider.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { loadKnowledgeTree } from "./knowledge.js";
 
@@ -24,6 +23,7 @@ export class RuntimePause extends Error {
 }
 
 interface DurableRun {
+  inbox?: Array<{ id: string; prompt: string }>;
   start: CommandOf<"run.start">;
   sessionId: string;
   commandId: string;
@@ -141,6 +141,17 @@ export class MachineWorker {
       else if (!run.outcome || isWaiting(run.outcome)) await this.finish(command.runId, run, "cancelled", command.payload.reason);
       return;
     }
+    if (command.type === "run.message") {
+      const run = this.state.runs[command.runId];
+      if (!run || (run.outcome && !isWaiting(run.outcome))) return reject("run_not_resumable", "Message arrived after the run ended; queue it as a new turn");
+      await this.mutate(() => {
+        this.state.commands[command.id] = digest;
+        run.inbox ??= [];
+        if (!run.inbox.some(m => m.id === command.id)) run.inbox.push({ id: command.id, prompt: command.payload.prompt });
+      });
+      await this.emit("command.accepted", { commandType: command.type, duplicate: !!previous }, command.runId, command.id);
+      return;
+    }
     if (this.running) {
       if (previous) {
         await this.emit("command.accepted", { commandType: command.type, duplicate: true }, command.runId, command.id);
@@ -151,6 +162,8 @@ export class MachineWorker {
     let run = this.state.runs[command.runId];
     if (previous && run?.outcome) {
       await this.emit("command.accepted", { commandType: command.type, duplicate: true }, command.runId, command.id);
+      for (const message of run.inbox ?? []) if (run.checkpoint?.deliveredMessageIds?.includes(message.id))
+        await this.emit("user.message", { messageId: message.id, content: message.prompt }, command.runId, message.id);
       await this.emit("run.finished", { sessionId: run.sessionId, outcome: run.outcome, checkpointId: run.checkpointId,
         summary: run.summary, pendingOperationId: run.pendingOperationId }, command.runId, command.id);
       return;
@@ -240,7 +253,16 @@ export class MachineWorker {
         }, runId, run.commandId);
         return output;
       };
+      const acknowledgedMessages = new Set<string>();
       const result = await runAgentTaskDetailed(session, run.start.payload.prompt, {
+        inbox: {
+          pending: async () => { await this.writes; return (run.inbox ?? []).filter(m => !acknowledgedMessages.has(m.id)); },
+          delivered: async ids => {
+            for (const message of run.inbox ?? []) if (ids.includes(message.id))
+              await this.emit("user.message", { messageId: message.id, content: message.prompt }, runId, message.id);
+            for (const id of ids) acknowledgedMessages.add(id);
+          }
+        },
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
@@ -271,10 +293,12 @@ export class MachineWorker {
       if (signal.aborted) await this.finish(runId, run, "cancelled", "Run cancelled");
       else if (error instanceof RuntimePause) {
         await this.mutate(() => { run.pendingOperationId = error.operationId; });
-        await this.finish(runId, run, error.outcome, error.message);
+        // Payment uncertainty belongs to the ledger, not the conversation.
+        // End this task so a new user request can proceed while it reconciles.
+        await this.finish(runId, run, error.outcome === "payment_unknown" ? "failed" : error.outcome,
+          error.outcome === "payment_unknown" ? RUN_FAILURE_MESSAGE : error.message);
       } else if (error instanceof SpendingDeclined) await this.finish(runId, run, "user_stopped", error.message);
-      else if (error instanceof HostedRequestError) await this.finish(runId, run, "failed", error.message);
-      else await this.finish(runId, run, "failed", "Execution failed; inspect the run diagnostics");
+      else await this.finish(runId, run, "failed", RUN_FAILURE_MESSAGE);
     }
   }
 
@@ -297,7 +321,7 @@ export class MachineWorker {
   private async finish(runId: string, run: DurableRun, outcome: RunOutcome, summary: string): Promise<void> {
     await this.mutate(() => {
       run.outcome = outcome; run.summary = summary; run.checkpointId = randomUUID();
-      if (!isWaiting(outcome)) this.state.activeRunId = undefined;
+      if (!isWaiting(outcome) && this.state.activeRunId === runId) this.state.activeRunId = undefined;
     });
     await this.emit("checkpoint.completed", { checkpointId: run.checkpointId, sessionId: run.sessionId,
       reason: outcome === "cancelled" ? "cancel" : isWaiting(outcome) ? "waiting" : "terminal",

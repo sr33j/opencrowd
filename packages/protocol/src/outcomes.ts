@@ -1,5 +1,8 @@
 import { z } from "zod";
 
+/** User-facing failure copy; detailed diagnostics belong to events and ledgers. */
+export const RUN_FAILURE_MESSAGE = "Something went wrong. You can retry or send another message.";
+
 /** Typed run outcomes (plan section 7.3). */
 export const RUN_OUTCOMES = [
   "completed",

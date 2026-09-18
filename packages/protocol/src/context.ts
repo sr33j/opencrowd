@@ -1,6 +1,17 @@
 /** Shared by the runtime and hosted gateway. Transport limits are bytes, not tokens. */
 export const MODEL_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
 export const MODEL_MAX_MESSAGES = 1000;
+/** Non-streaming generation can take minutes. Outer hops also allow quoting,
+ * signing and receipt verification; they must not abandon a live paid call. */
+export const MODEL_PROVIDER_TIMEOUT_MS = 300_000;
+export const MODEL_GATEWAY_TIMEOUT_MS = 420_000;
+// A new run may wait for one cancelled request to drain before its own call.
+export const MODEL_BRIDGE_TIMEOUT_MS = 2 * MODEL_GATEWAY_TIMEOUT_MS + 30_000;
+export const SERVICE_PROVIDER_TIMEOUT_MS = 300_000;
+export const SERVICE_GATEWAY_TIMEOUT_MS = 330_000;
+export const SERVICE_BRIDGE_TIMEOUT_MS = MODEL_GATEWAY_TIMEOUT_MS + SERVICE_GATEWAY_TIMEOUT_MS + 30_000;
+/** Allows inline generated media; decoded artifacts are limited to 24 MiB. */
+export const SERVICE_RESPONSE_MAX_BYTES = 34 * 1024 * 1024;
 export const DEFAULT_CONTEXT_WINDOW = 64_000;
 
 /** Shared by model transports and the agent loop: partial tools cannot execute. */

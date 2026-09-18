@@ -6,3 +6,4 @@ export * from "./mcp.js";
 export * from "./mocks.js";
 export * from "./purchases.js";
 export * from "./runtime.js";
+export * from "./discovery.js";

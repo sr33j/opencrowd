@@ -274,6 +274,10 @@ export const RuntimeErrorEventSchema = z.looseObject({
     details: JsonValueSchema.optional()
   })
 });
+export const UserMessageEventSchema = z.looseObject({
+  ...runScoped, type: z.literal("user.message"),
+  payload: z.looseObject({ messageId: IdSchema, content: z.string() })
+});
 
 export const EVENT_TYPES = [
   "worker.ready",
@@ -282,6 +286,7 @@ export const EVENT_TYPES = [
   "run.state",
   "assistant.delta",
   "assistant.message",
+  "user.message",
   "tool.started",
   "tool.finished",
   "artifact.created",
@@ -298,6 +303,7 @@ export const EventTypeSchema = z.enum(EVENT_TYPES);
 export type EventType = z.infer<typeof EventTypeSchema>;
 
 export const EventSchema = z.discriminatedUnion("type", [
+  UserMessageEventSchema,
   WorkerReadyEventSchema,
   CommandAcceptedEventSchema,
   CommandRejectedEventSchema,

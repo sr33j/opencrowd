@@ -1,4 +1,5 @@
 import { McpConnection, type McpCallResult } from "./mcp.js";
+import { BaseServiceDiscovery } from "./discovery.js";
 
 /**
  * Typed adapter over the AgentCash MCP server. AgentCash owns wallet custody,
@@ -57,6 +58,7 @@ export interface WalletStatusResult {
 }
 
 export interface AgentCashAdapter {
+  read?(url: string): Promise<McpCallResult>;
   /** Public balances, deposit addresses, and funding links. */
   getBalance(): Promise<WalletStatusResult>;
   /** List endpoints at a known origin. */
@@ -72,7 +74,15 @@ export interface AgentCashAdapter {
 }
 
 export class McpAgentCashAdapter implements AgentCashAdapter {
-  constructor(private readonly connection: McpConnection) {}
+  private readonly discovery: BaseServiceDiscovery;
+  constructor(private readonly connection: McpConnection) {
+    this.discovery = new BaseServiceDiscovery((query, options) => this.connection.call("search", { query, ...options }));
+  }
+  read(url: string): Promise<McpCallResult> {
+    // AgentCash requires a positive ceiling. Below one atomic USDC unit,
+    // no positive Base USDC payment can be authorized.
+    return this.connection.call("fetch", { url, method: "GET", maxAmount: 0.000000001, paymentNetwork: "base", paymentProtocol: "x402" });
+  }
 
   async getBalance(): Promise<WalletStatusResult> {
     const result = await this.connection.call("get_balance", {});
@@ -80,23 +90,15 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
   }
 
   async discoverEndpoints(origin: string): Promise<McpCallResult> {
-    return this.connection.call("discover_api_endpoints", { url: origin });
+    return this.discovery.discoverEndpoints(origin);
   }
 
   async search(query: string, options: { limit?: number; broad?: boolean } = {}): Promise<McpCallResult> {
-    return this.connection.call("search", {
-      query,
-      ...(options.limit !== undefined ? { limit: options.limit } : {}),
-      ...(options.broad !== undefined ? { broad: options.broad } : {})
-    });
+    return this.discovery.search(query, options);
   }
 
   async checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult> {
-    return this.connection.call("check_endpoint_schema", {
-      url: input.url,
-      ...(input.method ? { method: input.method } : {}),
-      ...(input.body !== undefined ? { body: input.body } : {})
-    });
+    return this.discovery.inspect(input);
   }
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {

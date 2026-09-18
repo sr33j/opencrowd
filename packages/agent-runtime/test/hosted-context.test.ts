@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Command, Event } from "@opencrowd/protocol";
+import { RUN_FAILURE_MESSAGE, type Command, type Event } from "@opencrowd/protocol";
 import { MachineWorker } from "../src/worker.js";
 import { createHostedProvider, HostedRequestError } from "../src/hosted-provider.js";
 import type { LlmMessage } from "../src/index.js";
@@ -44,19 +44,19 @@ async function bridge(handler: (res: import("node:http").ServerResponse) => void
 }
 
 describe("hosted bridge failure classification", () => {
-  it("fails a settled model response with its real error instead of requesting reconciliation", async () => {
+  it("ends a failed paid response with generic user-facing copy", async () => {
     const message = "The paid model returned an error; its receipt is saved";
     const b = await bridge(res => { res.statusCode = 502; res.end(JSON.stringify({ error: "model_failed", message, paid: true })); });
-    try { expect(await b.run()).toMatchObject({ outcome: "failed", summary: message }); }
+    try { expect(await b.run()).toMatchObject({ outcome: "failed", summary: RUN_FAILURE_MESSAGE }); }
     finally { await b.close(); }
   });
 
-  it("fails the run with the bridge's message when the request was rejected unpaid", async () => {
+  it("keeps the internal unpaid rejection while showing a generic run failure", async () => {
     const b = await bridge(res => { res.statusCode = 400; res.end(JSON.stringify({ error: "context_too_large", message: "The conversation is too long for this model.", status: 400, paid: false })); });
     try {
       await expect(createHostedProvider({ socketPath: b.socketPath, runId: "run-1", sessionId: "session-1" }).complete([{ role: "user", content: "hi" }], { operationId: "run-1:llm:0" }))
         .rejects.toMatchObject({ name: "HostedRequestError", code: "context_too_large", status: 400, message: "The conversation is too long for this model." });
-      expect(await b.run()).toMatchObject({ outcome: "failed", summary: "The conversation is too long for this model." });
+      expect(await b.run()).toMatchObject({ outcome: "failed", summary: RUN_FAILURE_MESSAGE });
     } finally { await b.close(); }
   });
 
@@ -70,7 +70,7 @@ describe("hosted bridge failure classification", () => {
     } finally { await b.close(); }
   });
 
-  it("still pauses for payment reconciliation on ambiguous failures", async () => {
+  it("ends ambiguous failures without locking the conversation", async () => {
     for (const handler of [
       (res: import("node:http").ServerResponse) => { res.statusCode = 503; res.end(JSON.stringify({ error: "upstream_unavailable" })); },
       (res: import("node:http").ServerResponse) => { res.statusCode = 400; res.end(JSON.stringify({ error: "x", paid: true })); },
@@ -78,7 +78,7 @@ describe("hosted bridge failure classification", () => {
       (res: import("node:http").ServerResponse) => { res.destroy(); }
     ]) {
       const b = await bridge(handler);
-      try { expect(await b.run()).toMatchObject({ outcome: "payment_unknown", pendingOperationId: "run-1:llm:0" }); }
+      try { expect(await b.run()).toMatchObject({ outcome: "failed", summary: RUN_FAILURE_MESSAGE, pendingOperationId: "run-1:llm:0" }); }
       finally { await b.close(); }
     }
   });

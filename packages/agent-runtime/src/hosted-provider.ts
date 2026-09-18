@@ -1,4 +1,4 @@
-import { ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES } from "@opencrowd/protocol";
+import { ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
@@ -45,7 +45,7 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
             } catch (error) { reject(error); }
           });
         });
-        req.setTimeout(90000, () => req.destroy(new Error("Hosted bridge timed out")));
+        req.setTimeout(MODEL_BRIDGE_TIMEOUT_MS, () => req.destroy(new Error("Hosted bridge timed out")));
         req.on("error", reject); req.end(body);
       }).catch(error => {
         if (context?.signal?.aborted || error instanceof HostedRequestError || error instanceof ContextWindowExceeded) throw error;
@@ -110,7 +110,7 @@ export async function postHostedTool(options: HostedBridgeOptions, name: string,
       const chunks: Buffer[] = []; let bytes = 0;
       res.on("data", (chunk: Buffer) => {
         bytes += chunk.length;
-        if (bytes > 1024 * 1024) res.destroy(new Error("Hosted tool response exceeds 1 MiB"));
+        if (bytes > SERVICE_RESPONSE_MAX_BYTES) res.destroy(new Error("Hosted tool response exceeds media limit"));
         else chunks.push(chunk);
       });
       res.on("error", reject);
@@ -121,7 +121,7 @@ export async function postHostedTool(options: HostedBridgeOptions, name: string,
         } catch (error) { reject(error); }
       });
     });
-    req.setTimeout(settings.timeoutMs ?? 180000, () => req.destroy(new Error("Hosted tool timed out")));
+    req.setTimeout(settings.timeoutMs ?? SERVICE_BRIDGE_TIMEOUT_MS, () => req.destroy(new Error("Hosted tool timed out")));
     req.on("error", reject); req.end(body);
   });
   if (typeof result?.ok !== "boolean") throw new Error("Invalid hosted tool response");
