@@ -571,3 +571,32 @@ describe("x402 settlement through the real MCP adapter (field note 001)", () => 
     await mcp.close();
   });
 });
+
+describe("durable review deferral", () => {
+  it("retains receipts but does not let repeated registry rejections block a restarted gateway", async () => {
+    const { session, gateway, agentcash, crowdcode } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: true }) });
+    await inspect(gateway);
+    const paid = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    const purchaseId = (paid.data as any).purchase_id;
+    for (let i=0; i<2; i++) await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "Useful result" });
+    const restarted = new EconomyGateway({ session, agentcash, crowdcode, approvalMode: "auto", approvalRulesPath: join(session.workspaceRoot, "approvals.json") });
+    expect(await restarted.hasPendingRequiredReviews()).toBe(false);
+    expect((await listPurchases(session))[0]).toMatchObject({ reviewStatus: "pending", reviewAttempts: 2, record: { evidence: { reference: "0xmock1" } } });
+    await inspect(restarted);
+    expect((await restarted.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
+  });
+  it("keeps a previous query's reviews available without blocking a new query, including legacy receipts", async () => {
+    const { session, gateway } = await setup();
+    await inspect(gateway);
+    await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    const { beginQuery } = await import("@opencrowd/core");
+    await beginQuery(session, "new-query");
+    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+    expect((await listPurchases(session))[0].reviewStatus).toBe("pending");
+    await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    expect(await gateway.hasPendingRequiredReviews()).toBe(true);
+    expect((await listPurchases(session))[1].record.query_id).toBe("new-query");
+    await beginQuery(session, "next-query");
+    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+  });
+});

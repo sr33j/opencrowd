@@ -300,11 +300,11 @@ describe("hosted economy: worker wiring", () => {
 });
 
 describe("hosted economy: review gate", () => {
-  it("stops blocking completion once CrowdCode has rejected the review twice", async () => {
-    let pending = true;
+  it("uses durable per-purchase review decisions even across wrappers and subsequent purchases", async () => {
+    let pending = true, attempts = 0;
     const economy = {
       definitions: () => [{ name: "review_paid_service", description: "", parameters: {} }],
-      execute: async (name: string) => (name === "review_paid_service" ? { ok: false, error: "CrowdCode review failed (service identity conflict)" } : { ok: true }),
+      execute: async () => { if (++attempts === 2) pending = false; return { ok: false, error: "Registry rejected the review" }; },
       hasPendingRequiredReviews: async () => pending
     } as unknown as Parameters<typeof hostedDynamicTools>[0];
     const tools = hostedDynamicTools(economy);
@@ -313,8 +313,9 @@ describe("hosted economy: review gate", () => {
     expect(await tools.completionGate()).toMatch(/review_paid_service/);
     await tools.execute("review_paid_service", { purchase_id: "p", rating: 4, reason: "x" });
     expect(await tools.completionGate()).toBeUndefined();
-    pending = false;
-    expect(await tools.completionGate()).toBeUndefined();
+    expect(await hostedDynamicTools(economy).completionGate()).toBeUndefined();
+    pending = true; // A new purchase has its own review requirement.
+    expect(await tools.completionGate()).toMatch(/review_paid_service/);
   });
 });
 
