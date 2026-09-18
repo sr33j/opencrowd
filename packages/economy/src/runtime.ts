@@ -63,6 +63,9 @@ export async function sharedEconomyRuntime(log?: (message: string) => void): Pro
  * the vendor binary is already installed on PATH, spawn it directly.
  */
 export function resolvePinnedCommand(config: McpServerConfig, binaryName: string): McpServerConfig {
+  // CrowdCode's configured version is part of the review contract. An arbitrary
+  // PATH installation must not silently override the pinned npm release.
+  if (binaryName === "crowdcode-mcp") return config;
   if (config.command !== "npx") {
     return config;
   }

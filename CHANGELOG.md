@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3 — 2026-09-18
+
+- Pin the default CrowdCode MCP client to 0.5.2, migrate the previously shipped floating default, and prevent older globally installed binaries from silently overriding the configured CrowdCode version. Explicit custom commands and pins are preserved.
+
 ## Unreleased
 
 ## 0.5.2 — 2026-09-18

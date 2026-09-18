@@ -46,7 +46,7 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   configVersion: 3,
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
-    crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5"] }
+    crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.5.2"] }
   },
   // GAIA provider benchmark (2026-08-25): same-model BlockRun matched the
   // current route's accuracy and completed the sample 6.7x faster. The
@@ -117,9 +117,16 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
     DEFAULT_CONFIG["openrouter-x402-proxy"]
   );
   const mcpServers = recordValue(raw.mcpServers);
+  const servers = { ...DEFAULT_CONFIG.mcpServers, ...mcpServers } as OpenCrowdConfig["mcpServers"];
+  // Upgrade the previously shipped floating default, preserving custom commands,
+  // explicit version pins, allowlists, and extra vendor options.
+  if (servers.crowdcode?.command === "npx" &&
+      JSON.stringify(servers.crowdcode.args) === JSON.stringify(["--yes", "crowdcode-mcp@0.5"])) {
+    servers.crowdcode = { ...servers.crowdcode, args: [...DEFAULT_CONFIG.mcpServers.crowdcode!.args] };
+  }
   return {
     configVersion: 3,
-    mcpServers: mcpServers ? mcpServers as OpenCrowdConfig["mcpServers"] : DEFAULT_CONFIG.mcpServers,
+    mcpServers: servers,
     provider,
     blockrun: providerDefaults(raw.blockrun, DEFAULT_CONFIG.blockrun),
     "openrouter-x402-proxy": proxyDefaults,
