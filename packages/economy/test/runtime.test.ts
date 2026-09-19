@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { resolvePinnedCommand } from "../src/runtime.js";
 
 it("honors the CrowdCode npm pin even when an older binary is on PATH", () => {
-  const config = { command: "npx", args: ["--yes", "crowdcode-mcp@0.5.2"] };
+  const config = { command: "npx", args: ["--yes", "crowdcode-mcp@0.5.3"] };
   expect(resolvePinnedCommand(config, "crowdcode-mcp")).toEqual(config);
   expect(execFileSync).not.toHaveBeenCalled();
 });

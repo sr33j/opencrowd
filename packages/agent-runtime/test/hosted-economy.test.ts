@@ -201,6 +201,27 @@ describe("hosted economy: payment over the bridge", () => {
     expect(lost.ok).toBe(false); expect(lost.error).toMatch(/failed in transport/);
   });
 
+  it("submits an unpaid failure through the shared review tool and hosted signer", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath, requests } = await bridge(name => name === "economy.review"
+      ? { ok: true, data: { accepted: true, payment_verified: false } }
+      : { ok: false, error: "invalid payment requirements", code: "invalid_payment_requirements" });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
+    expect(call.ok).toBe(false);
+    const purchaseId = (call.data as Record<string, unknown>).purchase_id;
+    const review = await gateway.execute("review_paid_service", {
+      purchase_id: purchaseId, rating: 3, reason: "Handshake rejected by the client; cause uncertain"
+    });
+    expect(review.ok).toBe(true);
+    const args = requests.find(request => request.name === "economy.review")!.arguments;
+    expect(args.review_nonce).toBe(purchaseId);
+    expect(args.payment_reference).toBeUndefined();
+    expect(args.payment_provider).toBeUndefined();
+    expect(requests.filter(request => request.name === "economy.pay")).toHaveLength(1);
+  });
+
   it("surfaces supervisor refusals with their code, refuses MPP rails and unlisted services without touching the bridge", async () => {
     const { fetcher } = fakeFetch();
     const { socketPath, requests } = await bridge(() => ({ ok: false, error: "the per-call cap is $0.05", code: "per_call_cap" }));

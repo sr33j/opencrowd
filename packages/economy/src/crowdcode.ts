@@ -30,7 +30,8 @@ export interface ServiceQuery {
 export interface ReviewSubmission {
   rating: number;
   reason: string;
-  paymentReference: string;
+  paymentReference?: string;
+  reviewNonce?: string;
   apiEndpoint?: string;
   paymentProvider?: "x402" | "mppx";
   paymentProof?: string;
@@ -69,14 +70,17 @@ export class McpCrowdCodeAdapter implements CrowdCodeAdapter {
     const result = await this.connection.call("review_service", {
       rating: review.rating,
       reason: review.reason,
-      payment_reference: review.paymentReference,
+      ...(review.paymentReference !== undefined ? { payment_reference: review.paymentReference } : {}),
+      ...(review.reviewNonce ? { review_nonce: review.reviewNonce } : {}),
       ...(review.apiEndpoint ? { api_endpoint: review.apiEndpoint } : {}),
       ...(review.paymentProvider ? { payment_provider: review.paymentProvider } : {}),
       ...(review.paymentProof ? { payment_proof: review.paymentProof } : {}),
       ...(review.paymentTargetRef ? { payment_target_ref: review.paymentTargetRef } : {}),
       ...(review.taskContext ? { task_context: review.taskContext } : {})
     });
-    return { ok: result.ok, error: result.error, raw: result.data };
+    const payload = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};
+    const accepted = result.ok && payload.accepted === true;
+    return { ok: accepted, error: accepted ? undefined : result.error ?? String(payload.reason ?? "CrowdCode did not accept the review"), raw: result.data };
   }
 }
 
@@ -87,9 +91,33 @@ export function normalizeEvidence(raw: unknown): ServiceEvidence {
     score: numberValue(record.score),
     nEff: numberValue(record.n_eff ?? record.nEff),
     unproven: typeof record.unproven === "boolean" ? record.unproven : undefined,
-    summary: typeof record.summary === "string" ? record.summary : undefined,
+    summary: summarizeEvidence(record),
     raw
   };
+}
+
+/** Both transports expose the same digest, including fresh unpaid experiences. */
+export function summarizeEvidence(record: Record<string, unknown>): string | undefined {
+  const summary = record.summary;
+  const lines: string[] = [];
+  if (typeof summary === "string" && summary) lines.push(summary);
+  else if (summary && typeof summary === "object" && !Array.isArray(summary)) {
+    const digest = summary as Record<string, unknown>;
+    for (const key of ["failure_modes", "strengths", "caveats"]) {
+      const items = digest[key];
+      if (Array.isArray(items)) lines.push(...items.filter((item): item is string => typeof item === "string").slice(0, 2));
+    }
+  }
+  if (Array.isArray(record.recent_reviews)) {
+    for (const value of record.recent_reviews.slice(0, 5)) {
+      if (!value || typeof value !== "object") continue;
+      const review = value as Record<string, unknown>;
+      if (typeof review.reason !== "string" || !review.reason) continue;
+      const payment = review.payment_verified === true ? "payment verified" : "payment not verified";
+      lines.push(`Reviewer report (${payment}, ${review.rating}/5): ${review.reason.slice(0, 600)}`);
+    }
+  }
+  return lines.length ? lines.join(" ") : undefined;
 }
 
 function numberValue(value: unknown): number | undefined {

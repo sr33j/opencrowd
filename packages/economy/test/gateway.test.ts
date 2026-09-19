@@ -17,6 +17,7 @@ import {
   MockCrowdCodeAdapter,
   pendingRequiredReviews,
   redactPurchase,
+  summarizeEvidence,
   type ApprovalAnswer,
   type ApprovalRequest,
   type PaidFetchResult
@@ -378,8 +379,43 @@ describe("approval policy", () => {
 });
 
 describe("required reviews", () => {
-  it("explains legacy paid-success records that have no verifiable receipt", async () => {
-    const { session, gateway } = await setup();
+  it("reviews an unpaid failure with a stable identifier across retries", async () => {
+    const crowdcode = new MockCrowdCodeAdapter();
+    const agentcash = new MockAgentCashAdapter({ defaultFetchResult: {
+      ok: false, ambiguous: false, status: 402, authMode: "free", error: "invalid payment requirements"
+    } });
+    const { session, gateway } = await setup({ crowdcode, agentcash });
+    await inspect(gateway);
+    const call = await gateway.execute("call_paid_service", { url: ENDPOINT });
+    const purchaseId = (call.data as Record<string, unknown>).purchase_id;
+    expect(call.ok).toBe(false);
+    expect(call.data).toMatchObject({ review_available: true, review_required: false });
+    const submit = crowdcode.reviewService.bind(crowdcode);
+    let attempts = 0;
+    const nonces: (string | undefined)[] = [];
+    crowdcode.reviewService = async review => {
+      nonces.push(review.reviewNonce);
+      return attempts++ === 0 ? { ok: false, error: "temporary outage" } : submit(review);
+    };
+    const args = { purchase_id: purchaseId, rating: 3, reason: "Client rejected the handshake; cause uncertain" };
+    expect((await gateway.execute("review_paid_service", args)).ok).toBe(false);
+    expect((await gateway.execute("review_paid_service", args)).ok).toBe(true);
+    expect(nonces).toEqual([purchaseId, purchaseId]);
+    expect(crowdcode.reviews[0]).toMatchObject({ paymentReference: undefined, paymentProof: undefined });
+    expect((await listPurchases(session))[0].reviewStatus).toBe("submitted");
+    expect((await gateway.execute("review_paid_service", args)).ok).toBe(false);
+    expect(agentcash.fetchCalls).toHaveLength(1);
+  });
+
+  it("includes fresh unpaid reports and failure summaries in product evidence", () => {
+    const summary = summarizeEvidence({ summary: { strengths: ["Fast"], failure_modes: ["Sometimes returns 500"] },
+      recent_reviews: [{ rating: 2, reason: "Request failed before payment", payment_verified: false }] });
+    expect(summary).toContain("Sometimes returns 500");
+    expect(summary).toContain("payment not verified");
+    expect(summary).toContain("Request failed before payment");
+  });
+  it("reviews legacy outcomes without inventing a payment reference", async () => {
+    const { session, gateway, crowdcode } = await setup();
     await appendPurchase(session, {
       purchase_id: "pur_legacy",
       session_id: session.sessionId,
@@ -400,9 +436,8 @@ describe("required reviews", () => {
       reason: "completed"
     });
 
-    expect(review.ok).toBe(false);
-    expect(review.error).toContain("recorded as paid_success without a verifiable settlement reference");
-    expect(review.error).toContain("cannot be submitted");
+    expect(review.ok).toBe(true);
+    expect(crowdcode.reviews[0]).toMatchObject({ reviewNonce: "pur_legacy", paymentReference: undefined });
   });
 
   it("blocks a second purchase until the pending review is submitted, using stored evidence", async () => {

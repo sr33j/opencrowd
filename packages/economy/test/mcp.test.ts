@@ -4,6 +4,25 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
 import { McpConnection } from "../src/mcp.js";
 import { McpAgentCashAdapter, parsePaidFetchResult } from "../src/agentcash.js";
+import { McpCrowdCodeAdapter } from "../src/crowdcode.js";
+
+it("does not treat a successful MCP transport as an accepted review", async () => {
+  const server = new McpServer({ name: "crowdcode", version: "test" });
+  server.tool("review_service", { rating: z.number(), reason: z.string(), review_nonce: z.string() }, async () => ({
+    content: [{ type: "text", text: JSON.stringify({ accepted: false, reason: "review_nonce already used" }) }]
+  }));
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  const connection = new McpConnection("crowdcode", { command: "unused", args: [] }, {
+    transportFactory: () => clientTransport
+  });
+  try {
+    const result = await new McpCrowdCodeAdapter(connection).reviewService({
+      rating: 2, reason: "HTTP 500", reviewNonce: "attempt_123"
+    });
+    expect(result).toMatchObject({ ok: false, error: "review_nonce already used" });
+  } finally { await connection.close(); await server.close(); }
+});
 
 function vendorServer(): McpServer {
   const server = new McpServer(

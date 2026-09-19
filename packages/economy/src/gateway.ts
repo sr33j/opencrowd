@@ -378,6 +378,7 @@ export class EconomyGateway {
         charged_cost_cents: record.charged_cost_cents,
         artifact_path: artifact?.path,
         review_required: record.review_required,
+        review_available: true,
         data: result.data,
         ...(result.ok ? {} : { error: result.error })
       },
@@ -481,28 +482,17 @@ export class EconomyGateway {
     if (state.reviewStatus === "submitted") {
       return { ok: false, error: `purchase ${purchaseId} is already reviewed` };
     }
-    if (state.reviewStatus === "not_required") {
-      if (state.record.outcome === "paid_success" || state.record.outcome === "paid_failure") {
-        return {
-          ok: false,
-          error: `purchase ${purchaseId} was recorded as ${state.record.outcome} without a verifiable settlement reference; this legacy receipt cannot be submitted to CrowdCode automatically`
-        };
-      }
-      return { ok: false, error: `purchase ${purchaseId} has no paid receipt to review (outcome: ${state.record.outcome})` };
-    }
     const evidence = state.record.evidence;
-    if (!evidence?.reference) {
-      return { ok: false, error: `purchase ${purchaseId} has no settlement reference; it cannot be reviewed` };
-    }
     // Review evidence comes from the immutable stored receipt, never the model.
     const result = await this.options.crowdcode.reviewService({
       rating,
       reason,
-      paymentReference: evidence.reference,
+      paymentReference: evidence?.reference,
+      reviewNonce: evidence?.reference ? undefined : state.record.purchase_id,
       apiEndpoint: state.record.endpoint,
-      paymentProvider: state.record.rail === "mppx" ? "mppx" : "x402",
-      paymentProof: evidence.proof,
-      paymentTargetRef: evidence.payTo,
+      paymentProvider: evidence?.reference ? (state.record.rail === "mppx" ? "mppx" : "x402") : undefined,
+      paymentProof: evidence?.proof,
+      paymentTargetRef: evidence?.reference ? evidence.payTo : undefined,
       taskContext: stringArg(args.task_context)
     });
     if (!result.ok) {
@@ -680,7 +670,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "review_paid_service",
-    description: "Submit the required CrowdCode review for one stored purchase using its receipt evidence. Required after every confirmed paid call — success or failure; a broken paid call IS the review (rate 1-2 with the failure as the reason).",
+    description: "Review a stored service interaction, paid or unpaid, using the same CrowdCode review flow. Payment evidence is attached when available; otherwise payment is marked unverified. Required after confirmed paid calls, optional for unpaid outcomes. Describe observed results and distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
     parameters: {
       type: "object",
       properties: {

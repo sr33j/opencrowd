@@ -4,7 +4,7 @@ import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { SpendingDeclined, type SessionState } from "@opencrowd/core";
 import {
-  EconomyGateway, BaseServiceDiscovery,
+  EconomyGateway, BaseServiceDiscovery, summarizeEvidence,
   type AgentCashAdapter,
   type CrowdCodeAdapter,
   type McpCallResult,
@@ -279,9 +279,10 @@ export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
     try {
       const reply = await postHostedTool(this.socket, "economy.review", {
         api_endpoint: review.apiEndpoint,
-        payment_provider: "x402",
+        payment_provider: review.paymentProvider,
         payment_target_ref: review.paymentTargetRef,
         payment_reference: review.paymentReference,
+        review_nonce: review.reviewNonce,
         rating: review.rating,
         reason: review.reason,
         task_context: review.taskContext
@@ -389,22 +390,6 @@ function parseListedService(raw: unknown): ListedService | undefined {
     unproven: typeof (row.unproven ?? service.unproven) === "boolean" ? Boolean(row.unproven ?? service.unproven) : undefined,
     num_reviews: numberValue(row.num_reviews ?? service.num_reviews)
   };
-}
-
-function summarizeEvidence(body: Record<string, unknown>): string | undefined {
-  const summary = objectValue(body.summary);
-  const lines = [...stringList(summary?.strengths), ...stringList(summary?.caveats)];
-  if (lines.length) {
-    return lines.slice(0, 4).join(" ");
-  }
-  return stringValue(body.summary);
-}
-
-function stringList(value: unknown): string[] {
-  if (typeof value === "string") {
-    return value ? [value] : [];
-  }
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
 }
 
 function endpointKey(url: string): string {

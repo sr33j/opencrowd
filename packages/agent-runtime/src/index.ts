@@ -785,7 +785,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   ];
   if (options.dynamicTools) {
     systemPromptParts.push(
-      "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure).",
+      "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure). The same review tool accepts unpaid experiences; review relevant free results or failed attempts without inventing payment evidence. Distinguish provider faults from local errors and uncertain failures.",
       ...(options.hosted
         ? ["Discover services through AgentCash search and provider catalogs. You can use new services without prior CrowdCode reviews. Only x402 USDC on Base is payable, within the user's configured limits; over-limit quotes request approval. Use read_service for authenticated job polling and never resubmit a pending generation job."]
         : []),
