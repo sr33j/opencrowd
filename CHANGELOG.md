@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.4 — 2026-09-19
+
+- Allow paid and unpaid stored interactions through the same review tool in CLI and cloud, with stable retry IDs and no new completion gate for unpaid reviews.
+- Share product evidence formatting, including recent unpaid reports, payment verification labels, and summary failure modes.
+- Keep backend rejections pending instead of treating a successful MCP transport as review acceptance.
+- Pin CrowdCode MCP 0.5.3 and upgrade previously shipped defaults. Requires that client release, backend migration, and coordinated hosted gateway deployment.
+
 ## 0.5.3 — 2026-09-18
 
 - Pin the default CrowdCode MCP client to 0.5.2, migrate the previously shipped floating default, and prevent older globally installed binaries from silently overriding the configured CrowdCode version. Explicit custom commands and pins are preserved.
