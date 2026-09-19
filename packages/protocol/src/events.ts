@@ -134,6 +134,16 @@ export const ToolFinishedEventSchema = z.looseObject({
   })
 });
 
+export const ModelStartedEventSchema = z.looseObject({
+  ...runScoped, type: z.literal("model.started"),
+  payload: z.looseObject({ callId: IdSchema, model: z.string(), ...turnField })
+});
+export const ModelFinishedEventSchema = z.looseObject({
+  ...runScoped, type: z.literal("model.finished"),
+  payload: z.looseObject({ callId: IdSchema, model: z.string(), status: ToolStatusSchema,
+    durationMs: z.number().nonnegative(), ...turnField })
+});
+
 export const ArtifactCreatedEventSchema = z.looseObject({
   ...runScoped,
   type: z.literal("artifact.created"),
@@ -287,6 +297,8 @@ export const EVENT_TYPES = [
   "assistant.delta",
   "assistant.message",
   "user.message",
+  "model.started",
+  "model.finished",
   "tool.started",
   "tool.finished",
   "artifact.created",
@@ -310,6 +322,8 @@ export const EventSchema = z.discriminatedUnion("type", [
   RunStateEventSchema,
   AssistantDeltaEventSchema,
   AssistantMessageEventSchema,
+  ModelStartedEventSchema,
+  ModelFinishedEventSchema,
   ToolStartedEventSchema,
   ToolFinishedEventSchema,
   ArtifactCreatedEventSchema,
