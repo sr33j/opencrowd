@@ -93,3 +93,21 @@ describe("durable JSONL worker", () => {
     expect(spy).toHaveBeenCalledTimes(2); // original response plus next turn; no replay of original
   });
 });
+
+it("captures every model/tool input and exact failure output while redacting credentials", async () => {
+  const home = await root(), events: Event[] = [];
+  let turn = 0;
+  const provider = { complete: async () => ++turn === 1
+    ? {content:"Running a diagnostic command",toolCalls:[{id:"shell-1",name:"run_shell",arguments:{command:"printf diagnostic",api_key:"private-test-secret"}}]}
+    : {content:"The command failed with exit code 17.",toolCalls:[]} };
+  const worker=new MachineWorker({agentHome:home,provider:()=>provider,
+    toolExecutor:async()=>({ok:false,error:"Command exited with code 17",data:{stdout:"exact stdout\n",stderr:"exact stderr\n",exit_code:17}}),
+    output:line=>events.push(JSON.parse(line))});
+  await worker.initialize();await worker.handleLine(JSON.stringify(start()));await worker.drain();
+  expect(events.filter(e=>e.type==='model.started')).toHaveLength(2);
+  expect(events.filter(e=>e.type==='model.finished')).toHaveLength(2);
+  const calls=events.filter(e=>e.type==='tool.started'), results=events.filter(e=>e.type==='tool.finished');
+  expect(calls).toHaveLength(1);expect(results).toHaveLength(1);
+  expect(JSON.stringify(calls[0])).not.toContain('private-test-secret');
+  expect(results[0].payload).toMatchObject({toolCallId:calls[0].payload.toolCallId,status:'error',details:{value:{output:{data:{stdout:'exact stdout\n',stderr:'exact stderr\n',exit_code:17}}}}});
+});

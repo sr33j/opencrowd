@@ -1,0 +1,1 @@
+{"protocolVersion": 1, "id": "model-event-0", "seq": 1, "emittedAt": "2026-09-18T12:00:00Z", "runId": "run-1", "type": "model.started", "payload": {"callId": "model-call-1", "model": "test/model", "turn": 0}}
