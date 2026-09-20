@@ -41,6 +41,7 @@ export interface PurchaseRecord {
 
 export type PurchaseEvent =
   | { type: "purchase"; record: PurchaseRecord }
+  | { type: "review_skipped"; purchase_id: string }
   | { type: "review_failed"; purchase_id: string; attempted_at: string }
   | { type: "review_submitted"; purchase_id: string; rating: number; submitted_at: string };
 
@@ -76,6 +77,10 @@ export async function recordReviewFailed(session: SessionState, purchaseId: stri
   await appendPurchaseEvent(session, { type: "review_failed", purchase_id: purchaseId, attempted_at: new Date().toISOString() });
 }
 
+export async function skipPendingReviews(session: SessionState): Promise<void> {
+  for (const state of await pendingRequiredReviews(session)) await appendPurchaseEvent(session, { type: "review_skipped", purchase_id: state.record.purchase_id });
+}
+
 async function appendPurchaseEvent(session: SessionState, event: PurchaseEvent): Promise<void> {
   const path = purchasesPath(session);
   await mkdir(dirname(path), { recursive: true });
@@ -108,6 +113,9 @@ export async function listPurchases(session: SessionState): Promise<PurchaseStat
         record: event.record,
         reviewStatus: event.record.review_required ? "pending" : "not_required"
       });
+    } else if (event.type === "review_skipped") {
+      const state = states.get(event.purchase_id);
+      if (state) state.reviewStatus = "not_required";
     } else if (event.type === "review_failed") {
       const state = states.get(event.purchase_id);
       if (state) state.reviewAttempts = (state.reviewAttempts ?? 0) + 1;

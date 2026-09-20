@@ -265,14 +265,14 @@ describe("hosted economy: worker wiring", () => {
       provider: (_run, _session, extraTools) => { advertised = extraTools.map(t => t.name); return provider; },
       economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
-    expect(advertised).toEqual(["read_service", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
+    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
     expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallet on Base");
     expect(systemPrompt).toContain("Only x402 USDC on Base is payable");
     expect(systemPrompt).not.toContain("Paid external services are unavailable");
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
     expect(events.filter(e => e.type === "tool.started").map(e => [e.payload.toolName, e.payload.input])).toEqual([
-      ["find_paid_service", { query: "web search" }], ["complete_session", { summary: "found it" }]]);
-    expect(events.filter(e => e.type === "tool.finished").map(e => e.payload.status)).toEqual(["ok", "ok"]);
+      ["find_paid_service", { query: "web search" }], ["complete_session", { summary: "found it" }], ["complete_session", { summary: "found it" }]]);
+    expect(events.filter(e => e.type === "tool.finished").map(e => e.payload.status)).toEqual(["ok", "ok", "ok"]);
     const toolMessage = provider.complete.mock.calls[1][0].find((m: { role: string }) => m.role === "tool")!;
     expect(JSON.parse(toolMessage.content).result.data.services[0].endpoint).toBe(SEARCH);
   });
@@ -311,7 +311,7 @@ describe("hosted economy: worker wiring", () => {
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
     // The loop mutates one messages array; the completion-gate nudge is the only user message after the prompt.
     const nudges = (provider.complete.mock.calls[3][0] as { role: string; content: string }[]).filter(m => m.role === "user").slice(1);
-    expect(nudges).toEqual([{ role: "user", content: "You cannot finish yet: a paid purchase still needs its required review; submit it with review_paid_service" }]);
+    expect(nudges).toEqual([{ role: "user", content: expect.stringMatching(/required review.*request_service/) }]);
     expect(provider.complete).toHaveBeenCalledTimes(4);
     expect(events.filter(e => e.type === "tool.started").map(e => e.payload.input)).toEqual([
       { url: SEARCH, method: "POST" }, { url: SEARCH, method: "POST" }, { purchase_id: purchaseId, rating: "4" }, { summary: "reviewed" }]);
@@ -375,5 +375,35 @@ it("resumes an approved paid tool after worker restart with the same purchase ID
   const payments = requests.filter(r => r.name === "economy.pay");
   expect(payments).toHaveLength(2);
   expect(payments[0].arguments.purchase_request_id).toBe(payments[1].arguments.purchase_request_id);
-  expect(provider.complete).toHaveBeenCalledTimes(3);
+  expect(provider.complete).toHaveBeenCalledTimes(4); // One end-of-task reflection turn.
+});
+
+
+it("persists CrowdCode controls, skips remote activity while off, and still manages owned reviews", async () => {
+  const { fetcher, calls } = fakeFetch();
+  const { socketPath, requests } = await bridge(() => ({ ok: true, data: { reviews: [], deleted: true } }));
+  const { gateway, session } = await economy(fetcher, socketPath);
+  const wrapper = hostedDynamicTools(gateway);
+  expect(await gateway.execute("crowdcode_status", {})).toMatchObject({ ok: true, data: { enabled: true } });
+  expect(await gateway.execute("set_crowdcode_enabled", { enabled: false, scope: "default" })).toMatchObject({ data: { enabled: false, default_enabled: false } });
+  expect(await wrapper.completionGate()).toBeUndefined();
+  expect(await gateway.execute("request_service", { service_description: "x" })).toMatchObject({ ok: false });
+  expect(await gateway.execute("review_paid_service", {})).toMatchObject({ ok: false, error: expect.stringMatching(/off/) });
+  await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+  expect(calls.filter(call => call.url.startsWith(CROWDCODE))).toHaveLength(0);
+  await gateway.execute("list_my_reviews", { limit: 10 });
+  await gateway.execute("delete_my_review", { review_id: 42 });
+  expect(requests.map(request => request.arguments.name)).toEqual(["list_my_reviews", "delete_my_review"]);
+  const restarted = createHostedEconomy({ socketPath, runId: "r", sessionId: session.sessionId, session, fetcher });
+  expect(await restarted.execute("crowdcode_status", {})).toMatchObject({ data: { enabled: false } });
+  await restarted.execute("set_crowdcode_enabled", { enabled: true });
+  expect(await restarted.execute("crowdcode_status", {})).toMatchObject({ data: { enabled: true, default_enabled: false, scope: "session" } });
+  const nextSession = await createSession({ workspaceRoot: session.workspaceRoot });
+  const next = createHostedEconomy({ socketPath, runId: "r2", sessionId: nextSession.sessionId, session: nextSession, fetcher });
+  expect(await next.execute("crowdcode_status", {})).toMatchObject({ data: { enabled: false } });
+  await restarted.execute("set_crowdcode_enabled", { enabled: true, scope: "default" });
+  expect(await next.execute("crowdcode_status", {})).toMatchObject({ data: { enabled: true } });
+  const completion = hostedDynamicTools(restarted);
+  expect(await completion.completionGate()).toMatch(/request_service.*exact inputs/);
+  expect(await completion.completionGate()).toBeUndefined();
 });

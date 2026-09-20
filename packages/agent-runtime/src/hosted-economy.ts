@@ -237,6 +237,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
 }
 
 export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
+  async manage(name: string, args: Record<string, unknown>) {
+    return postHostedTool(this.socket, "economy.crowdcode", { name, ...args });
+  }
   constructor(private readonly directory: ServiceDirectory, private readonly socket: HostedBridgeOptions) {}
 
   async getServiceScore(query: ServiceQuery): Promise<ServiceEvidence> {

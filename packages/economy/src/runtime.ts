@@ -41,7 +41,7 @@ export async function sharedEconomyRuntime(log?: (message: string) => void): Pro
         instructions: () => [agentcashConnection, crowdcodeConnection]
           .map((connection) => connection.instructions())
           .filter((text): text is string => Boolean(text))
-          .map((text, index) => `Instructions from the ${index === 0 ? "agentcash" : "crowdcode"} vendor:\n${text.slice(0, 2400)}`),
+          .map((text, index) => `Instructions from the ${index === 0 ? "agentcash" : "crowdcode"} vendor:\n${text.slice(0, 16000)}`),
         close: async () => {
           await Promise.all([agentcashConnection.close(), crowdcodeConnection.close()]);
           shared = undefined;

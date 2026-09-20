@@ -1,3 +1,4 @@
+import type { ToolResult } from "@opencrowd/core";
 import { McpConnection } from "./mcp.js";
 
 /**
@@ -46,12 +47,17 @@ export interface ReviewResult {
 }
 
 export interface CrowdCodeAdapter {
+  manage?(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   getServiceScore(query: ServiceQuery): Promise<ServiceEvidence>;
   reviewService(review: ReviewSubmission): Promise<ReviewResult>;
 }
 
 export class McpCrowdCodeAdapter implements CrowdCodeAdapter {
   constructor(private readonly connection: McpConnection) {}
+
+  async manage(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    return this.connection.call(name, args);
+  }
 
   async getServiceScore(query: ServiceQuery): Promise<ServiceEvidence> {
     const result = await this.connection.call("get_service_score", {

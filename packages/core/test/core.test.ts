@@ -68,12 +68,12 @@ describe("OpenCrowd session defaults", () => {
     const dir = join(await tempRoot(), "config");
     process.env.OPENCROWD_CONFIG_DIR = dir;
     await mkdir(dir, { recursive: true });
-    for (const version of ["0.5", "0.5.2", "0.4.0"]) {
+    for (const version of ["0.5", "0.5.2", "0.5.3", "0.4.0"]) {
       await writeFile(join(dir, "config.json"), JSON.stringify({ mcpServers: {
         crowdcode: { command: "npx", args: ["--yes", `crowdcode-mcp@${version}`], allow: ["get_service_score"] }
       }}));
       const config = await loadConfig();
-      expect(config.mcpServers.crowdcode?.args).toEqual(["--yes", `crowdcode-mcp@${["0.5", "0.5.2"].includes(version) ? "0.5.3" : version}`]);
+      expect(config.mcpServers.crowdcode?.args).toEqual(["--yes", `crowdcode-mcp@${["0.5", "0.5.2", "0.5.3"].includes(version) ? "0.6.0" : version}`]);
       expect(config.mcpServers.crowdcode?.allow).toEqual(["get_service_score"]);
       expect(config.mcpServers.agentcash).toBeDefined();
     }
