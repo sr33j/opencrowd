@@ -104,6 +104,25 @@ describe("purchase lifecycle", () => {
     expect(session.spentCents).toBeGreaterThan(0);
   });
 
+  it("honours an inspection made before a pause when the run resumes on a fresh gateway", async () => {
+    const { session, gateway, agentcash, crowdcode } = await setup();
+    await inspect(gateway);
+
+    // A funds pause or worker restart rebuilds the gateway for the same session.
+    const resumed = new EconomyGateway({ session, agentcash, crowdcode, approvalMode: "auto" });
+    const result = await resumed.execute("call_paid_service", { url: ENDPOINT, method: "POST", body: { q: "x" }, max_cost_cents: 10 });
+
+    expect(result.ok).toBe(true);
+    expect((result.data as Record<string, unknown>).outcome).toBe("paid_success");
+  });
+
+  it("still requires an inspection when none was stored for the session", async () => {
+    const { gateway } = await setup();
+    const result = await gateway.execute("call_paid_service", { url: ENDPOINT, method: "POST", max_cost_cents: 10 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("inspect_paid_service must run");
+  });
+
   it("records claimed payment without a settlement receipt as unknown, never paid_success", async () => {
     const agentcash = new MockAgentCashAdapter({
       defaultFetchResult: {
