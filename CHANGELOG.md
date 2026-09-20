@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 — 2026-09-20
+
+- Add CrowdCode on/off controls with session and persistent defaults, plus listing and selective deletion of the agent's own reviews. Hosted settings survive worker restarts; disabling CrowdCode leaves spending limits unchanged.
+- Reflect once before completion on concrete services worth paying for to remedy actual task failures or detours. Submit no demand when no qualifying gap exists.
+- Route hosted review management through the authenticated signing gateway and upgrade the local MCP default to 0.6.0.
+
 ## 0.5.4 — 2026-09-19
 
 - Allow paid and unpaid stored interactions through the same review tool in CLI and cloud, with stable retry IDs and no new completion gate for unpaid reviews.

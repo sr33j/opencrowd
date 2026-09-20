@@ -792,6 +792,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
+      "When the user says CrowdCode on/off, call set_crowdcode_enabled; default to session scope unless they ask for a persistent default. Use list_my_reviews and delete_my_review for user-directed review management, including while off. Before finishing a substantive task, consider concrete paid services that would fix real shortcomings and submit qualifying demand with request_service, unless CrowdCode is off. Never invent a purchase or demand.",
       "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",
       ...(options.promptSections ?? [])
     );

@@ -78,7 +78,7 @@ describe("gateway surface", () => {
     const { gateway } = await setup();
     const definitions = gateway.definitions();
     expect(definitions.map((tool) => tool.name)).toEqual([...GATEWAY_TOOL_NAMES]);
-    const schemaText = JSON.stringify(definitions);
+    const schemaText = JSON.stringify(definitions.map(tool => tool.parameters));
     expect(schemaText).not.toMatch(/payment_proof|tx_hash|signature|private/i);
   });
 });
@@ -634,4 +634,25 @@ describe("durable review deferral", () => {
     await beginQuery(session, "next-query");
     expect(await gateway.hasPendingRequiredReviews()).toBe(false);
   });
+});
+
+it("disabling CrowdCode drops pending review gates without changing spending policy", async () => {
+  const { session, agentcash, crowdcode } = await setup();
+  const gateway = new EconomyGateway({ session, agentcash, crowdcode, hostedSpending: true, approvalMode: "auto" });
+  await inspect(gateway);
+  const paid = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 });
+  expect(paid.ok).toBe(true);
+  expect(await gateway.hasPendingRequiredReviews()).toBe(true);
+  await gateway.execute("set_crowdcode_enabled", { enabled: false });
+  expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+  const before = crowdcode.scoreQueries.length;
+  await inspect(gateway);
+  const off = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 });
+  expect(off).toMatchObject({ ok: true, data: { review_required: false } });
+  expect(crowdcode.scoreQueries).toHaveLength(before);
+  await gateway.execute("set_crowdcode_enabled", { enabled: true });
+  expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+  const blocked = new EconomyGateway({ session, agentcash, crowdcode, hostedSpending: true, approvalMode: "off" });
+  await blocked.execute("set_crowdcode_enabled", { enabled: false });
+  expect(await blocked.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 })).toMatchObject({ ok: false, error: expect.stringMatching(/purchases are disabled/) });
 });

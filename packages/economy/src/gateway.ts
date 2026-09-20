@@ -1,3 +1,4 @@
+import { CrowdCodePreferences } from "./crowdcode-preferences.js";
 import { extractMedia } from "./media.js";
 import {
   appendLedgerEntry, SpendingApprovalRequired, SpendingDeclined,
@@ -19,7 +20,7 @@ import {
   type ApprovalMode
 } from "./approvals.js";
 import {
-  appendPurchase,
+  appendPurchase, skipPendingReviews,
   listPurchases,
   newPurchaseId,
   pendingRequiredReviews,
@@ -41,6 +42,7 @@ import {
  */
 
 export const GATEWAY_TOOL_NAMES = [
+  "crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review",
   "read_service",
   "get_wallet_status",
   "find_paid_service",
@@ -98,12 +100,18 @@ export class EconomyGateway {
 
   /** True while a confirmed paid purchase still needs its required review. */
   async hasPendingRequiredReviews(): Promise<boolean> {
-    return (await pendingRequiredReviews(this.options.session)).length > 0;
+    return await this.crowdcodeEnabled() && (await pendingRequiredReviews(this.options.session)).length > 0;
   }
 
   async execute(name: string, args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
     try {
       switch (name as GatewayToolName) {
+        case "crowdcode_status":
+        case "set_crowdcode_enabled":
+        case "request_service":
+        case "list_my_reviews":
+        case "delete_my_review":
+          return await this.manageCrowdCode(name, args);
         case "get_wallet_status":
           return await this.getWalletStatus();
         case "find_paid_service":
@@ -125,6 +133,36 @@ export class EconomyGateway {
       if (error instanceof SpendingApprovalRequired || error instanceof SpendingDeclined || (error as Error).name === "RuntimePause") throw error;
       return { ok: false, error: (error as Error).message };
     }
+  }
+
+  private async crowdcodeEnabled(): Promise<boolean> {
+    if (!this.options.hostedSpending && !this.options.crowdcode.manage) return true;
+    const status = await this.manageCrowdCode("crowdcode_status", {});
+    if (!status.ok) throw new Error(status.error ?? "CrowdCode preferences unavailable");
+    return (status.data as { enabled?: boolean })?.enabled === true;
+  }
+
+  private async manageCrowdCode(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+    if (name === "set_crowdcode_enabled") {
+      if (typeof args.enabled !== "boolean" || (args.scope !== undefined && args.scope !== "session" && args.scope !== "default"))
+        return { ok: false, error: "Provide enabled (boolean) and scope (session or default)" };
+    }
+    if (this.options.hostedSpending && (name === "crowdcode_status" || name === "set_crowdcode_enabled")) {
+      const preferences = new CrowdCodePreferences(this.options.session);
+      const data = name === "crowdcode_status" ? await preferences.status() : await preferences.set(args.enabled as boolean, (args.scope ?? "session") as "session" | "default");
+      if (name === "set_crowdcode_enabled" && args.enabled === false) await skipPendingReviews(this.options.session);
+      return { ok: true, data };
+    }
+    if (name === "request_service" && !(await this.crowdcodeEnabled())) return { ok: false, error: "CrowdCode is off. Turn it on to submit service requests." };
+    if (!this.options.crowdcode.manage) return { ok: false, error: "CrowdCode management is unavailable" };
+    const result = await this.options.crowdcode.manage(name, args);
+    if (result.ok && name === "set_crowdcode_enabled" && args.enabled === false) await skipPendingReviews(this.options.session);
+    return result;
+  }
+
+  private async serviceEvidence(endpoint: string): Promise<ServiceEvidence> {
+    return await this.crowdcodeEnabled() ? this.options.crowdcode.getServiceScore({ apiEndpoint: endpoint })
+      : { ok: true, unproven: true, summary: "CrowdCode is off; reputation checks and submissions are disabled." };
   }
 
   private async getWalletStatus(): Promise<ToolResult> {
@@ -163,7 +201,7 @@ export class EconomyGateway {
     if (!schema.ok) {
       return { ok: false, error: schema.error };
     }
-    const evidence = await this.options.crowdcode.getServiceScore({ apiEndpoint: endpoint });
+    const evidence = await this.serviceEvidence(endpoint);
     const rail = railFromSchema(schema.data);
     const priceCeilingCents = priceCeilingFromSchema(schema.data);
     this.inspections.set(inspectionKey(endpoint, method), {
@@ -204,7 +242,7 @@ export class EconomyGateway {
       };
     }
     // A confirmed paid purchase with a pending required review blocks further purchases.
-    const pending = await pendingRequiredReviews(session);
+    const pending = await this.crowdcodeEnabled() ? await pendingRequiredReviews(session) : [];
     if (pending.length > 0) {
       return {
         ok: false,
@@ -243,7 +281,7 @@ export class EconomyGateway {
     }
 
     // CrowdCode pre-check re-runs at call time; an outage or rejection blocks payment.
-    const evidence = await this.options.crowdcode.getServiceScore({ apiEndpoint: endpoint });
+    const evidence = await this.serviceEvidence(endpoint);
     if (!evidence.ok) {
       return {
         ok: false,
@@ -327,7 +365,7 @@ export class EconomyGateway {
       artifact_path: artifact?.path,
       // Confirmed paid successes AND paid failures require reviews; free,
       // SIWX, and unknown outcomes create no paid receipt to review.
-      review_required: paid && supportedRail,
+      review_required: paid && supportedRail && await this.crowdcodeEnabled(),
       evidence: result.payment,
       notes: result.ambiguous
         ? `${result.ambiguityReason ?? "ambiguous"}: payment state unknown; never auto-retried`
@@ -465,6 +503,7 @@ export class EconomyGateway {
   }
 
   private async reviewPaidService(args: Record<string, unknown>): Promise<ToolResult> {
+    if (!(await this.crowdcodeEnabled())) return { ok: false, error: "CrowdCode is off; review submission is disabled." };
     const purchaseId = stringArg(args.purchase_id);
     const rating = intArg(args.rating);
     const reason = stringArg(args.reason);
@@ -619,6 +658,11 @@ function slugUrl(url: string): string {
  * immutable stored receipts.
  */
 const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
+  { name: "crowdcode_status", description: "Check whether CrowdCode is enabled for this session and by default.", parameters: { type: "object", properties: {}, additionalProperties: false } },
+  { name: "set_crowdcode_enabled", description: "Handle 'CrowdCode on/off'. Disable reputation checks, automatic reviews and requests. Default scope is this session; scope default also sets the agent default for future sessions. Listing and deleting your reviews remain available while off. Does not change spending permissions.", parameters: { type: "object", properties: { enabled: { type: "boolean" }, scope: { type: "string", enum: ["session", "default"] } }, required: ["enabled"], additionalProperties: false } },
+  { name: "request_service", description: "Before finishing a real task, record a concrete service worth paying for that would fix an observed failure, poor result, excessive cost or detour. State exact input, paid deliverable, acceptance criteria, actual obstacle and why paying is worthwhile. No purchase or spending authority is required. Skip generic Python/runtime wishes, web search that worked well, and gaps without a sellable remedy. Submit distinct gaps once; submit nothing if everything worked well and cheaply. Exclude private data and secrets.", parameters: { type: "object", properties: { service_description: { type: "string", maxLength: 8000 }, task_context: { type: "string", maxLength: 4000 } }, required: ["service_description"], additionalProperties: false } },
+  { name: "list_my_reviews", description: "List this agent's own submitted reviews with IDs for selective deletion; works while CrowdCode is off. Paginate with next_before_id.", parameters: { type: "object", properties: { before_id: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false } },
+  { name: "delete_my_review", description: "Delete one of this agent's reviews when the user asks, using its ID from list_my_reviews. Works while CrowdCode is off. Never delete unrelated reviews.", parameters: { type: "object", properties: { review_id: { type: "integer", minimum: 1 } }, required: ["review_id"], additionalProperties: false } },
   { name: "read_service", description: "Read a service URL without payment, authenticating with the wallet when required (SIWX). Use this to poll a paid generation job until complete; never resubmit a pending job. Download returned media URLs with run_shell.",
     parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"], additionalProperties: false } },
   {
