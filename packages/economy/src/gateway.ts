@@ -1,3 +1,5 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { extractMedia } from "./media.js";
 import {
   appendLedgerEntry, SpendingApprovalRequired, SpendingDeclined,
@@ -84,9 +86,37 @@ export interface EconomyGatewayOptions {
 }
 
 export class EconomyGateway {
-  private readonly inspections = new Map<string, Inspection>();
+  /**
+   * Inspections are keyed by endpoint+method and persisted under the session so
+   * a run resumed on a fresh gateway instance (funds pause, worker restart) still
+   * honours the inspect-before-call rule instead of failing its first call.
+   */
+  private inspections?: Map<string, Inspection>;
 
   constructor(private readonly options: EconomyGatewayOptions) {}
+
+  private get inspectionsPath(): string {
+    return join(this.options.session.sessionDir, "inspections.json");
+  }
+
+  private async loadInspections(): Promise<Map<string, Inspection>> {
+    if (this.inspections) return this.inspections;
+    const map = new Map<string, Inspection>();
+    try {
+      const stored = JSON.parse(await readFile(this.inspectionsPath, "utf8")) as Record<string, Inspection>;
+      for (const [key, value] of Object.entries(stored)) map.set(key, value);
+    } catch {
+      /* No inspections stored yet, or an unreadable file: the model must inspect again. */
+    }
+    this.inspections = map;
+    return map;
+  }
+
+  private async rememberInspection(key: string, inspection: Inspection): Promise<void> {
+    const map = await this.loadInspections();
+    map.set(key, inspection);
+    await writeFile(this.inspectionsPath, JSON.stringify(Object.fromEntries(map)), "utf8");
+  }
 
   definitions(): GatewayToolDefinition[] {
     return GATEWAY_TOOL_DEFINITIONS;
@@ -166,7 +196,7 @@ export class EconomyGateway {
     const evidence = await this.options.crowdcode.getServiceScore({ apiEndpoint: endpoint });
     const rail = railFromSchema(schema.data);
     const priceCeilingCents = priceCeilingFromSchema(schema.data);
-    this.inspections.set(inspectionKey(endpoint, method), {
+    await this.rememberInspection(inspectionKey(endpoint, method), {
       endpoint,
       method,
       rail,
@@ -216,7 +246,7 @@ export class EconomyGateway {
       return { ok: false, error: "call_paid_service requires `url`" };
     }
     const method = (stringArg(args.method) ?? "POST").toUpperCase();
-    const inspection = this.inspections.get(inspectionKey(endpoint, method));
+    const inspection = (await this.loadInspections()).get(inspectionKey(endpoint, method));
     if (!inspection) {
       return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
     }
