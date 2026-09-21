@@ -31,7 +31,9 @@ it('survives SIGKILL after a completed tool and resumes the same model operation
   const operations: string[] = []; let restarting = false;
   const server = createServer(async (req,res) => {
     const chunks:Buffer[]=[]; for await(const chunk of req) chunks.push(Buffer.from(chunk));
-    const input = JSON.parse(Buffer.concat(chunks).toString()); operations.push(input.operationId);
+    const input = JSON.parse(Buffer.concat(chunks).toString());
+    if (req.url === '/tool') { res.end(JSON.stringify({ok:false,error:'Financial read unavailable in restart fixture'})); return; }
+    operations.push(input.operationId);
     if(input.operationId.endsWith(':0')) res.end(JSON.stringify({status:'complete',response:{content:'Saving',toolCalls:[{id:'save',name:'save_file',arguments:{path:'result.md',content:'durable artifact'}}]}}));
     else if(!restarting) wake();
     else res.end(JSON.stringify({status:'complete',response:{content:'Restored successfully',toolCalls:[]}}));

@@ -1,4 +1,4 @@
-import { ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
+import { FinancialStateSchema, type FinancialState, ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
@@ -20,7 +20,8 @@ export class HostedRequestError extends Error {
  * to the hosted model alongside the built-in tools. */
 export function createHostedProvider(options: { socketPath: string; runId: string; sessionId: string; extraTools?: DynamicToolDefinition[] }): LlmProvider {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
-  const tools = [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)), ...(options.extraTools ?? [])];
+  const tools = [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
+    ? { ...tool, description: "Read authoritative hosted finances: live USDC wallet balance, settled inference and service spending, pending holds, and remaining authorized budget for this run." } : tool), ...(options.extraTools ?? [])];
   return {
     async complete(messages, context) {
       const operationId = context?.operationId;
@@ -89,6 +90,17 @@ function rejectedRequest(status: number, text: string): Error | undefined {
 const HOSTED_TOOL_REQUEST_BYTES = 1024 * 1024;
 
 export interface HostedBridgeOptions { socketPath: string; runId: string; sessionId: string }
+
+/** Diagnostic reads must never turn an already-paid answer into a retry. */
+export async function readHostedFinancialState(options: HostedBridgeOptions): Promise<FinancialState> {
+  try {
+    const reply = await postHostedTool(options, "economy.balance", {}, { timeoutMs: 10000 });
+    const parsed = FinancialStateSchema.safeParse((reply.data as { financial_state?: unknown } | undefined)?.financial_state);
+    if (reply.ok && parsed.success && parsed.data.status === "available" && parsed.data.run_id === options.runId)
+      return parsed.data;
+  } catch { /* unavailable is explicit; never fall back to local accounting */ }
+  return { status: "unavailable", reason: "Hosted financial state could not be read. Do not infer balance or spending from the local session budget." };
+}
 
 /** The supervisor's reply to `POST /tool`: a tool result, optionally with a machine-readable failure code. */
 export interface HostedToolReply { ok: boolean; data?: unknown; error?: string; code?: string }

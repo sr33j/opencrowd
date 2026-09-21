@@ -9,3 +9,4 @@ export * from "./seq.js";
 export * from "./codec.js";
 export * from "./context.js";
 export * from "./spending.js";
+export * from "./financial-state.js";

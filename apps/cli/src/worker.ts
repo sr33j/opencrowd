@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { MachineWorker, createWorkerDemoProvider, createHostedEconomy, createHostedProvider, createHostedToolExecutor } from "@opencrowd/agent-runtime";
+import { MachineWorker, createWorkerDemoProvider, createHostedEconomy, createHostedProvider, createHostedToolExecutor, readHostedFinancialState } from "@opencrowd/agent-runtime";
 import { readOption } from "./shared.js";
 
 export async function workerCommand(args: string[]): Promise<void> {
@@ -11,6 +11,7 @@ export async function workerCommand(args: string[]): Promise<void> {
     ? createHostedProvider({ socketPath, runId: run.runId, sessionId: session.sessionId, extraTools }) : createWorkerDemoProvider(),
     hostedTools: socketPath ? (run, session) => createHostedToolExecutor({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,
     economy: socketPath ? (run, session) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session }) : undefined,
+    financialState: socketPath ? (run, session) => readHostedFinancialState({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,
     output: line => { process.stdout.write(line); } });
   await worker.initialize();
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });

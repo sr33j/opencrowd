@@ -55,6 +55,7 @@ export interface WorkerOptions {
   hostedTools?: (run: CommandOf<"run.start">, session: SessionState) => HostedToolExecutor;
   /** Paid-capability gateway (hosted adapters); absent means paid services are unavailable to the model. */
   economy?: (run: CommandOf<"run.start">, session: SessionState) => EconomyGateway;
+  financialState?: (run: CommandOf<"run.start">, session: SessionState) => Promise<import("@opencrowd/protocol").FinancialState>;
   now?: () => Date;
   id?: () => string;
 }
@@ -222,6 +223,12 @@ export class MachineWorker {
       const hosted = this.options.hostedTools?.(run.start, session);
       const economy = this.options.economy?.(run.start, session);
       const dynamicTools = economy ? hostedDynamicTools(economy) : undefined;
+      let latestFinancialState: import("@opencrowd/protocol").FinancialState = { status: "unavailable", reason: "Hosted financial state has not been read." };
+      const financialState = this.options.financialState ? async () => {
+        try { latestFinancialState = await this.options.financialState!(run.start, session); }
+        catch { latestFinancialState = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
+        return latestFinancialState;
+      } : undefined;
       // Every tool call, built-in or economy, is recorded once per checkpoint turn and replayed from its stored result.
       const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>): Promise<ToolResult> => {
         const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
@@ -242,6 +249,10 @@ export class MachineWorker {
           if (saved?.approvalPending && name === "call_paid_service" && economy)
             await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
           output = await invoke();
+          // Keep durable tool diagnostics consistent with what the model sees.
+          if (financialState && name === "get_budget_status") output = { ok: true, data: latestFinancialState };
+          if (financialState && name === "complete_session" && output.ok && output.data && typeof output.data === "object")
+            output = { ...output, data: { ...output.data, budget: latestFinancialState } };
         } catch (error) {
           if (error instanceof RuntimePause && error.outcome === "waiting_for_approval")
             await this.mutate(() => { run.tools[id].approvalPending = true; });
@@ -298,6 +309,7 @@ export class MachineWorker {
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
         provider,
+        financialState,
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },

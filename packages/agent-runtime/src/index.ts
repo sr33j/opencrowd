@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { contextLimits, isOutputLimitFinishReason } from "@opencrowd/protocol";
+import { contextLimits, isOutputLimitFinishReason, FinancialStateSchema, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState } from "./context.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -663,6 +663,8 @@ export interface AgentRunOptions {
   onCheckpoint?: (checkpoint: LoopCheckpoint) => Promise<void>;
   /** Durable hosted gateway failures must escape the loop, never be parsed/retried. */
   hosted?: boolean;
+  /** Authoritative hosted ledger and wallet snapshot; local budgets are not cloud balances. */
+  financialState?: () => Promise<FinancialState>;
   /** Scripted/mock provider (tests, demo). Exactly one of provider/llm is required. */
   provider?: LlmProvider;
   /** Typed provider runtime; the loop wraps it with local budget accounting. */
@@ -783,6 +785,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     "Try to solve the user's task completely. Use local files and bash when they are sufficient, but remember they are bounded by the user's installed tools, credentials, network, open ports, and process lifetime.",
     "Before repeatedly fighting the local environment, decide whether the task needs external capability such as hosting, persistent infrastructure, remote compute, specialized APIs, live data, or access the user's device does not have."
   ];
+  if (options.hosted) systemPromptParts.push(
+    "You operate this service for its owner. Inference and paid tools debit its USDC wallet. When authorized to build or sell a service, take concrete steps within the owner's configured scope and budget. Ask only for missing information or permissions that materially block progress. Report actual costs and outcomes. Financial sustainability is the owner's business objective; respect their stop controls.",
+    "Financial state: the current hosted financial snapshot is authoritative; historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for refreshed financial state. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
+  );
   if (options.dynamicTools) {
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure). The same review tool accepts unpaid experiences; review relevant free results or failed attempts without inventing payment evidence. Distinguish provider faults from local errors and uncertain failures.",
@@ -831,6 +837,14 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     ...(options.history ?? []),
     { role: "user", content: task }
   ];
+  let financial: FinancialState = { status: "unavailable", reason: "Hosted financial state has not been read." };
+  const refreshFinancialState = async () => {
+    if (!options.financialState) return;
+    try { financial = FinancialStateSchema.parse(await options.financialState()); }
+    catch { financial = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
+  };
+  const currentBudget = () => options.financialState ? financial : budgetStatus(session);
+  const financialPrefix = "Current hosted financial snapshot: ";
   if (!options.resume) await options.onMessage?.({ role: "user", content: task });
 
   const maxTurns = options.maxTurns ?? 100;
@@ -881,6 +895,13 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     let response: LlmResponse;
     try {
+      if (options.financialState && !restored?.response && !contextState.prepared) {
+        await refreshFinancialState();
+        const snapshot: LlmMessage = { role: "system", content: financialPrefix + JSON.stringify(financial) };
+        const index = messages.findIndex(m => m.role === "system" && m.content.startsWith(financialPrefix));
+        if (index === -1) messages.splice(1, 0, snapshot);
+        else messages[index] = snapshot;
+      }
       response = restored?.response ?? await completeWithContext(session, messages, {
           provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
           contextWindowTokens: limits.contextWindow, maxOutputTokens: limits.outputTokens,
@@ -893,6 +914,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           }
         });
       options.signal?.throwIfAborted();
+      await refreshFinancialState(); // includes the model payment, including a replayed receipt
     } catch (error) {
       if (error instanceof BudgetExhaustedError) {
         // Budget exhaustion is a deterministic stop, not a fault: finish
@@ -992,7 +1014,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         message: `Tool call: ${summarizeToolCall(call)}`,
         data: { tool: call.name, arguments: call.arguments }
       });
-      const budgetBeforeToolCall = budgetStatus(session);
+      const budgetBeforeToolCall = currentBudget();
       const callArguments = call.name === "complete_session" && outputContinuationPrefix
         ? {
           ...call.arguments,
@@ -1033,7 +1055,12 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       } else {
         result = { ok: false, error: `unknown tool: ${call.name}` };
       }
-      const budgetAfterToolCall = budgetStatus(session);
+      await refreshFinancialState(); // includes a settled service payment and changed approvals
+      const budgetAfterToolCall = currentBudget();
+      if (options.financialState && call.name === "get_budget_status") result = { ok: true, data: financial };
+      if (options.financialState && call.name === "complete_session" && result.ok && result.data && typeof result.data === "object") {
+        result = { ...result, data: { ...result.data, budget: financial } };
+      }
       options.onProgress?.({
         type: "tool_result",
         message: `Tool result: ${summarizeToolResult(call.name, result)}`,
@@ -1688,6 +1715,7 @@ function summarizeToolResult(name: string, result: ToolResult): string {
     return `call_paid_service ${String(data.outcome ?? "?")} HTTP ${String(data.status ?? "?")}, charged ${formatCents(Number(data.charged_cost_cents ?? 0))}${data.artifact_path ? `, saved ${String(data.artifact_path)}` : ""}`;
   }
   if (name === "get_budget_status" && result.data && typeof result.data === "object") {
+    if ("status" in result.data) return `hosted finances: ${String(result.data.status)}`;
     const data = result.data as { remaining_cents?: unknown };
     return `remaining ${formatCents(Number(data.remaining_cents ?? 0))}`;
   }
