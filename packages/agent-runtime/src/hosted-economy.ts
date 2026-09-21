@@ -34,7 +34,7 @@ const FREE_FETCH_TIMEOUT_MS = 30_000;
 const USDC_ATOMIC_PER_USD = 1_000_000;
 const BASE_NETWORK = "eip155:8453";
 /** Gateway tools that have no hosted counterpart worth advertising. */
-const HIDDEN_HOSTED_TOOLS = new Set(["bridge_usdc", "get_wallet_status"]);
+const HIDDEN_HOSTED_TOOLS = new Set(["bridge_usdc"]);
 
 export interface HostedEconomyOptions extends HostedBridgeOptions {
   session: SessionState;
@@ -318,7 +318,9 @@ export { MAX_REVIEW_ATTEMPTS } from "./economy-tools.js";
 export type { EconomyTools as HostedDynamicTools } from "./economy-tools.js";
 /** Cloud exposes the same completion policy, excluding local wallet actions. */
 export function hostedDynamicTools(economy: EconomyGateway) {
-  return economyTools(economy, { hidden: HIDDEN_HOSTED_TOOLS });
+  const tools = economyTools(economy, { hidden: HIDDEN_HOSTED_TOOLS });
+  return { ...tools, definitions: tools.definitions.map(tool => tool.name === "get_wallet_status"
+    ? { ...tool, description: "Read this hosted agent's USDC wallet balance and authoritative current-run inference spending, service spending, payment holds and authorized budget. Read-only." } : tool) };
 }
 
 

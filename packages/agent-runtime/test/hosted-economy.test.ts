@@ -265,7 +265,7 @@ describe("hosted economy: worker wiring", () => {
       provider: (_run, _session, extraTools) => { advertised = extraTools.map(t => t.name); return provider; },
       economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
-    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
+    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
     expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallet on Base");
     expect(systemPrompt).toContain("Only x402 USDC on Base is payable");
     expect(systemPrompt).not.toContain("Paid external services are unavailable");
