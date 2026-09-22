@@ -19,6 +19,9 @@
 
 ## Unreleased
 
+- Wait the full supervisor window on hosted paid calls instead of two minutes, so slow services such as image generation are no longer abandoned while the gateway is still paying for them. After a lost socket the identical purchase is re-posted once; the gateway replays a finished attempt by purchase ID, and anything still in flight is reported as a named timeout with unknown payment state.
+- Reset the consecutive paid-service failure counter on a successful purchase, so three unrelated failures across a long run no longer stop it.
+
 ## 0.5.2 — 2026-09-18
 
 - Persist failed review attempts and defer repeatedly rejected reviews without

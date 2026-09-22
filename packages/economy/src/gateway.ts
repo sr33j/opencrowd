@@ -419,6 +419,7 @@ export class EconomyGateway {
     if (outcome === "unknown") {
       const missingReceipt = result.ambiguityReason === "missing_receipt";
       const unsupportedReceipt = result.ambiguityReason === "unsupported_receipt";
+      const timedOut = result.ambiguityReason === "timeout";
       return {
         ok: false,
         error: missingReceipt
@@ -431,10 +432,15 @@ export class EconomyGateway {
               `the call to ${endpoint} returned a settlement receipt on an unsupported payment rail (recorded as purchase ${purchaseId}).`,
               "It was NOT retried and must not be retried automatically; reconcile the payment manually before continuing."
             ].join(" ")
-            : [
-              `the call to ${endpoint} failed in transport and its payment state is unknown (recorded as purchase ${purchaseId}).`,
-              "It was NOT retried and must not be retried automatically; verify the service state before calling again."
-            ].join(" ")
+            : timedOut
+              ? [
+                `the call to ${endpoint} did not answer within the wait limit and its payment state is unknown (recorded as purchase ${purchaseId}).`,
+                "The stored purchase was checked once without a final result. It was NOT retried and must not be retried automatically; the owner can reconcile it from the payment ledger."
+              ].join(" ")
+              : [
+                `the call to ${endpoint} failed in transport and its payment state is unknown (recorded as purchase ${purchaseId}).`,
+                "It was NOT retried and must not be retried automatically; verify the service state before calling again."
+              ].join(" ")
       };
     }
     return {

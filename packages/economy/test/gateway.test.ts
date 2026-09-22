@@ -288,6 +288,23 @@ describe("outcome reconciliation", () => {
     expect(session.spentCents).toBe(10);
   });
 
+  it("names a wait-limit timeout distinctly while still recording the purchase as unknown", async () => {
+    const agentcash = new MockAgentCashAdapter({
+      fetchResults: { [ENDPOINT]: { ok: false, ambiguous: true, ambiguityReason: "timeout", data: undefined, error: "the paid call did not answer within 360s" } }
+    });
+    const { session, gateway } = await setup({ agentcash });
+    await inspect(gateway);
+    const result = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("did not answer within the wait limit");
+    expect(result.error).toContain("NOT retried");
+    expect(agentcash.fetchCalls).toHaveLength(1);
+    const purchases = await listPurchases(session);
+    expect(purchases[0].record.outcome).toBe("unknown");
+    expect(purchases[0].record.notes).toContain("timeout");
+    expect(session.spentCents).toBe(10);
+  });
+
   it("rejects endpoints on unsupported automatic payment rails", async () => {
     const agentcash = new MockAgentCashAdapter({
       schemas: { [ENDPOINT]: { url: ENDPOINT, auth: "paid", network: "solana only", price: 0.05 } }

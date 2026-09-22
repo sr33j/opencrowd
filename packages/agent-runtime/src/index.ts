@@ -1081,6 +1081,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         await checkpoint(turn, response, completedTools);
         await options.onMessage?.(toolMessage);
       }
+      // A successful purchase proves paid services work in this run; only a streak of failures should stop it.
+      if (call.name === "call_paid_service" && result.ok) serviceCallFailures = 0;
       if (!result.ok) {
         if (call.name === "call_paid_service") {
           serviceCallFailures += 1;

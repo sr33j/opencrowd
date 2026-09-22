@@ -17,7 +17,8 @@ import {
   type ServiceQuery,
   type WalletStatusResult
 } from "@opencrowd/economy";
-import { postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
+import { SERVICE_GATEWAY_TIMEOUT_MS } from "@opencrowd/protocol";
+import { HostedToolTimeout, postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
 
 /**
  * Hosted adapters for the economy gateway. The same enforced purchase
@@ -29,7 +30,17 @@ import { postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
 
 export const DEFAULT_CROWDCODE_BASE = "https://crowdcode-backend.onrender.com";
 const LIST_CACHE_MS = 60_000;
-const PAY_TIMEOUT_MS = 120_000;
+/**
+ * The supervisor waits SERVICE_GATEWAY_TIMEOUT_MS on the gateway, which waits
+ * SERVICE_PROVIDER_TIMEOUT_MS on the provider. The runtime must never be the
+ * first layer to give up: abandoning the socket discards an answer the gateway
+ * may already have paid for.
+ */
+const PAY_TIMEOUT_MS = SERVICE_GATEWAY_TIMEOUT_MS + 30_000;
+/** Pause before re-posting a purchase whose first attempt lost the socket. */
+const RECONCILE_DELAY_MS = 2_000;
+/** Socket errors raised before anything was sent; there is no purchase to reconcile. */
+const NOT_SENT_CODES = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ENOTDIR"]);
 const FREE_FETCH_TIMEOUT_MS = 30_000;
 const USDC_ATOMIC_PER_USD = 1_000_000;
 const BASE_NETWORK = "eip155:8453";
@@ -40,6 +51,8 @@ export interface HostedEconomyOptions extends HostedBridgeOptions {
   session: SessionState;
   fetcher?: typeof fetch;
   crowdcodeBase?: string;
+  /** Test hook: delay before the single purchase reconcile after a lost socket. */
+  reconcileDelayMs?: number;
 }
 
 interface ListedService {
@@ -104,7 +117,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
   constructor(
     private readonly directory: ServiceDirectory,
     private readonly socket: HostedBridgeOptions,
-    private readonly fetcher: typeof fetch
+    private readonly fetcher: typeof fetch,
+    private readonly reconcileDelayMs = RECONCILE_DELAY_MS
   ) {
     this.discovery = new BaseServiceDiscovery(async (query, options) => {
       const reply = await postHostedTool(this.socket, "economy.read", {
@@ -152,24 +166,37 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     const body = request.body === undefined ? undefined : typeof request.body === "string" ? request.body : JSON.stringify(request.body);
     const hash = request.operationId ? createHash("sha256").update(`${this.socket.runId}:${request.operationId}`).digest("hex") : undefined;
     const purchaseId = hash ? `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}` : randomUUID();
-    let reply;
+    const payArgs = {
+      purchase_request_id: purchaseId,
+      service_id: serviceId,
+      url: request.url,
+      method,
+      body,
+      max_cost_cents: Math.ceil(request.maxAmountUsd * 100)
+    };
+    const timeoutMs = Math.min(request.timeoutMs ?? PAY_TIMEOUT_MS, PAY_TIMEOUT_MS);
+    let reply, timedOut = false;
     try {
-      reply = await postHostedTool(this.socket, "economy.pay", {
-        purchase_request_id: purchaseId,
-        service_id: serviceId,
-        url: request.url,
-        method,
-        body,
-        max_cost_cents: Math.ceil(request.maxAmountUsd * 100)
-      }, { timeoutMs: request.timeoutMs ?? PAY_TIMEOUT_MS });
+      reply = await postHostedTool(this.socket, "economy.pay", payArgs, { timeoutMs });
     } catch (error) {
-      return {
-        ok: false,
-        ambiguous: true,
-        ambiguityReason: "transport",
-        data: undefined,
-        error: `payment request to the supervisor failed in transport: ${(error as Error).message}`
-      };
+      // The gateway keys every attempt by purchase_request_id and request
+      // digest, so re-posting the identical request replays a finished
+      // purchase instead of paying twice. One reconcile recovers an answer
+      // that arrived after the socket was lost; anything else stays unknown.
+      timedOut = error instanceof HostedToolTimeout;
+      const recovered = await this.reconcile(error, payArgs, timeoutMs);
+      if (!recovered) {
+        return {
+          ok: false,
+          ambiguous: true,
+          ambiguityReason: timedOut ? "timeout" : "transport",
+          data: undefined,
+          error: timedOut
+            ? `the paid call did not answer within ${Math.round(timeoutMs / 1000)}s and its stored purchase has no final result yet`
+            : `payment request to the supervisor failed in transport: ${(error as Error).message}`
+        };
+      }
+      reply = recovered;
     }
     if (reply.ok) {
       const data = objectValue(reply.data) ?? {};
@@ -200,12 +227,30 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       return {
         ok: false,
         ambiguous: true,
-        ambiguityReason: "transport",
+        ambiguityReason: timedOut ? "timeout" : "transport",
         data: undefined,
-        error: reply.error ?? "the supervisor could not determine whether the payment settled"
+        error: timedOut
+          ? `the paid call did not answer within ${Math.round(timeoutMs / 1000)}s and its stored purchase has no final result yet`
+          : reply.error ?? "the supervisor could not determine whether the payment settled"
       };
     }
     return refuse(reply.code ? `${reply.error ?? "payment refused"} (${reply.code})` : reply.error ?? "payment refused");
+  }
+
+  /**
+   * Re-post the same purchase once. A finished attempt replays from the ledger;
+   * an attempt still in flight answers payment_unknown; a request that never
+   * reached the supervisor is not reconciled because nothing was started.
+   */
+  private async reconcile(error: unknown, payArgs: Record<string, unknown>, timeoutMs: number) {
+    const code = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (typeof code === "string" && NOT_SENT_CODES.has(code)) return undefined;
+    await new Promise(resolve => setTimeout(resolve, this.reconcileDelayMs));
+    try {
+      return await postHostedTool(this.socket, "economy.pay", payArgs, { timeoutMs });
+    } catch {
+      return undefined;
+    }
   }
 
   /** The supervisor found no 402: the endpoint is free, so the worker fetches it itself. */
@@ -304,7 +349,7 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
   const directory = new ServiceDirectory(fetcher, (options.crowdcodeBase ?? DEFAULT_CROWDCODE_BASE).replace(/\/+$/, ""));
   return new EconomyGateway({
     session: options.session,
-    agentcash: new HostedAgentCashAdapter(directory, socket, fetcher),
+    agentcash: new HostedAgentCashAdapter(directory, socket, fetcher, options.reconcileDelayMs),
     crowdcode: new HostedCrowdCodeAdapter(directory, socket),
     approvalMode: "auto",
     hostedSpending: true,
