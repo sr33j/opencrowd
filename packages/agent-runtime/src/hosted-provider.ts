@@ -111,6 +111,15 @@ export interface HostedToolReply { ok: boolean; data?: unknown; error?: string; 
  * callers decide whether a lost reply is harmless (deploys) or ambiguous
  * (payments).
  */
+/** The runtime gave up waiting on the supervisor socket; the request may still be executing behind it. */
+export class HostedToolTimeout extends Error {
+  readonly code = "hosted_tool_timeout";
+  constructor(name: string, readonly timeoutMs: number) {
+    super(`Hosted tool ${name} timed out after ${Math.round(timeoutMs / 1000)}s`);
+    this.name = "HostedToolTimeout";
+  }
+}
+
 export async function postHostedTool(options: HostedBridgeOptions, name: string, args: Record<string, unknown>,
   settings: { signal?: AbortSignal; timeoutMs?: number } = {}): Promise<HostedToolReply> {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
@@ -133,7 +142,8 @@ export async function postHostedTool(options: HostedBridgeOptions, name: string,
         } catch (error) { reject(error); }
       });
     });
-    req.setTimeout(settings.timeoutMs ?? SERVICE_BRIDGE_TIMEOUT_MS, () => req.destroy(new Error("Hosted tool timed out")));
+    const timeoutMs = settings.timeoutMs ?? SERVICE_BRIDGE_TIMEOUT_MS;
+    req.setTimeout(timeoutMs, () => req.destroy(new HostedToolTimeout(name, timeoutMs)));
     req.on("error", reject); req.end(body);
   });
   if (typeof result?.ok !== "boolean") throw new Error("Invalid hosted tool response");

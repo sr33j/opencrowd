@@ -81,3 +81,25 @@ it("does not change a frozen paid request on resume, even if financial state cha
   });
   expect(result.summary.budget).toMatchObject({ current_run: { inference_spent_usdc: "0.000123" } });
 });
+
+it("stops after three consecutive paid-service failures but a success resets the streak", async () => {
+  const run = async (script: boolean[]) => {
+    let calls = 0;
+    return runAgentTaskDetailed(await session(), "buy things", {
+      hosted: true, runId, financialState: async () => state(), knowledge: false,
+      dynamicTools: { definitions: [{ name: "call_paid_service", description: "test", parameters: {} }],
+        execute: async (_name, args) => script[(args as { n: number }).n] ? { ok: true, data: { outcome: "paid_success" } } : { ok: false, error: `provider ${(args as { n: number }).n} failed` } },
+      provider: { complete: async () => {
+        const n = calls++;
+        return n < script.length
+          ? { content: "", toolCalls: [{ id: `call-${n}`, name: "call_paid_service", arguments: { n } }] }
+          : { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "Done" } }] };
+      } },
+    });
+  };
+  const recovered = await run([false, false, true, false, false]);
+  expect(recovered.outcome).toBe("completed");
+  const stopped = await run([false, false, false]);
+  expect(stopped.outcome).toBe("stopped");
+  expect(stopped.summary.final_message).toContain("Stopped after 3 service call failures");
+});

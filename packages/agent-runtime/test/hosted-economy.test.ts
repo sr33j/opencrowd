@@ -75,13 +75,13 @@ function fakeFetch(options: { endpointStatus?: number; header?: string; detailSt
 }
 
 /** A fake supervisor socket answering `POST /tool`. */
-async function bridge(handler: (name: string, args: Record<string, unknown>) => unknown) {
+async function bridge(handler: (name: string, args: Record<string, unknown>) => unknown | Promise<unknown>) {
   const socketPath = join(await root(), "bridge.sock");
   const requests: { name: string; arguments: Record<string, unknown>; runId: string; sessionId: string }[] = [];
   const server = createServer(async (req, res) => {
     const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = JSON.parse(Buffer.concat(chunks).toString()); requests.push(body);
-    res.end(JSON.stringify(handler(body.name, body.arguments)));
+    res.end(JSON.stringify(await handler(body.name, body.arguments)));
   });
   servers.push(server);
   await new Promise<void>(resolve => server.listen(socketPath, resolve));
@@ -90,9 +90,11 @@ async function bridge(handler: (name: string, args: Record<string, unknown>) => 
 
 async function economy(fetcher: typeof fetch, socketPath: string) {
   const session = await createSession({ workspaceRoot: await root(), sessionId: "session-1", budgetCents: 100, approvalMode: "auto" });
-  const gateway = createHostedEconomy({ socketPath, runId: "run-1", sessionId: "session-1", session, fetcher, crowdcodeBase: CROWDCODE });
+  const gateway = createHostedEconomy({ socketPath, runId: "run-1", sessionId: "session-1", session, fetcher, crowdcodeBase: CROWDCODE, reconcileDelayMs: 20 });
   return { session, gateway };
 }
+const SETTLED = { ok: true, data: { outcome: "paid_success", status: 200, body: JSON.stringify({ image: "generated" }), content_type: "application/json",
+  amount_atomic: "10000", transaction: "0xtx", network: "eip155:8453", payer: "0xagent", pay_to: "0xpayee", attempt_id: "att_slow" } };
 
 describe("hosted economy: discovery and inspection", () => {
   it("uses authenticated AgentCash search and verifies Base endpoints", async () => {
@@ -199,6 +201,47 @@ describe("hosted economy: payment over the bridge", () => {
     await dead.gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const lost = await dead.gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
     expect(lost.ok).toBe(false); expect(lost.error).toMatch(/failed in transport/);
+  });
+
+  it("recovers a slow paid result by replaying the same purchase after the socket wait expires", async () => {
+    const { fetcher } = fakeFetch();
+    let pays = 0;
+    const { socketPath, requests } = await bridge(async (name) => {
+      if (name !== "economy.pay") return { ok: true, data: {} };
+      // The first attempt outlives the runtime's wait; the gateway finishes it anyway and replays it on the second post.
+      if (++pays === 1) await new Promise(resolve => setTimeout(resolve, 400));
+      return SETTLED;
+    });
+    const { gateway } = await economy(fetcher, socketPath);
+    const adapter = (gateway as any).options.agentcash as HostedAgentCashAdapter;
+    const result = await adapter.fetch({ url: SEARCH, method: "POST", body: { query: "muse" }, maxAmountUsd: 0.01, rail: "x402-base", operationId: "op-slow", timeoutMs: 100 });
+    expect(result).toMatchObject({ ok: true, ambiguous: false, status: 200, data: { image: "generated" }, payment: { reference: "0xtx" } });
+    const posted = requests.filter(r => r.name === "economy.pay");
+    expect(posted).toHaveLength(2);
+    // Identical purchase identity on both posts: the gateway replays instead of paying twice.
+    expect(posted[1].arguments).toEqual(posted[0].arguments);
+  });
+
+  it("reports a still-unfinished purchase as a timeout with unknown payment state after one reconcile", async () => {
+    const { fetcher } = fakeFetch();
+    let pays = 0;
+    const { socketPath, requests } = await bridge(async (name) => {
+      if (name !== "economy.pay") return { ok: true, data: {} };
+      if (++pays === 1) await new Promise(resolve => setTimeout(resolve, 400));
+      return { ok: false, error: "Payment status is uncertain; do not retry this purchase", code: "payment_unknown" };
+    });
+    const { gateway } = await economy(fetcher, socketPath);
+    const adapter = (gateway as any).options.agentcash as HostedAgentCashAdapter;
+    const direct = await adapter.fetch({ url: SEARCH, method: "POST", maxAmountUsd: 0.01, rail: "x402-base", operationId: "op-hang", timeoutMs: 100 });
+    expect(direct).toMatchObject({ ok: false, ambiguous: true, ambiguityReason: "timeout", error: expect.stringContaining("did not answer within") });
+    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(2);
+    // The timeout is also named when even the reconcile cannot answer.
+    const silent = await bridge(async (name) => { if (name === "economy.pay") await new Promise(resolve => setTimeout(resolve, 400)); return SETTLED; });
+    const slow = (await economy(fetcher, silent.socketPath)).gateway;
+    const slowAdapter = (slow as any).options.agentcash as HostedAgentCashAdapter;
+    const timedOut = await slowAdapter.fetch({ url: SEARCH, method: "POST", maxAmountUsd: 0.01, rail: "x402-base", operationId: "op-silent", timeoutMs: 100 });
+    expect(timedOut).toMatchObject({ ok: false, ambiguous: true, ambiguityReason: "timeout", error: expect.stringContaining("did not answer within") });
+    expect(silent.requests.filter(r => r.name === "economy.pay")).toHaveLength(2);
   });
 
   it("submits an unpaid failure through the shared review tool and hosted signer", async () => {

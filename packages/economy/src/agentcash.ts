@@ -31,7 +31,7 @@ export interface PaidFetchResult {
   /** The payment state cannot be verified, so the call must not be retried. */
   ambiguous: boolean;
   /** Why the payment state is ambiguous. */
-  ambiguityReason?: "transport" | "missing_receipt" | "unsupported_receipt";
+  ambiguityReason?: "transport" | "timeout" | "missing_receipt" | "unsupported_receipt";
   status?: number;
   /** Model-visible response body. */
   data: unknown;
