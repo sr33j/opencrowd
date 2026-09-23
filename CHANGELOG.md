@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.1 — 2026-09-23
+
+- Preserve prepared answers through completion reflection and checkpoint restarts. Successful service requests satisfy reflection without an extra model call; empty responses without an answer fail explicitly instead of displaying “Session completed.”
+- Keep reflection follow-ups valid, allow corrected completion calls, and invalidate saved answers when the user changes the task.
+- Give hosted agents authoritative wallet balances and current-query spending, including model costs and payment holds, with instructions to carry authorized business tasks through to concrete results.
+- Wait the full supervisor window on hosted paid calls instead of two minutes, so slow services such as image generation are no longer abandoned while the gateway is still paying for them. After a lost socket the identical purchase is re-posted once; the gateway replays a finished attempt by purchase ID, and anything still in flight is reported as a named timeout with unknown payment state.
+- Reset the consecutive paid-service failure counter on a successful purchase, so three unrelated failures across a long run no longer stop it.
+
 ## 0.6.0 — 2026-09-20
 
 - Add CrowdCode on/off controls with session and persistent defaults, plus listing and selective deletion of the agent's own reviews. Hosted settings survive worker restarts; disabling CrowdCode leaves spending limits unchanged.
@@ -16,11 +24,6 @@
 ## 0.5.3 — 2026-09-18
 
 - Pin the default CrowdCode MCP client to 0.5.2, migrate the previously shipped floating default, and prevent older globally installed binaries from silently overriding the configured CrowdCode version. Explicit custom commands and pins are preserved.
-
-## Unreleased
-
-- Wait the full supervisor window on hosted paid calls instead of two minutes, so slow services such as image generation are no longer abandoned while the gateway is still paying for them. After a lost socket the identical purchase is re-posted once; the gateway replays a finished attempt by purchase ID, and anything still in flight is reported as a named timeout with unknown payment state.
-- Reset the consecutive paid-service failure counter on a successful purchase, so three unrelated failures across a long run no longer stop it.
 
 ## 0.5.2 — 2026-09-18
 
