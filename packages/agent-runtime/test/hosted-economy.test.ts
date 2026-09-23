@@ -363,6 +363,27 @@ describe("hosted economy: worker wiring", () => {
   });
 });
 
+it.each([true, false])("publishes the prepared answer with prior service request=%s", async requestFirst => {
+  const events: Event[] = [];
+  const { fetcher } = fakeFetch();
+  const { socketPath } = await bridge(() => ({ ok: true, data: { accepted: true } }));
+  const answer = "Target neural decoding roles and build a streaming BCI benchmark.";
+  const done = { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: answer } }] };
+  // Without an earlier request, complete_session is followed by reflection and an empty reply.
+  const responses = requestFirst
+    ? [{ content: "", toolCalls: [{ id: "request", name: "request_service", arguments: { service_description: "Authoritative career matching with current official openings" } }] }, done]
+    : [done, { content: "", toolCalls: [] }];
+  const provider = { complete: vi.fn(async () => responses.shift() ?? { content: "", toolCalls: [] }) };
+  const worker = new MachineWorker({ agentHome: await root(), output: line => { events.push(JSON.parse(line)); }, provider: () => provider,
+    economy: (run, session) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
+  await worker.initialize();
+  await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "start", runId: "run-1", seq: 1, emittedAt: "2026-09-21T00:33:00Z", type: "run.start",
+    payload: { session: { kind: "create", sessionId: "session" }, prompt: "Which role should I target?", modelPolicy: {}, budget: { limit: "1000000" }, approvalMode: "auto" } }));
+  await worker.drain();
+  expect(events.find(e => e.type === "run.finished")?.payload).toMatchObject({ outcome: "completed", summary: answer });
+  expect(provider.complete).toHaveBeenCalledTimes(2);
+});
+
 describe("hosted economy: review gate", () => {
   it("uses durable per-purchase review decisions even across wrappers and subsequent purchases", async () => {
     let pending = true, attempts = 0;

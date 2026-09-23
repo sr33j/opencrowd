@@ -313,7 +313,7 @@ export class MachineWorker {
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
-          completionGate: () => dynamicTools!.completionGate(),
+          completionGate: alreadyNudged => dynamicTools!.completionGate(alreadyNudged),
           knowledge: await this.knowledgeOption(session)
         } : {}),
         onCheckpoint: async (checkpoint) => {

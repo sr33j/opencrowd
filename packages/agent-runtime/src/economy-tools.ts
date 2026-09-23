@@ -3,7 +3,7 @@ import type { DynamicToolsOption } from "./index.js";
 
 export { MAX_REVIEW_ATTEMPTS } from "@opencrowd/economy";
 export interface EconomyTools extends DynamicToolsOption {
-  completionGate(): Promise<string | undefined>;
+  completionGate(alreadyNudged?: boolean): Promise<string | undefined>;
 }
 /** A registry outage or rejected identity must not hold the user's result
  * hostage. Keep the immutable receipt and pending review for later retry. */
@@ -14,12 +14,14 @@ export function economyTools(economy: Pick<EconomyGateway, "definitions" | "exec
     definitions: economy.definitions().filter(tool => !options.hidden?.has(tool.name)),
     execute: async (name, args, operationId) => {
       if (options.resuming && name === "call_paid_service") await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
-      return economy.execute(name, args, operationId);
+      const result = await economy.execute(name, args, operationId);
+      if (name === "request_service" && result.ok) reflected = true;
+      return result;
     },
-    completionGate: async () => {
+    completionGate: async (alreadyNudged = false) => {
       const pending = await economy.hasPendingRequiredReviews();
       const review = pending ? "A paid purchase still needs its required review; submit it with review_paid_service." : "";
-      if (reflected || !supportsReflection) return review || undefined;
+      if (reflected || alreadyNudged || !supportsReflection) return review || undefined;
       reflected = true;
       const status = await economy.execute("crowdcode_status", {});
       if (!status.ok || !(status.data as { enabled?: boolean })?.enabled) return review || undefined;

@@ -645,6 +645,8 @@ export interface LoopCheckpoint {
   response?: LlmResponse;
   completedTools: Record<string, ToolResult>;
   completionNudges: number;
+  /** Last complete answer held while a completion gate asks for follow-up. */
+  pendingFinalMessage?: string;
   outputContinuationNudges: number;
   outputContinuationPrefix: string;
   serviceCallFailures: number;
@@ -708,8 +710,9 @@ export interface AgentRunOptions {
    * Session-completion gate: returns a blocking reason (e.g. a pending
    * required review) or undefined. The loop refuses to complete while it
    * blocks, nudging the model once before stopping deterministically.
+   * alreadyNudged survives checkpoint replay so optional reflection is not repeated.
    */
-  completionGate?: () => Promise<string | undefined>;
+  completionGate?: (alreadyNudged?: boolean) => Promise<string | undefined>;
 }
 
 export interface SubagentOptions {
@@ -850,13 +853,14 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   const maxTurns = options.maxTurns ?? 100;
   const repeatedFailures = new Map<string, number>(options.resume?.repeatedFailures);
   let completionNudges = options.resume?.completionNudges ?? 0;
+  let pendingFinalMessage = options.resume?.pendingFinalMessage;
   let outputContinuationNudges = options.resume?.outputContinuationNudges ?? 0;
   let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
   let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
   const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
     await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState, deliveredMessageIds: [...deliveredMessageIds],
-      completionNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
+      completionNudges, pendingFinalMessage, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
       repeatedFailures: [...repeatedFailures.entries()] }));
   };
   const injectMessages = async (turn: number) => {
@@ -866,7 +870,12 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       messages.push({ role: "user", content: message.prompt });
       deliveredMessageIds.add(message.id);
     }
-    if (fresh.length) await checkpoint(turn);
+    if (fresh.length) {
+      // A saved answer predates this user instruction and cannot answer it.
+      pendingFinalMessage = undefined;
+      outputContinuationPrefix = "";
+      await checkpoint(turn);
+    }
     for (const message of fresh) await options.onMessage?.({ role: "user", content: message.prompt });
     if (pending.length) await options.inbox?.delivered(pending.map(m => m.id));
     return fresh.length > 0;
@@ -954,7 +963,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     }
     if (response.toolCalls.length === 0) {
       if (await injectMessages(turn + 1)) continue;
-      const blocker = await options.completionGate?.();
+      const finalMessage = response.content.trim()
+        ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
+      if (finalMessage.trim()) pendingFinalMessage = finalMessage;
+      const blocker = await options.completionGate?.(completionNudges > 0);
       if (blocker) {
         if (completionNudges >= 1) {
           const summary = await completeSession(session, `Stopped: ${blocker}`);
@@ -964,9 +976,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         const nudge: LlmMessage = { role: "user", content: `You cannot finish yet: ${blocker}` };
         messages.push(nudge);
         await options.onMessage?.(nudge);
+        await checkpoint(turn + 1);
         continue;
       }
-      const summary = await completeSession(session, outputContinuationPrefix + (response.content || "Session completed."));
+      if (!pendingFinalMessage?.trim()) throw new Error("The model ended without an answer.");
+      const summary = await completeSession(session, pendingFinalMessage);
       return { outcome: "completed", summary, turns: turn + 1 };
     }
     // Launch every spawn_subagent in this reply immediately (bounded
@@ -1106,38 +1120,44 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const call = completionCall;
       const result = completedTools[call.id];
       if (await injectMessages(turn + 1)) continue;
-        const blocker = await options.completionGate?.();
-        if (blocker) {
-          if (completionNudges >= 1) {
-            const summary = await completeSession(session, `Stopped: ${blocker}`);
-            return { outcome: "stopped", summary, turns: turn + 1 };
-          }
-          completionNudges += 1;
-          const gateMessage = {
-            role: "tool",
-            toolCallId: call.id,
-            content: JSON.stringify({ result: { ok: false, error: `cannot complete yet: ${blocker}` } })
-          } as LlmMessage;
-          messages.push(gateMessage);
-          await options.onMessage?.(gateMessage);
-          continue;
+      // A malformed completion remains a tool error for the model to correct.
+      if (!result.ok) continue;
+      const finalMessage = result.data && typeof result.data === "object"
+        ? (result.data as Record<string, unknown>).final_message : undefined;
+      if (typeof finalMessage === "string" && finalMessage.trim()) pendingFinalMessage = finalMessage;
+      const blocker = await options.completionGate?.(completionNudges > 0);
+      if (blocker) {
+        if (completionNudges >= 1) {
+          const summary = await completeSession(session, `Stopped: ${blocker}`);
+          return { outcome: "stopped", summary, turns: turn + 1 };
         }
-        const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
-        if (result.ok && result.data && typeof result.data === "object") {
-          const summary = { ...result.data } as Record<string, unknown>;
-          if (backgroundResults) {
-            summary.background_subagents = backgroundResults;
-          }
-          return { outcome: "completed", summary, turns: turn + 1 };
-        }
-        const summary = await completeSession(
-          session,
-          outputContinuationPrefix + (response.content || result.error || "Session completed.")
-        );
+        completionNudges += 1;
+        const gateMessage = {
+          role: "user",
+          content: `You cannot finish yet: ${blocker}`
+        } as LlmMessage;
+        messages.push(gateMessage);
+        await options.onMessage?.(gateMessage);
+        await checkpoint(turn + 1);
+        continue;
+      }
+      if (!pendingFinalMessage?.trim()) throw new Error("The model ended without an answer.");
+      const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
+      if (result.data && typeof result.data === "object") {
+        const summary = { ...result.data, final_message: pendingFinalMessage } as Record<string, unknown>;
         if (backgroundResults) {
           summary.background_subagents = backgroundResults;
         }
         return { outcome: "completed", summary, turns: turn + 1 };
+      }
+      const summary = await completeSession(
+        session,
+        pendingFinalMessage
+      );
+      if (backgroundResults) {
+        summary.background_subagents = backgroundResults;
+      }
+      return { outcome: "completed", summary, turns: turn + 1 };
     }
   }
   if (backgroundSubagents.size > 0) {
