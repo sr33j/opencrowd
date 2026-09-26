@@ -18,7 +18,7 @@ const secretArgs = { name: "FAKE_KEY", allowed_hosts: ["api.example.com"], reaso
 
 describe("hosted-only tools", () => {
   it("is defined once and never advertised or executable in local runs", async () => {
-    expect(HOSTED_ONLY_TOOL_NAMES).toEqual(["deploy_service", "request_secret"]);
+    expect(HOSTED_ONLY_TOOL_NAMES).toEqual(["deploy_service", "request_secret", "automations"]);
     expect(TOOL_NAMES).toContain("deploy_service"); expect(TOOL_NAMES).toContain("request_secret");
     expect(OPEN_CROWD_TOOLS.find(t => t.name === "deploy_service")?.parameters.required).toContain("entry");
     expect(OPEN_CROWD_TOOLS.find(t => t.name === "request_secret")?.parameters).toMatchObject({ required: ["name", "allowed_hosts", "reason"],

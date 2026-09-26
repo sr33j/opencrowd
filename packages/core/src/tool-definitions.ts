@@ -12,7 +12,8 @@ export type ToolName =
   | "check_subagents"
   | "complete_session"
   | "deploy_service"
-  | "request_secret";
+  | "request_secret"
+  | "automations";
 
 export const TOOL_NAMES: ToolName[] = [
   "get_budget_status",
@@ -24,14 +25,15 @@ export const TOOL_NAMES: ToolName[] = [
   "check_subagents",
   "complete_session",
   "deploy_service",
-  "request_secret"
+  "request_secret",
+  "automations"
 ];
 
 /**
  * Tools that only exist when a supervisor executes them on the agent's behalf.
  * Local runs never advertise them; the hosted worker routes them over the bridge.
  */
-export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "request_secret"];
+export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "request_secret", "automations"];
 
 /** Tools a spawned subagent may use: local capabilities only, one level deep. */
 export const SUBAGENT_TOOL_NAMES: ToolName[] = [
@@ -95,6 +97,8 @@ function toolDescription(name: ToolName): string {
       return "Deploy a paid HTTP service you wrote to OpenCrowd's hosting. The entry file must be a JavaScript or TypeScript ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay the listed USDC price per call with x402; payments settle to this agent's own wallet. Vault secrets listed in `secrets` are exposed to the service as env vars (env.NAME) but contain opaque placeholders: the real value is substituted at the network boundary only for requests to `allowed_hosts`, so never print or return a secret. Redeploying the same slug updates the service in place. Returns the public URL and listing status.";
     case "request_secret":
       return "Ask the user to add a named secret (an API key or token) to this agent's encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into the chat and never expect to see the value yourself. Returns { status: \"requested\" | \"active\", placeholder? }: \"active\" means the secret already exists and can be used now, \"requested\" means the user has been asked and you should continue or finish without it. Reference the secret by name: list it in deploy_service `secrets` and read it in service code as env.NAME; the real value is substituted only on requests to `allowed_hosts`.";
+    case "automations":
+      return "Create, list, update, pause, resume, run now, or delete persistent automations for this hosted agent. Use create proactively when the user's goal clearly needs a future follow-up, reminder, monitoring loop, recurring report, or maintenance task. Automations run in this same conversation. Never create duplicates or hide a schedule from the user.";
   }
 }
 
@@ -160,6 +164,8 @@ function toolParameters(name: ToolName): JsonSchema {
         allowed_hosts: { type: "array", description: "Hostnames the secret may be sent to, for example api.openai.com. The vault only substitutes the real value on requests to these hosts.", items: stringSchema("Hostname.") },
         reason: stringSchema("One short sentence shown to the user explaining why the secret is needed.")
       }, ["name", "allowed_hosts", "reason"]);
+    case "automations":
+      return automationSchema({ action: { type: "string", description: "create, list, update, pause, resume, run, or delete." }, automation_id: stringSchema("Automation ID, except for create and list.") }, ["action"]);
   }
 }
 
@@ -184,6 +190,8 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ slug: text(args.slug), name: text(args.name), price_usd: text(args.price_usd) });
     case "request_secret":
       return pick({ name: text(args.name), allowed_hosts: hosts(args.allowed_hosts) });
+    case "automations":
+      return pick({ action: text(args.action), automation_id: text(args.automation_id), name: text(args.name), prompt: text(args.prompt, 120) });
     case "complete_session":
       return pick({ summary: text(args.final_message ?? args.summary ?? args.message) });
     case "find_paid_service":
@@ -197,6 +205,19 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
     default:
       return undefined;
   }
+}
+
+function automationSchema(extra: Record<string, JsonSchema>, required: string[] = []): JsonSchema {
+  return objectSchema({
+    ...extra,
+    name: stringSchema("Short human-readable schedule name."),
+    prompt: stringSchema("Prompt to run in this same conversation."),
+    kind: { type: "string", description: "at for one time, cron for a five-field cron schedule." },
+    atTime: stringSchema("ISO 8601 timestamp for a one-time schedule."),
+    cronExpression: stringSchema("Five-field cron expression, for example 50 19 * * 3."),
+    timezone: stringSchema("IANA timezone, for example America/Los_Angeles."),
+    model: stringSchema("Optional model ID."),
+  }, required);
 }
 
 function objectSchema(properties: Record<string, JsonSchema>, required: string[] = []): JsonSchema {

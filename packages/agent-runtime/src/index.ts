@@ -198,6 +198,8 @@ export function createMockToolExecutor(): ToolExecutor {
           return { ok: false, error: "deploy_service is unavailable in mock mode" };
         case "request_secret":
           return { ok: false, error: "request_secret is unavailable in mock mode" };
+        case "automations":
+          return { ok: false, error: `${name} is unavailable in mock mode` };
       }
     } catch (error) {
       return { ok: false, error: (error as Error).message };
@@ -235,6 +237,8 @@ function mockToolArguments(
       return { slug: "mock-service", name: "Mock service", description: task.slice(0, 120), price_usd: "0.001", entry: "service/index.js", routes: [] };
     case "request_secret":
       return { name: "MOCK_API_KEY", allowed_hosts: ["api.example.com"], reason: `Mock secret for: ${task.slice(0, 80)}` };
+    case "automations":
+      return { action: "list" };
   }
 }
 
@@ -752,7 +756,7 @@ export async function runAgentTask(session: SessionState, task: string, options:
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools = options.tools
-    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents"].includes(name))
+    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status"].includes(name))
       : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));
   const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
   const model = options.llm?.catalog?.find((m) => m.id === options.llm?.model);
@@ -790,6 +794,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   ];
   if (options.hosted) systemPromptParts.push(
     "You operate this service for its owner. Inference and paid tools debit its USDC wallet. When authorized to build or sell a service, take concrete steps within the owner's configured scope and budget. Ask only for missing information or permissions that materially block progress. Report actual costs and outcomes. Financial sustainability is the owner's business objective; respect their stop controls.",
+    "You are a continuous autonomous agent, not a turn-based assistant. Maintain unfinished goals, promised follow-ups, recurring work, and conditions worth monitoring. When future work would clearly help, proactively create a persistent automation instead of waiting for the owner to say schedule. Use a one-time automation for a future reminder or follow-up and a cron automation for monitoring, recurring reports, or maintenance. It runs in this same conversation. Never create duplicates or noisy schedules, and always tell the owner exactly what you created, its timezone, and next run.",
+    "Before finishing a substantive task, consider whether a follow-up, reminder, monitoring loop, recurring report, or maintenance check would materially advance the owner's goal; create one when the need is clear, but do not schedule ordinary one-off work.",
     "Financial state: the current hosted financial snapshot is authoritative; historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for refreshed financial state. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
   );
   if (options.dynamicTools) {
