@@ -21,8 +21,8 @@ describe("hosted-only tools", () => {
     expect(HOSTED_ONLY_TOOL_NAMES).toEqual(["deploy_service", "request_secret", "automations"]);
     expect(TOOL_NAMES).toContain("deploy_service"); expect(TOOL_NAMES).toContain("request_secret");
     expect(OPEN_CROWD_TOOLS.find(t => t.name === "deploy_service")?.parameters.required).toContain("entry");
-    expect(OPEN_CROWD_TOOLS.find(t => t.name === "request_secret")?.parameters).toMatchObject({ required: ["name", "allowed_hosts", "reason"],
-      properties: { name: { pattern: "^[A-Z][A-Z0-9_]{1,63}$" }, allowed_hosts: { type: "array" } } });
+    expect(OPEN_CROWD_TOOLS.find(t => t.name === "request_secret")?.parameters).toMatchObject({ required: [],
+      properties: { action: { type: "string" }, name: { pattern: "^[A-Z][A-Z0-9_]{1,63}$" }, allowed_hosts: { type: "array" } } });
     const session = await createSession({ workspaceRoot: await root(), budgetCents: 100, approvalMode: "off" });
     const local = await executeTool("deploy_service", deployArgs, { session });
     expect(local.ok).toBe(false); expect(local.error).toMatch(/hosted/);

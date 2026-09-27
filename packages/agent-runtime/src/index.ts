@@ -826,7 +826,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   }
   if (hostedTools.includes("request_secret")) {
     systemPromptParts.push(
-      "Secrets: when a service needs an API key or token, call request_secret with a SCREAMING_SNAKE_CASE name, the hosts it may be sent to, and a one-sentence reason. The user adds the value in their own UI; never ask them to paste a secret into the chat and never expect to see it. If the result is \"active\", list the name in deploy_service `secrets` and read it as env.NAME; if it is \"requested\", tell the user what to add and continue or finish without it."
+      "Secrets: call request_secret with action=list whenever you need to inspect this agent's available vault secret titles and statuses; values are never returned. When a service needs a new key or token, call it with action=create, a SCREAMING_SNAKE_CASE name, the hosts it may be sent to, and a one-sentence reason. The user adds the value in their own UI; never ask them to paste a secret into chat and never expect to see it. If a requested secret is active, list its name in deploy_service `secrets` and read it as env.NAME; if requested, tell the user what to add and continue or finish without it."
     );
   }
   systemPromptParts.push("End by calling complete_session with a concise final message.");
