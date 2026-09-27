@@ -13,6 +13,7 @@ export type ToolName =
   | "complete_session"
   | "deploy_service"
   | "request_secret"
+  | "vault_request"
   | "automations";
 
 export const TOOL_NAMES: ToolName[] = [
@@ -26,6 +27,7 @@ export const TOOL_NAMES: ToolName[] = [
   "complete_session",
   "deploy_service",
   "request_secret",
+  "vault_request",
   "automations"
 ];
 
@@ -33,7 +35,7 @@ export const TOOL_NAMES: ToolName[] = [
  * Tools that only exist when a supervisor executes them on the agent's behalf.
  * Local runs never advertise them; the hosted worker routes them over the bridge.
  */
-export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "request_secret", "automations"];
+export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "request_secret", "vault_request", "automations"];
 
 /** Tools a spawned subagent may use: local capabilities only, one level deep. */
 export const SUBAGENT_TOOL_NAMES: ToolName[] = [
@@ -97,6 +99,8 @@ function toolDescription(name: ToolName): string {
       return "Deploy a paid HTTP service you wrote to OpenCrowd's hosting. The entry file must be a JavaScript or TypeScript ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay the listed USDC price per call with x402; payments settle to this agent's own wallet. Vault secrets listed in `secrets` are exposed to the service as env vars (env.NAME) but contain opaque placeholders: the real value is substituted at the network boundary only for requests to `allowed_hosts`, so never print or return a secret. Redeploying the same slug updates the service in place. Returns the public URL and listing status.";
     case "request_secret":
       return "Use action=list first when you need to see this agent's vault secret titles and statuses (values are never exposed). Use action=create to ask the user to add a named API key or token to the encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into chat. For create, provide name, allowed_hosts, and reason. Reference an active secret by name in deploy_service `secrets` and read it in service code as env.NAME; the real value is substituted only on requests to allowed_hosts.";
+    case "vault_request":
+      return "Send one HTTPS request to an external API with vault secrets injected by the platform. Write {{SECRET_NAME}} anywhere in the url, headers, or body and the real value is substituted at the network boundary, only for hosts the user approved for that secret; you never see the value and the response is blocked if it echoes one. Use it to call APIs on the user's behalf (for example posting to X with an OAuth token). The body must be a string (JSON, form encoding, or text); binary uploads are not supported. Returns the status, content-type, and the response body text (truncated at 64 KB). Check request_secret action=list for available secret names first.";
     case "automations":
       return "Create, list, update, pause, resume, run now, or delete persistent automations for this hosted agent. Use create proactively when the user's goal clearly needs a future follow-up, reminder, monitoring loop, recurring report, or maintenance task. Automations run in this same conversation. Never create duplicates or hide a schedule from the user.";
   }
@@ -165,6 +169,14 @@ function toolParameters(name: ToolName): JsonSchema {
         allowed_hosts: { type: "array", description: "Hostnames the secret may be sent to, for example api.openai.com. The vault only substitutes the real value on requests to these hosts.", items: stringSchema("Hostname.") },
         reason: stringSchema("One short sentence shown to the user explaining why the secret is needed.")
       }, []);
+    case "vault_request":
+      return objectSchema({
+        url: stringSchema("Full https:// URL. May contain {{SECRET_NAME}} placeholders; substituted values are URL-encoded."),
+        method: { type: "string", description: "GET, POST, PUT, PATCH, or DELETE. Default GET." },
+        headers: { type: "object", description: "Request headers, for example { \"authorization\": \"Bearer {{X_ACCESS_TOKEN}}\", \"content-type\": \"application/json\" }.", additionalProperties: { type: "string" } },
+        body: stringSchema("Request body as a string (JSON, form encoding or text). Omit for GET."),
+        reason: stringSchema("One short sentence shown to the user describing what this request does.")
+      }, ["url"]);
     case "automations":
       return automationSchema({ action: { type: "string", description: "create, list, update, pause, resume, run, or delete." }, automation_id: stringSchema("Automation ID, except for create and list.") }, ["action"]);
   }
@@ -191,6 +203,8 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ slug: text(args.slug), name: text(args.name), price_usd: text(args.price_usd) });
     case "request_secret":
       return pick({ action: text(args.action), name: text(args.name), allowed_hosts: hosts(args.allowed_hosts) });
+    case "vault_request":
+      return pick({ method: text(args.method ?? "GET", 10), url: text(args.url), reason: text(args.reason, 120) });
     case "automations":
       return pick({ action: text(args.action), automation_id: text(args.automation_id), name: text(args.name), prompt: text(args.prompt, 120) });
     case "complete_session":

@@ -197,7 +197,8 @@ export function createMockToolExecutor(): ToolExecutor {
         case "deploy_service":
           return { ok: false, error: "deploy_service is unavailable in mock mode" };
         case "request_secret":
-          return { ok: false, error: "request_secret is unavailable in mock mode" };
+        case "vault_request":
+          return { ok: false, error: `${name} is unavailable in mock mode` };
         case "automations":
           return { ok: false, error: `${name} is unavailable in mock mode` };
       }
@@ -237,6 +238,8 @@ function mockToolArguments(
       return { slug: "mock-service", name: "Mock service", description: task.slice(0, 120), price_usd: "0.001", entry: "service/index.js", routes: [] };
     case "request_secret":
       return { name: "MOCK_API_KEY", allowed_hosts: ["api.example.com"], reason: `Mock secret for: ${task.slice(0, 80)}` };
+    case "vault_request":
+      return { url: "https://api.example.com/mock", method: "GET", reason: `Mock request for: ${task.slice(0, 80)}` };
     case "automations":
       return { action: "list" };
   }
@@ -827,6 +830,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   if (hostedTools.includes("request_secret")) {
     systemPromptParts.push(
       "Secrets: call request_secret with action=list whenever you need to inspect this agent's available vault secret titles and statuses; values are never returned. When a service needs a new key or token, call it with action=create, a SCREAMING_SNAKE_CASE name, the hosts it may be sent to, and a one-sentence reason. The user adds the value in their own UI; never ask them to paste a secret into chat and never expect to see it. If a requested secret is active, list its name in deploy_service `secrets` and read it as env.NAME; if requested, tell the user what to add and continue or finish without it."
+    );
+  }
+  if (hostedTools.includes("vault_request")) {
+    systemPromptParts.push(
+      "Using secrets from chat: call vault_request to send one HTTPS request with a vault secret injected, writing {{SECRET_NAME}} where the value belongs (for example an authorization header). The platform substitutes the real value only for hosts the user approved for that secret, refreshes OAuth tokens automatically, and never returns the value to you. If it reports that a host needs approval, tell the user to allow it in the Vault tab and stop; do not look for paid third-party services to do what an approved secret already lets you do. Bodies are strings, so this cannot upload binary files such as video."
     );
   }
   systemPromptParts.push("End by calling complete_session with a concise final message.");

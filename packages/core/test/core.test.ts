@@ -327,6 +327,8 @@ describe("tool input summaries", () => {
       .toEqual({ slug: "svc", name: "Svc", price_usd: "0.001" });
     expect(summarizeToolInput("request_secret", { name: "KEY", allowed_hosts: ["api.example.com", 42], reason: "why" }))
       .toEqual({ name: "KEY", allowed_hosts: ["api.example.com"] });
+    expect(summarizeToolInput("vault_request", { url: "https://api.x.com/2/tweets", method: "POST", headers: { authorization: "Bearer {{X}}" }, body: "{\"text\":\"hi\"}", reason: "post" }))
+      .toEqual({ method: "POST", url: "https://api.x.com/2/tweets", reason: "post" });
     expect(summarizeToolInput("complete_session", { final_message: "y".repeat(300) })).toEqual({ summary: "y".repeat(200) });
     expect(summarizeToolInput("complete_session", {})).toEqual({});
     expect(summarizeToolInput("get_budget_status", {})).toBeUndefined();
