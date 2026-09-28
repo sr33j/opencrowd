@@ -123,7 +123,7 @@ function toolParameters(name: ToolName): JsonSchema {
     case "run_shell":
       return objectSchema({
         command: stringSchema("Shell command."),
-        cwd: stringSchema("Working directory inside the workspace."),
+        cwd: stringSchema("Working directory inside the workspace. Use artifacts/<dir> to run where save_file writes (cd inside the command does not reach it)."),
         timeout_ms: integerSchema("Timeout in milliseconds (default 10000, maximum 300000).")
       }, ["command"]);
     case "spawn_subagent":
