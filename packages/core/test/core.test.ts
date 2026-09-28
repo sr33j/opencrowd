@@ -202,7 +202,7 @@ describe("shell policy", () => {
 
     const enabled = await createSession({ workspaceRoot: root, shellEnabled: true });
     await expect(runShell(enabled, "echo hi", "/", 1000)).rejects.toThrow("workspace");
-    await expect(runShell(enabled, "echo hi", root, 60_000)).rejects.toThrow("timeout_ms");
+    await expect(runShell(enabled, "echo hi", root, 600_000)).rejects.toThrow("timeout_ms");
   });
 
   it("clamps run_shell timeout_ms into the allowed range instead of failing the call", async () => {
