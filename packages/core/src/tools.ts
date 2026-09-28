@@ -113,7 +113,8 @@ function optionalString(value: unknown, label: string): string | undefined {
 }
 
 const DEFAULT_SHELL_TIMEOUT_MS = 10_000;
-const MAX_SHELL_TIMEOUT_MS = 30_000;
+// Long enough for a video render or a large download; the runtime keeps heartbeating meanwhile.
+const MAX_SHELL_TIMEOUT_MS = 300_000;
 
 /** Models routinely ask for longer timeouts than the shell allows; clamp instead of failing the call. */
 function shellTimeoutMs(value: unknown): number {

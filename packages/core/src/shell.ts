@@ -30,7 +30,7 @@ export async function runShell(
     throw new Error("shell tool is disabled for this session");
   }
   options.signal?.throwIfAborted();
-  const maxTimeout = options.maxTimeoutMs ?? 30_000;
+  const maxTimeout = options.maxTimeoutMs ?? 300_000;
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout) {
     throw new Error(`timeout_ms must be between 1 and ${maxTimeout}`);
   }
