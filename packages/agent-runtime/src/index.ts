@@ -837,6 +837,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       "Using secrets from chat: call vault_request to send one HTTPS request with a vault secret injected, writing {{SECRET_NAME}} where the value belongs (for example an authorization header). The platform substitutes the real value only for hosts the user approved for that secret, refreshes OAuth tokens automatically, and never returns the value to you. If it reports that a host needs approval, tell the user to allow it in the Vault tab and stop; never look for paid third-party services to do what an approved secret already lets you do. To upload a file (an image or video you rendered with run_shell, where ffmpeg is installed), pass body_artifact with its path under artifacts/ and, for multipart APIs, body_field plus form_fields; files over an API's chunk limit can be split with run_shell first."
     );
   }
+  if (options.hosted && hostedTools.includes("run_shell")) {
+    systemPromptParts.push(
+      "Tooling: ffmpeg, python3 with pip and venv, node and npm are installed; the system image is read-only, but `pip install --user <package>` and `npm install` persist on this machine's volume between runs, so install once and reuse."
+    );
+  }
   systemPromptParts.push("End by calling complete_session with a concise final message.");
   if (options.subagent) {
     systemPromptParts.push(
