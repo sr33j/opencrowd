@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { encodeFunctionData } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { requireAgentCashWallet } from "@opencrowd/core";
 import type { PaidFetchRequest, PaidFetchResult, PaymentEvidence } from "./agentcash.js";
@@ -38,7 +39,13 @@ export interface MonadX402PayerOptions {
   privateKey?: `0x${string}`;
   /** Test hook: seconds since epoch. */
   now?: () => number;
+  /** Monad RPC for the on-chain authorization check (default monadRpcUrl()). */
+  rpcUrl?: string;
+  /** Wait before reading authorizationState so an in-flight settlement can land (default 2000ms). */
+  authorizationCheckDelayMs?: number;
 }
+
+type Authorization = { from: `0x${string}`; to: `0x${string}`; value: string; validAfter: string; validBefore: string; nonce: `0x${string}` };
 
 interface MonadOffer {
   scheme: "exact";
@@ -69,16 +76,11 @@ export class MonadX402Payer {
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
     const fetcher = this.options.fetchImpl ?? fetch;
     const timeoutMs = request.timeoutMs ?? 300_000;
-    const send = (extraHeaders: Record<string, string> = {}) => fetcher(request.url, {
-      method: request.method,
-      headers: {
-        ...(request.body !== undefined && typeof request.body !== "string" ? { "content-type": "application/json" } : {}),
-        ...request.headers,
-        ...extraHeaders
-      },
-      ...(request.body !== undefined && request.method !== "GET" && request.method !== "HEAD"
-        ? { body: typeof request.body === "string" ? request.body : JSON.stringify(request.body) }
-        : {}),
+    // The unpaid probe and the paid retry differ only by the payment header.
+    const init = requestInit(request);
+    const send = (paymentHeaders: Record<string, string> = {}) => fetcher(request.url, {
+      ...init,
+      headers: { ...init.headers, ...paymentHeaders },
       signal: AbortSignal.timeout(timeoutMs)
     });
 
@@ -114,7 +116,7 @@ export class MonadX402Payer {
       return { ok: false, ambiguous: false, status: 402, data: undefined, error: quoteError };
     }
 
-    const header = await this.paymentHeader(offer, challenge.resource);
+    const { header, authorization } = await this.paymentHeader(offer, challenge.resource);
     let response: Response;
     try {
       response = await send({ "PAYMENT-SIGNATURE": header });
@@ -132,14 +134,34 @@ export class MonadX402Payer {
     const receipt = readReceipt(response);
     const settled = receipt && receipt.success !== false && typeof receipt.transaction === "string"
       && /^0x[0-9a-fA-F]{64}$/.test(receipt.transaction);
-    if (response.status === 402 && !settled) {
-      // The facilitator refused to settle: the authorization never moved funds.
+    const rejected = `the service rejected the Monad payment${receipt?.errorReason ? ` (${String(receipt.errorReason)})` : ""}; check the wallet's USDC balance on Monad`;
+    if (!settled && !response.ok) {
+      // No receipt on a failed response: ask the chain whether the signed
+      // authorization was consumed instead of assuming the worst.
+      const used = await this.authorizationUsed(authorization);
+      const validUntil = `The signed authorization stays valid until ${new Date(Number(authorization.validBefore) * 1000).toISOString()}, so the service could still submit it before then.`;
+      if (used === false) {
+        return {
+          ok: false,
+          ambiguous: false,
+          status: response.status,
+          data,
+          error: `${response.status === 402 ? rejected : `HTTP ${response.status}`}; not charged: authorization nonce ${authorization.nonce} is unused on ${MONAD_NETWORK}. ${validUntil}`
+        };
+      }
+      if (used === undefined && response.status === 402) {
+        // The facilitator explicitly refused to settle.
+        return { ok: false, ambiguous: false, status: 402, data, error: `${rejected}. ${validUntil}` };
+      }
       return {
         ok: false,
-        ambiguous: false,
-        status: 402,
+        ambiguous: true,
+        ambiguityReason: "missing_receipt",
+        status: response.status,
         data,
-        error: `the service rejected the Monad payment${receipt?.errorReason ? ` (${String(receipt.errorReason)})` : ""}; check the wallet's USDC balance on Monad`
+        error: `HTTP ${response.status} after a signed Monad payment without a settlement receipt; ${used
+          ? `authorization nonce ${authorization.nonce} was used on-chain`
+          : "the on-chain authorization state could not be read"}. ${validUntil}`
       };
     }
     if (!settled) {
@@ -181,10 +203,25 @@ export class MonadX402Payer {
     };
   }
 
-  private async paymentHeader(offer: MonadOffer, resource: unknown): Promise<string> {
+  /** EIP-3009 authorizationState: true once the nonce was used or cancelled; undefined when unreadable. */
+  private async authorizationUsed(authorization: Authorization): Promise<boolean | undefined> {
+    await new Promise((resolve) => setTimeout(resolve, this.options.authorizationCheckDelayMs ?? 2_000));
+    try {
+      const result = await monadEthCall(encodeFunctionData({
+        abi: AUTHORIZATION_STATE_ABI,
+        functionName: "authorizationState",
+        args: [authorization.from, authorization.nonce]
+      }), { rpcUrl: this.options.rpcUrl, fetchImpl: this.options.fetchImpl });
+      return BigInt(result) !== 0n;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async paymentHeader(offer: MonadOffer, resource: unknown): Promise<{ header: string; authorization: Authorization }> {
     const account = privateKeyToAccount(await this.privateKey());
     const now = Math.floor(this.options.now?.() ?? Date.now() / 1000);
-    const authorization = {
+    const authorization: Authorization = {
       from: account.address,
       to: offer.payTo,
       value: offer.amount,
@@ -209,13 +246,40 @@ export class MonadX402Payer {
       }
     });
     // v2 servers deep-match `accepted` against their own offer, so echo it verbatim.
-    return Buffer.from(JSON.stringify({
+    const header = Buffer.from(JSON.stringify({
       x402Version: 2,
       ...(resource !== undefined ? { resource } : {}),
       accepted: offer,
       payload: { signature, authorization }
     })).toString("base64");
+    return { header, authorization };
   }
+}
+
+const AUTHORIZATION_STATE_ABI = [{
+  type: "function",
+  name: "authorizationState",
+  stateMutability: "view",
+  inputs: [{ name: "authorizer", type: "address" }, { name: "nonce", type: "bytes32" }],
+  outputs: [{ name: "", type: "bool" }]
+}] as const;
+
+/**
+ * Models often pass a JSON body as a string. Without a content type the
+ * service cannot parse it, so JSON-parseable bodies are labelled JSON unless
+ * the caller chose a content type.
+ */
+function requestInit(request: PaidFetchRequest): { method: string; headers: Record<string, string>; body?: string } {
+  const body = request.body !== undefined && request.method !== "GET" && request.method !== "HEAD"
+    ? typeof request.body === "string" ? request.body : JSON.stringify(request.body)
+    : undefined;
+  const callerContentType = Object.keys(request.headers ?? {}).some((name) => name.toLowerCase() === "content-type");
+  const json = body !== undefined && !callerContentType && (typeof request.body !== "string" || parseJson(body) !== undefined);
+  return {
+    method: request.method,
+    headers: { ...(json ? { "content-type": "application/json" } : {}), ...request.headers },
+    ...(body !== undefined ? { body } : {})
+  };
 }
 
 function validateOffer(offer: MonadOffer, maxAmountUsd: number): string | undefined {
@@ -251,23 +315,24 @@ async function readBody(response: Response): Promise<unknown> {
 /** Monad USDC balance (USD) of `address`, read directly from a Monad RPC. */
 export async function monadUsdcBalance(address: string, options: { rpcUrl?: string; fetchImpl?: typeof fetch; timeoutMs?: number } = {}): Promise<number> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(address)) throw new Error("invalid wallet address");
+  // balanceOf(address)
+  const result = await monadEthCall(`0x70a08231${address.slice(2).toLowerCase().padStart(64, "0")}`, options);
+  return Number(BigInt(result)) / 1e6;
+}
+
+/** eth_call against Monad USDC at the latest block. */
+async function monadEthCall(data: string, options: { rpcUrl?: string; fetchImpl?: typeof fetch; timeoutMs?: number } = {}): Promise<string> {
   const response = await (options.fetchImpl ?? fetch)(options.rpcUrl ?? monadRpcUrl(), {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "eth_call",
-      // balanceOf(address)
-      params: [{ to: MONAD_USDC, data: `0x70a08231${address.slice(2).toLowerCase().padStart(64, "0")}` }, "latest"]
-    }),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: MONAD_USDC, data }, "latest"] }),
     signal: AbortSignal.timeout(options.timeoutMs ?? 5_000)
   });
   const payload = objectValue(await response.json().catch(() => undefined));
   if (!response.ok || typeof payload?.result !== "string" || !/^0x[0-9a-fA-F]*$/.test(payload.result)) {
-    throw new Error(`Monad RPC balance read failed${payload?.error ? `: ${JSON.stringify(payload.error)}` : ` (HTTP ${response.status})`}`);
+    throw new Error(`Monad RPC call failed${payload?.error ? `: ${JSON.stringify(payload.error)}` : ` (HTTP ${response.status})`}`);
   }
-  return Number(BigInt(payload.result === "0x" ? "0x0" : payload.result)) / 1e6;
+  return payload.result === "0x" ? "0x0" : payload.result;
 }
 
 function parseJson(text: string): unknown {
