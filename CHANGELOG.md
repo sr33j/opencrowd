@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Add Kimi K3 (`moonshot/kimi-k3`) to the default knowledge-tree proposer mix (`opencrowd evals evolve`). On the held-in suite its tree matched baseline accuracy (14/15) at 47% lower cost ($0.30 vs $0.56) with half the paid calls; a third model family adds diversity to the evolutionary population.
+
 ## 0.6.1 — 2026-09-23
 
 - Preserve prepared answers through completion reflection and checkpoint restarts. Successful service requests satisfy reflection without an extra model call; empty responses without an answer fail explicitly instead of displaying “Session completed.”

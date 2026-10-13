@@ -531,7 +531,7 @@ async function evalsEvolveCommand(rest: string[]): Promise<void> {
     generations: Number(readOption(rest, "--generations") ?? 2),
     candidatesPerGeneration: Number(readOption(rest, "--candidates") ?? 2),
     agentModel: readOption(rest, "--model") ?? "openai/gpt-5.6-luna",
-    proposerModels: (readOption(rest, "--proposer") ?? "openai/gpt-5.6-sol,openai/gpt-5.6-luna").split(",").map((id) => id.trim()).filter(Boolean),
+    proposerModels: (readOption(rest, "--proposer") ?? "openai/gpt-5.6-sol,openai/gpt-5.6-luna,moonshot/kimi-k3").split(",").map((id) => id.trim()).filter(Boolean),
     seedTrees: readOption(rest, "--seed-trees")?.split(",").map((dir) => dir.trim()).filter(Boolean),
     baselineReport: readOption(rest, "--baseline-report"),
     parallel: readOption(rest, "--parallel") === undefined ? undefined : Number(readOption(rest, "--parallel")),
