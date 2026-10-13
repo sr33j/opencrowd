@@ -1,5 +1,7 @@
 import { McpConnection, type McpCallResult } from "./mcp.js";
 import { BaseServiceDiscovery } from "./discovery.js";
+import { readAgentCashWallet, type PaymentNetwork } from "@opencrowd/core";
+import { MONAD_NETWORK, MONAD_USDC, MonadX402Payer, monadUsdcBalance } from "./monad.js";
 
 /**
  * Typed adapter over the AgentCash MCP server. AgentCash owns wallet custody,
@@ -7,7 +9,7 @@ import { BaseServiceDiscovery } from "./discovery.js";
  * OpenCrowd consumes them through this typed surface only.
  */
 
-export type PaymentRail = "x402-base" | "mppx" | "unsupported";
+export type PaymentRail = "x402-base" | "x402-monad" | "mppx" | "unsupported";
 
 export interface PaidFetchRequest {
   operationId?: string;
@@ -73,10 +75,22 @@ export interface AgentCashAdapter {
   bridge(input: { from: string; to: string; amountUsd: number }): Promise<McpCallResult>;
 }
 
+export interface McpAgentCashAdapterOptions {
+  /** Preferred settlement network when a service offers several (default base). */
+  paymentNetwork?: PaymentNetwork;
+  /** Native signer for Monad x402, which AgentCash cannot settle. */
+  monad?: MonadX402Payer;
+  /** Test hook: Monad USDC balance lookup. */
+  monadBalance?: (address: string) => Promise<number>;
+}
+
 export class McpAgentCashAdapter implements AgentCashAdapter {
   private readonly discovery: BaseServiceDiscovery;
-  constructor(private readonly connection: McpConnection) {
-    this.discovery = new BaseServiceDiscovery((query, options) => this.connection.call("search", { query, ...options }));
+  private readonly monad: MonadX402Payer;
+  constructor(private readonly connection: McpConnection, private readonly options: McpAgentCashAdapterOptions = {}) {
+    this.discovery = new BaseServiceDiscovery((query, options) => this.connection.call("search", { query, ...options }),
+      { paymentNetwork: options.paymentNetwork });
+    this.monad = options.monad ?? new MonadX402Payer();
   }
   read(url: string): Promise<McpCallResult> {
     // AgentCash requires a positive ceiling. Below one atomic USDC unit,
@@ -85,8 +99,25 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
   }
 
   async getBalance(): Promise<WalletStatusResult> {
-    const result = await this.connection.call("get_balance", {});
-    return { ok: result.ok, data: result.data, error: result.error };
+    const [result, monad] = await Promise.all([this.connection.call("get_balance", {}), this.monadBalance()]);
+    if (!result.ok) return { ok: false, data: result.data, error: result.error };
+    // AgentCash does not know Monad; report its USDC for the same address alongside.
+    const data = result.data && typeof result.data === "object" && !Array.isArray(result.data)
+      ? { ...(result.data as Record<string, unknown>), monad }
+      : { agentcash: result.data, monad };
+    return { ok: true, data };
+  }
+
+  private async monadBalance(): Promise<Record<string, unknown>> {
+    const preferred = this.options.paymentNetwork === "monad";
+    try {
+      const wallet = await readAgentCashWallet();
+      if (!wallet) return { network: MONAD_NETWORK, error: "no AgentCash wallet" };
+      const usdc = await (this.options.monadBalance ?? monadUsdcBalance)(wallet.address);
+      return { network: MONAD_NETWORK, address: wallet.address, asset: MONAD_USDC, usdc, preferred };
+    } catch (error) {
+      return { network: MONAD_NETWORK, error: (error as Error).message, preferred };
+    }
   }
 
   async discoverEndpoints(origin: string): Promise<McpCallResult> {
@@ -102,6 +133,7 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
   }
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
+    if (request.rail === "x402-monad") return this.monad.fetch(request);
     const railParams = request.rail === "mppx"
       ? { paymentNetwork: "tempo", paymentProtocol: "mpp" }
       : { paymentNetwork: "base", paymentProtocol: "x402" };

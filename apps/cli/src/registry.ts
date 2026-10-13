@@ -87,6 +87,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
         rows.wallet_balance = wallet.totalCents !== undefined
           ? formatCents(wallet.totalCents)
           : wallet.error ? `unavailable (${wallet.error})` : "unknown";
+        if (wallet.monadCents !== undefined) rows.wallet_monad_usdc = formatCents(wallet.monadCents);
       }
       return { kind: "text", label: "Status", body: renderKeyValues(rows) };
     }

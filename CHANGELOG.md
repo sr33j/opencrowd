@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Pay x402 services on Monad mainnet (eip155:143). With `--payment-network monad`, `OPENCROWD_PAYMENT_NETWORK=monad`, or `opencrowd config set payment-network monad`, an inspected service that offers Monad USDC is paid with a natively signed x402 v2 `exact` (EIP-3009) authorization from the AgentCash wallet. The service's facilitator settles and pays gas. Services without a Monad offer still pay on Base, and the default stays Base. Reputation checks, approvals, spending limits, budget reservations and receipts apply unchanged. Required reviews carry `x402:monad:<tx>` with the decoded settlement receipt as proof.
+- Show Monad USDC for the AgentCash address in `wallet balance`, `/status`, the model's wallet status, and `opencrowd doctor`. `OPENCROWD_MONAD_RPC_URL` overrides the default Monad RPC.
+- Keep streamed tool-call IDs when providers such as Qwen send empty IDs on continuation chunks. Also accept object-valued tool arguments and index-less deltas, and surface in-stream provider errors.
+
 ## 0.6.1 — 2026-09-23
 
 - Preserve prepared answers through completion reflection and checkpoint restarts. Successful service requests satisfy reflection without an extra model call; empty responses without an answer fail explicitly instead of displaying “Session completed.”
