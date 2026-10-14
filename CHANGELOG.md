@@ -1,7 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-10-14
 
+- Upgrade the default CrowdCode MCP client to `crowdcode-mcp@0.7.0`, which accepts x402 Monad payment receipts. Configs still pinned to the previous shipped default (0.6.0) upgrade automatically; other custom pins are preserved.
 - Pay x402 services on Monad mainnet (eip155:143). With `--payment-network monad`, `OPENCROWD_PAYMENT_NETWORK=monad`, or `opencrowd config set payment-network monad`, an inspected service that offers Monad USDC is paid with a natively signed x402 v2 `exact` (EIP-3009) authorization from the AgentCash wallet. The service's facilitator settles and pays gas. Services without a Monad offer still pay on Base, and the default stays Base. Reputation checks, approvals, spending limits, budget reservations and receipts apply unchanged. Required reviews carry `x402:monad:<tx>` with the decoded settlement receipt as proof.
 - Send JSON-string request bodies to Monad services as `application/json`, unless the caller set a content type. The unpaid probe and the paid retry carry identical method, headers and body.
 - After a failed paid Monad retry with no settlement receipt, check the signed nonce with USDC's EIP-3009 `authorizationState`. An unused nonce is recorded as a failed, uncharged call with its budget released, so the agent can correct its input. The record notes that the authorization stays valid until its `validBefore`. A used nonce, or an unreadable chain, keeps the payment state unknown.
