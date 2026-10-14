@@ -157,6 +157,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     if (request.rail === "mppx" || inspected === "mppx") {
       return refuse("this service settles on MPP/Tempo; hosted agents can only pay x402 services on Base");
     }
+    if (request.rail === "x402-monad" || inspected === "x402-monad") {
+      return refuse("this service was inspected for Monad settlement; hosted agents can only pay x402 services on Base");
+    }
     if (request.rail === "unsupported" || inspected === "unsupported") {
       return refuse("this service settles on a payment network hosted agents cannot pay (only x402 USDC on Base)");
     }

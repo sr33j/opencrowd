@@ -7,7 +7,9 @@ import {
   createOpenCrowdSession, approvePendingSpending, SpendingDeclined, type SpendingHandler,
   loadConfig,
   loadSession,
+  parsePaymentNetwork,
   readAgentCashWallet,
+  resolvePaymentNetwork,
   readLedger,
   saveSession,
   setApprovalMode,
@@ -41,6 +43,13 @@ import { walletSummary } from "./wallet.js";
 import { startTui } from "./tui/app.js";
 
 async function main(argv: string[]): Promise<void> {
+  // Global: prefer this x402 settlement network for every command in this process.
+  const paymentNetwork = readOption(argv, "--payment-network");
+  if (argv.includes("--payment-network")) {
+    if (!parsePaymentNetwork(paymentNetwork)) throw new Error("--payment-network must be base or monad");
+    process.env.OPENCROWD_PAYMENT_NETWORK = paymentNetwork;
+    argv = argv.filter((_arg, index) => !isConsumedOption(argv, index, ["--payment-network"]));
+  }
   const [command, ...rest] = argv;
   if (!command) {
     if (input.isTTY) {
@@ -284,7 +293,7 @@ async function configCommand(args: string[]): Promise<void> {
     return;
   }
   if (action !== "set" || !key || value === undefined) {
-    throw new Error("config supports: show | set provider|model|submodel|budget|approval <value>");
+    throw new Error("config supports: show | set provider|model|submodel|budget|approval|payment-network <value>");
   }
   const config = await loadConfig();
   let savedValue = value;
@@ -321,8 +330,17 @@ async function configCommand(args: string[]): Promise<void> {
       await updateConfig({ approval: value });
       break;
     }
+    case "payment-network": {
+      const paymentNetwork = parsePaymentNetwork(value);
+      if (!paymentNetwork) {
+        throw new Error("payment-network must be base or monad");
+      }
+      await updateConfig({ paymentNetwork });
+      savedValue = paymentNetwork;
+      break;
+    }
     default:
-      throw new Error(`unknown config key: ${key} (supported: provider, model, submodel, budget, approval)`);
+      throw new Error(`unknown config key: ${key} (supported: provider, model, submodel, budget, approval, payment-network)`);
   }
   console.log(`set ${key} = ${savedValue} (applies to future sessions; running sessions are unchanged)`);
 }
@@ -402,7 +420,7 @@ async function walletCommand(args: string[]): Promise<void> {
     if (!wallet) {
       throw new Error("No AgentCash wallet found. Install agentcash (its wallet is created automatically on first use) and retry.");
     }
-    const result = { address: wallet.address, networks: "base, tempo, solana", asset: "USDC" };
+    const result = { address: wallet.address, networks: "base, tempo, solana, monad (eip155:143)", asset: "USDC", preferred_payment_network: resolvePaymentNetwork(await loadConfig()) };
     printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
     return;
   }
@@ -552,7 +570,7 @@ function printHelp(): void {
   opencrowd run [--session <id>] [--budget <usd>] [--model <model>] [--approval ask|auto|off] [--test-mode] [--disable-shell] [--verbose] "<task>"
   opencrowd run --headless --prompt "<text>" [--attach <file>] [--output json|text] [--approval ask|auto|off] [--auto] [--model <model>] [--subagent-model <model>] [--budget <usd>] [--max-turns <n>] [--workspace <dir>] [--verbose]
   opencrowd config show
-  opencrowd config set provider|model|submodel|budget|approval <value>
+  opencrowd config set provider|model|submodel|budget|approval|payment-network <value>
   opencrowd ledger [--json] show [--session <id>]
   opencrowd resume <session-id> [--approve-once | --query-budget <usd> | --decline] [--workspace <dir>]
   opencrowd wallet [--json] address|balance
@@ -560,6 +578,10 @@ function printHelp(): void {
   opencrowd models [--json] list
   opencrowd doctor
   opencrowd --version
+
+Global options:
+  --payment-network base|monad    prefer this x402 network when a service offers several
+                                  (also OPENCROWD_PAYMENT_NETWORK or config payment-network; default base)
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]
   opencrowd evals evolve [--out <dir>] [--generations <n>] [--candidates <n>] [--model <agent model>] [--proposer <model,model>] [--seed-trees <dir,dir>] [--baseline-report <report.json>] [--parallel <n>]
   opencrowd evals suite [--set usage|gaia-hard|assistantbench|heldin|heldout|all] [--knowledge <dir>|none] [--tag <label>] [--out <dir>] [--only id,id] [--limit <n>] [--parallel <n>] [--model <model>] [--subagent-model <model|off>] [--max-turns <n>]

@@ -40,7 +40,14 @@ export interface OpenCrowdConfig {
   defaultBudgetCents: number;
   /** Default external-service approval mode for new sessions. */
   approval: ApprovalMode;
+  /**
+   * Preferred x402 settlement network when a service offers several. `monad`
+   * pays eip155:143 USDC natively when offered and falls back to Base.
+   */
+  paymentNetwork: PaymentNetwork;
 }
+
+export type PaymentNetwork = "base" | "monad";
 
 export const DEFAULT_CONFIG: OpenCrowdConfig = {
   configVersion: 3,
@@ -66,7 +73,8 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   // small; in ask mode each top-up additionally requires user confirmation.
   veniceMaxTopUpCents: 500,
   defaultBudgetCents: Number(DEFAULT_PER_QUERY_ATOMIC) / 10000,
-  approval: "auto"
+  approval: "auto",
+  paymentNetwork: "base"
 };
 
 export function configDir(paths?: AgentPaths): string {
@@ -139,8 +147,27 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
     llmMaxCostCentsPerCall: raw.configVersion === 3 ? numberValue(raw.llmMaxCostCentsPerCall) ?? DEFAULT_CONFIG.llmMaxCostCentsPerCall : DEFAULT_CONFIG.llmMaxCostCentsPerCall,
     veniceMaxTopUpCents: numberValue(raw.veniceMaxTopUpCents) ?? DEFAULT_CONFIG.veniceMaxTopUpCents,
     defaultBudgetCents: raw.configVersion === 3 ? numberValue(raw.defaultBudgetCents) ?? DEFAULT_CONFIG.defaultBudgetCents : DEFAULT_CONFIG.defaultBudgetCents,
-    approval: raw.approval === "off" ? "off" : raw.configVersion === 3 && raw.approval === "ask" ? "ask" : "auto"
+    approval: raw.approval === "off" ? "off" : raw.configVersion === 3 && raw.approval === "ask" ? "ask" : "auto",
+    paymentNetwork: parsePaymentNetwork(raw.paymentNetwork) ?? DEFAULT_CONFIG.paymentNetwork
   };
+}
+
+export function parsePaymentNetwork(value: unknown): PaymentNetwork | undefined {
+  const normalized = typeof value === "string" ? value.trim().toLowerCase() : undefined;
+  if (normalized === "monad" || normalized === "eip155:143") return "monad";
+  if (normalized === "base" || normalized === "eip155:8453") return "base";
+  return undefined;
+}
+
+/** `OPENCROWD_PAYMENT_NETWORK` (also set by `--payment-network`) overrides the config. */
+export function resolvePaymentNetwork(config?: Pick<OpenCrowdConfig, "paymentNetwork">): PaymentNetwork {
+  const env = process.env.OPENCROWD_PAYMENT_NETWORK;
+  if (env !== undefined && env.trim() !== "") {
+    const parsed = parsePaymentNetwork(env);
+    if (!parsed) throw new Error("OPENCROWD_PAYMENT_NETWORK must be base or monad");
+    return parsed;
+  }
+  return config?.paymentNetwork ?? DEFAULT_CONFIG.paymentNetwork;
 }
 
 function normalizeConfigProvider(value: unknown): OpenCrowdConfig["provider"] | undefined {
