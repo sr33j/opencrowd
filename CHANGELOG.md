@@ -7,6 +7,7 @@
 - After a failed paid Monad retry with no settlement receipt, check the signed nonce with USDC's EIP-3009 `authorizationState`. An unused nonce is recorded as a failed, uncharged call with its budget released, so the agent can correct its input. The record notes that the authorization stays valid until its `validBefore`. A used nonce, or an unreadable chain, keeps the payment state unknown.
 - Show Monad USDC for the AgentCash address in `wallet balance`, `/status`, the model's wallet status, and `opencrowd doctor`. `OPENCROWD_MONAD_RPC_URL` overrides the default Monad RPC.
 - Keep streamed tool-call IDs when providers such as Qwen send empty IDs on continuation chunks. Also accept object-valued tool arguments and index-less deltas, and surface in-stream provider errors.
+- Add Kimi K3 (`moonshot/kimi-k3`) to the default knowledge-tree proposer mix (`opencrowd evals evolve`). On the held-in suite its tree matched baseline accuracy (14/15) at 47% lower cost ($0.30 vs $0.56) with half the paid calls; a third model family adds diversity to the evolutionary population.
 
 ## 0.6.1 — 2026-09-23
 
