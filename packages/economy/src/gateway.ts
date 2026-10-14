@@ -289,10 +289,10 @@ export class EconomyGateway {
       return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
     }
     // Only rails CrowdCode verifies end-to-end may pay automatically.
-    if (inspection.rail !== "x402-base") {
+    if (inspection.rail !== "x402-base" && inspection.rail !== "x402-monad") {
       return {
         ok: false,
-        error: "this endpoint settles on a payment rail OpenCrowd does not support for automatic payment (allowed: x402 USDC on Base)"
+        error: "this endpoint settles on a payment rail OpenCrowd does not support for automatic payment (allowed: x402 USDC on Base or Monad)"
       };
     }
     const requestedCostCents = intArg(args.max_cost_cents) ?? inspection.priceCeilingCents;
@@ -380,7 +380,7 @@ export class EconomyGateway {
 
     const purchaseId = newPurchaseId();
     const railUsed = result.payment?.rail ?? inspection.rail;
-    const supportedRail = railUsed === "x402-base" || railUsed === "mppx";
+    const supportedRail = railUsed === "x402-base" || railUsed === "x402-monad" || railUsed === "mppx";
     const record: PurchaseRecord = {
       purchase_id: purchaseId,
       session_id: session.sessionId,

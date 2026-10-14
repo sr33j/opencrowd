@@ -9,6 +9,8 @@ import { sharedEconomyRuntime } from "@opencrowd/economy";
 export interface WalletSummary {
   address?: string;
   totalCents?: number;
+  /** USDC on Monad (eip155:143) for the same address; AgentCash's total excludes it. */
+  monadCents?: number;
   raw?: unknown;
   error?: string;
 }
@@ -45,7 +47,17 @@ async function fetchWalletSummary(): Promise<WalletSummary> {
     const runtime = await sharedEconomyRuntime();
     const balance = await runtime.agentcash.getBalance();
     if (balance.ok) {
-      return { address: wallet?.address, totalCents: parseUsdCents(balance.data), raw: balance.data };
+      const { monad, ...agentcash } = (balance.data && typeof balance.data === "object" && !Array.isArray(balance.data)
+        ? balance.data : { agentcash: balance.data }) as Record<string, unknown>;
+      const monadUsdc = (monad as { usdc?: unknown } | undefined)?.usdc;
+      const agentcashTotal = parseUsdCents("agentcash" in agentcash && Object.keys(agentcash).length === 1 ? agentcash.agentcash : agentcash);
+      const monadCents = typeof monadUsdc === "number" ? Math.round(monadUsdc * 100) : undefined;
+      return {
+        address: wallet?.address,
+        totalCents: agentcashTotal === undefined && monadCents === undefined ? undefined : (agentcashTotal ?? 0) + (monadCents ?? 0),
+        monadCents,
+        raw: balance.data
+      };
     }
     return { address: wallet?.address, error: balance.error };
   } catch (error) {

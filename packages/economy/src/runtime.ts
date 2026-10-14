@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { loadConfig, type McpServerConfig } from "@opencrowd/core";
+import { loadConfig, resolvePaymentNetwork, type McpServerConfig } from "@opencrowd/core";
 import { McpConnection } from "./mcp.js";
 import { McpAgentCashAdapter, type AgentCashAdapter } from "./agentcash.js";
 import { McpCrowdCodeAdapter, type CrowdCodeAdapter } from "./crowdcode.js";
@@ -36,7 +36,7 @@ export async function sharedEconomyRuntime(log?: (message: string) => void): Pro
       const crowdcodeConnection = new McpConnection("crowdcode", resolvePinnedCommand(crowdcodeConfig, "crowdcode-mcp"), { log });
       await Promise.all([agentcashConnection.connect(), crowdcodeConnection.connect()]);
       shared = {
-        agentcash: new McpAgentCashAdapter(agentcashConnection),
+        agentcash: new McpAgentCashAdapter(agentcashConnection, { paymentNetwork: resolvePaymentNetwork(config) }),
         crowdcode: new McpCrowdCodeAdapter(crowdcodeConnection),
         instructions: () => [agentcashConnection, crowdcodeConnection]
           .map((connection) => connection.instructions())

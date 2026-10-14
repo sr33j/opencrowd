@@ -1,5 +1,5 @@
-import { loadConfig, configPath, readAgentCashWallet } from "@opencrowd/core";
-import { sharedEconomyRuntime } from "@opencrowd/economy";
+import { loadConfig, configPath, readAgentCashWallet, resolvePaymentNetwork } from "@opencrowd/core";
+import { MONAD_NETWORK, monadRpcUrl, monadUsdcBalance, sharedEconomyRuntime } from "@opencrowd/economy";
 import { sharedTypedProvider } from "@opencrowd/agent-runtime";
 
 /**
@@ -54,6 +54,18 @@ export async function runDoctor(log: (line: string) => void): Promise<boolean> {
           throw new Error(balance.error ?? "get_balance failed");
         }
         return "connected; balance readable";
+      }
+    },
+    {
+      name: "monad usdc",
+      run: async () => {
+        const wallet = await readAgentCashWallet();
+        if (!wallet) {
+          throw new Error("skipped: no AgentCash wallet");
+        }
+        const usdc = await monadUsdcBalance(wallet.address);
+        const preferred = resolvePaymentNetwork(config);
+        return `${usdc.toFixed(6)} USDC on ${MONAD_NETWORK} for ${wallet.address} via ${monadRpcUrl()} (preferred payment network: ${preferred})`;
       }
     },
     {

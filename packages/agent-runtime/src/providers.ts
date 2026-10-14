@@ -293,19 +293,25 @@ export async function readSseCompletion(
       onTextDelta?.(delta.content);
     }
     if (Array.isArray(delta.tool_calls)) {
-      for (const item of delta.tool_calls) {
+      for (const [position, item] of delta.tool_calls.entries()) {
         const toolDelta = item && typeof item === "object" ? item as Record<string, unknown> : {};
-        const index = typeof toolDelta.index === "number" ? toolDelta.index : 0;
+        const index = typeof toolDelta.index === "number" ? toolDelta.index : position;
         const entry = toolCallsByIndex.get(index) ?? { argumentsText: "" };
-        if (typeof toolDelta.id === "string") {
+        // Continuation chunks may omit the id or send "" (Qwen/DashScope);
+        // keep the first real id so tool results stay correlated.
+        if (typeof toolDelta.id === "string" && toolDelta.id.length > 0 && !entry.id) {
           entry.id = toolDelta.id;
         }
         const fn = toolDelta.function && typeof toolDelta.function === "object" ? toolDelta.function as Record<string, unknown> : {};
-        if (typeof fn.name === "string") {
+        // Names are normally sent once; some providers repeat the full name
+        // on every chunk, which must not be concatenated.
+        if (typeof fn.name === "string" && fn.name.length > 0 && fn.name !== entry.name) {
           entry.name = (entry.name ?? "") + fn.name;
         }
         if (typeof fn.arguments === "string") {
           entry.argumentsText += fn.arguments;
+        } else if (objectValue(fn.arguments)) {
+          entry.argumentsText += JSON.stringify(fn.arguments);
         }
         toolCallsByIndex.set(index, entry);
         if (firstTokenMs === undefined) {
@@ -334,10 +340,19 @@ export async function readSseCompletion(
         sawDone = true;
         continue;
       }
+      let chunk: unknown;
       try {
-        consumeChunk(JSON.parse(payload));
+        chunk = JSON.parse(payload);
       } catch {
         // Ignore malformed keep-alive fragments.
+        continue;
+      }
+      // Outside the parse guard so in-stream provider errors surface.
+      try {
+        consumeChunk(chunk);
+      } catch (error) {
+        void reader.cancel().catch(() => undefined);
+        throw error;
       }
     }
   }
@@ -693,7 +708,7 @@ function toParsedToolCall(value: unknown): WireToolCall | null {
   if (!name) {
     return null;
   }
-  let parsedArguments: Record<string, unknown> = {};
+  let parsedArguments: Record<string, unknown> = objectValue(fn.arguments) ?? {};
   if (typeof fn.arguments === "string") {
     try {
       parsedArguments = JSON.parse(fn.arguments) as Record<string, unknown>;
