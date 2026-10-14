@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, expect, it } from "vitest";
 import { createSession } from "@opencrowd/core";
 import { atomicUsdc, type FinancialState } from "@opencrowd/protocol";
-import { runAgentTaskDetailed, type LoopCheckpoint } from "../src/index.js";
+import { runAgentTaskDetailed, type LoopCheckpoint, type LlmMessage } from "../src/index.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
@@ -23,6 +23,31 @@ function state(inference = 0n, services = 0n): FinancialState {
       per_call_approval_threshold_usdc: "0.100000", approval_mode: "auto" } };
 }
 
+it("keeps the prompt prefix byte-identical as balances change and excludes snapshots from history", async () => {
+  const calls: LlmMessage[][] = [];
+  const history: LlmMessage[] = [];
+  const checkpoints: LoopCheckpoint[] = [];
+  await runAgentTaskDetailed(await session(), "Summarize this document.\n" + "Stable context.\n".repeat(800), {
+    hosted: true, runId, knowledge: false,
+    financialState: async () => state(BigInt(calls.length) * 123n),
+    onMessage: async message => { history.push(message); },
+    onCheckpoint: async checkpoint => { checkpoints.push(structuredClone(checkpoint)); },
+    provider: { complete: async messages => {
+      calls.push(structuredClone(messages));
+      return { content: "", toolCalls: [{ id: `call-${calls.length}`,
+        name: calls.length === 1 ? "get_budget_status" : "complete_session",
+        arguments: calls.length === 1 ? {} : { final_message: "Done" } }] };
+    } },
+  });
+  const prefix = calls[0].slice(0, -1);
+  expect(JSON.stringify(calls[1].slice(0, prefix.length))).toBe(JSON.stringify(prefix));
+  expect(calls[0].at(-1)?.role).toBe("user");
+  expect(calls[0].at(-1)?.content).not.toBe(calls[1].at(-1)?.content);
+  expect(history.some(m => m.content.startsWith("Current hosted financial snapshot: "))).toBe(false);
+  expect(checkpoints.every(c => !c.messages.some(m => m.content.startsWith("Current hosted financial snapshot: ")))).toBe(true);
+  expect(checkpoints.some(c => c.context?.prepared && c.context.trailingMessage)).toBe(true);
+});
+
 it("refreshes model and service spending, replaces local budgets and keeps one authoritative snapshot", async () => {
   let inference = 0n, services = 0n, calls = 0;
   const result = await runAgentTaskDetailed(await session(), "Build a paid utility for me", {
@@ -38,11 +63,11 @@ it("refreshes model and service spending, replaces local budgets and keeps one a
       expect(messages[0].content).toContain("You operate this service for its owner.");
       expect(messages[0].content).toContain("Inference and paid tools debit its USDC wallet.");
       if (calls === 1) {
-        const tool = JSON.parse(messages.at(-1)!.content);
+        const tool = JSON.parse(messages.at(-2)!.content);
         expect(tool.budget_before_tool_call.current_run.inference_spent_usdc).toBe("0.000123");
         expect(tool.budget_after_tool_call.current_run.service_spent_usdc).toBe("0.050000");
       }
-      if (calls === 2) expect(JSON.parse(messages.at(-1)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
+      if (calls === 2) expect(JSON.parse(messages.at(-2)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
       inference += 123n;
       const name = ["call_paid_service", "get_budget_status", "complete_session"][calls++];
       return { content: "", toolCalls: [{ id: `call-${calls}`, name, arguments: name === "complete_session" ? { final_message: "Done" } : {} }] };
@@ -57,7 +82,7 @@ it("marks financial reads unavailable without retrying a paid response or return
     financialState: async () => { throw new Error("control offline"); },
     provider: { complete: async messages => {
       calls++;
-      expect(messages[1].content).toContain('"status":"unavailable"');
+      expect(messages.at(-1)!.content).toContain('"status":"unavailable"');
       return { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "Done" } }] };
     } },
   });
