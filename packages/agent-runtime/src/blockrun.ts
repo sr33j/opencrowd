@@ -55,6 +55,7 @@ export class BlockRunProvider implements TypedLlmProvider {
     // spending counters isolated when subagents run concurrently.
     const body: Record<string, unknown> = {
       model: request.model,
+      ...(request.model.startsWith("anthropic/") ? { prompt_cache: true } : {}),
       messages: request.messages.map(toWireChatMessage),
       tools: request.tools.map((tool) => ({
         type: "function",

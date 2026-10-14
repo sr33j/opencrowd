@@ -692,8 +692,8 @@ export function normalizeUsage(value: unknown): LlmUsage {
   return {
     inputTokens: numberValue(usage.prompt_tokens ?? usage.input_tokens),
     outputTokens: numberValue(usage.completion_tokens ?? usage.output_tokens),
-    cachedInputTokens: numberValue(promptDetails?.cached_tokens ?? usage.cached_tokens),
-    cacheWriteTokens: numberValue(promptDetails?.cache_write_tokens ?? usage.cache_creation_input_tokens),
+    cachedInputTokens: numberValue(promptDetails?.cached_tokens ?? usage.cached_tokens ?? usage.cache_read_input_tokens),
+    cacheWriteTokens: numberValue(promptDetails?.cached_creation_tokens ?? promptDetails?.cache_write_tokens ?? usage.cache_creation_input_tokens),
     costCents: costUsd !== undefined ? costUsd * 100 : undefined
   };
 }
