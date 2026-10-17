@@ -69,6 +69,55 @@ describe("durable JSONL worker", () => {
     expect(events.findIndex(e=>e.type==='checkpoint.completed')).toBeLessThan(events.findIndex(e=>e.type==='run.finished'));
   });
 
+  it("recovers an accepted resume interrupted inside a shell without rerunning it", async () => {
+    const home = await root(), events: Event[] = [];
+    let funded = false, shellBegan!: () => void;
+    const ready = new Promise<void>(resolve => { shellBegan = resolve; });
+    const provider = { complete: vi.fn(async () => {
+      if (!funded) throw new RuntimePause("waiting_for_funds", "run-1:llm:0", "Fund wallet");
+      return { content: "Install package", toolCalls: [{ id: "install", name: "run_shell", arguments: { command: "pip install huge-package" } }] };
+    }) };
+    const options = { agentHome: home, provider: () => provider, output: (line: string) => { events.push(JSON.parse(line)); },
+      toolExecutor: vi.fn(async () => { shellBegan(); return new Promise<never>(() => {}); }) };
+    const worker = new MachineWorker(options);
+    await worker.initialize(); await worker.handleLine(JSON.stringify(start())); await worker.drain();
+    const resume: Command = { protocolVersion: 1, id: "resume-1", runId: "run-1", seq: 2,
+      emittedAt: "2026-09-05T00:01:00Z", type: "run.resume", payload: { sessionId: "session-1", cause: "funds_available", operationId: "run-1:llm:0" } };
+    funded = true;
+    await worker.handleLine(JSON.stringify(resume)); await ready;
+    // Simulate a killed process: only durable state is available to its replacement.
+    const recovery = { complete: vi.fn(async messages => {
+      expect(JSON.stringify(messages)).toContain("Shell command was interrupted");
+      return { content: "Inspected partial files; choosing a lighter backend.", toolCalls: [] };
+    }) };
+    const restarted = new MachineWorker({ ...options, provider: () => recovery });
+    await restarted.initialize();
+    // A new command cannot bypass the waiting-state checks.
+    await restarted.handleLine(JSON.stringify({ ...resume, id: "different-resume" }));
+    expect(events.at(-1)).toMatchObject({ type: "command.rejected", payload: { reason: "run_not_resumable" } });
+    await restarted.handleLine(JSON.stringify(resume)); await restarted.drain();
+    expect(options.toolExecutor).toHaveBeenCalledTimes(1);
+    expect(recovery.complete).toHaveBeenCalledTimes(1);
+    expect(events.filter(e => e.type === "run.finished").at(-1)).toMatchObject({ payload: { outcome: "completed" } });
+    expect(events.filter(e => e.type === "tool.finished").at(-1)).toMatchObject({ payload: { status: "error", toolCallId: "0:install" } });
+  });
+
+  it("honors cancellation of a restored unfinished run without another model call", async () => {
+    const home = await root(), events: Event[] = [];
+    let began!: () => void;
+    const ready = new Promise<void>(resolve => { began = resolve; });
+    const provider = { complete: vi.fn(async () => { began(); return new Promise<never>(() => {}); }) };
+    const options = { agentHome: home, provider: () => provider, output: (line: string) => { events.push(JSON.parse(line)); } };
+    const worker = new MachineWorker(options);
+    await worker.initialize(); await worker.handleLine(JSON.stringify(start())); await ready;
+    const restarted = new MachineWorker(options); await restarted.initialize();
+    await restarted.handleLine(JSON.stringify({ protocolVersion: 1, id: "cancel-restored", runId: "run-1", seq: 2,
+      emittedAt: "2026-09-05T00:01:00Z", type: "run.cancel", payload: { reason: "stop" } }));
+    await restarted.drain();
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+    expect(events.filter(e => e.type === "run.finished").at(-1)).toMatchObject({ payload: { outcome: "cancelled" } });
+  });
+
   it("rejects conflicting command contents and invalid major versions", async () => {
     const home = await root(); const events: Event[] = [];
     const worker = new MachineWorker({agentHome:home,provider:()=>createWorkerDemoProvider(),output:line=>{events.push(JSON.parse(line));}});

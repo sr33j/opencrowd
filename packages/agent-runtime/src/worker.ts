@@ -170,18 +170,23 @@ export class MachineWorker {
         summary: run.summary, pendingOperationId: run.pendingOperationId }, command.runId, command.id);
       return;
     }
+    // A previously accepted resume may have been interrupted after clearing
+    // the wait. Replay that exact command from its checkpoint; new resume
+    // commands must still prove they resolve the original waiting operation.
     if (command.type === "run.resume") {
       if (!run) return reject("unknown_run", "Run does not exist");
-      if (!run.outcome || !isWaiting(run.outcome) || command.payload.sessionId !== run.sessionId
-        || (command.payload.checkpointId && command.payload.checkpointId !== run.checkpointId)
-        || (run.pendingOperationId && command.payload.operationId !== run.pendingOperationId)) {
-        return reject("run_not_resumable", "Resume does not match the waiting operation and checkpoint");
+      if (!previous) {
+        if (!run.outcome || !isWaiting(run.outcome) || command.payload.sessionId !== run.sessionId
+          || (command.payload.checkpointId && command.payload.checkpointId !== run.checkpointId)
+          || (run.pendingOperationId && command.payload.operationId !== run.pendingOperationId)) {
+          return reject("run_not_resumable", "Resume does not match the waiting operation and checkpoint");
+        }
+        const causes: Partial<Record<RunOutcome, string>> = {
+          waiting_for_approval: "approval_granted", waiting_for_funds: "funds_available",
+          waiting_for_delegation: "delegation_renewed", payment_unknown: "payment_reconciled"
+        };
+        if (causes[run.outcome] !== command.payload.cause) return reject("run_not_resumable", "Resume cause does not resolve this wait");
       }
-      const causes: Partial<Record<RunOutcome, string>> = {
-        waiting_for_approval: "approval_granted", waiting_for_funds: "funds_available",
-        waiting_for_delegation: "delegation_renewed", payment_unknown: "payment_reconciled"
-      };
-      if (causes[run.outcome] !== command.payload.cause) return reject("run_not_resumable", "Resume cause does not resolve this wait");
     } else if (run && !previous) {
       return reject("conflicting_duplicate", "Run ID already exists");
     } else if (!run) {
@@ -239,7 +244,16 @@ export class MachineWorker {
         const saved = run.tools[id];
         if (saved && saved.digest !== digest) throw new Error("tool request digest mismatch");
         if (saved?.result) return saved.result;
-        if (saved && name === "run_shell") throw new Error("shell result was lost; execution requires manual reconciliation");
+        if (saved && name === "run_shell") {
+          // The shell may have partially changed files before the worker died.
+          // Give the model a failed result so it can inspect and recover, but
+          // never execute that command again implicitly.
+          const output: ToolResult = { ok: false, error: "Shell command was interrupted and its result was lost. It was not rerun. Inspect existing files and installed packages before choosing a different approach; do not assume the command succeeded or repeat side effects blindly." };
+          await this.mutate(() => { run.tools[id].result = output; });
+          await this.emit("tool.finished", { toolCallId: id, toolName: name, status: "error", durationMs: 0,
+            turn: run.checkpoint?.turn ?? 0, error: output.error, details: captureDetail({ output }) }, runId, run.commandId);
+          return output;
+        }
         if (saved && !saved.approvalPending && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
         await this.mutate(() => { run.tools[id] = { digest }; });
         await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args), details: captureDetail({ input: args }), turn: run.checkpoint?.turn ?? 0 }, runId, run.commandId);

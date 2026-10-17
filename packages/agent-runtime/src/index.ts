@@ -839,7 +839,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   }
   if (options.hosted && hostedTools.includes("run_shell")) {
     systemPromptParts.push(
-      "Tooling: ffmpeg, python3 with pip and venv, node and npm are installed; the system image is read-only, but `pip install --user <package>` and `npm install` persist on this machine's volume between runs, so install once and reuse."
+      "Tooling: ffmpeg, python3 with pip and venv, node and npm are installed; the system image is read-only, but `pip install --user <package>` and `npm install` persist on this machine's volume between runs, so install once and reuse.",
+      "Resource recovery: before installing large ML dependencies, check available memory, disk space and Python version. A killed install or OOM is a failed approach, not the end of the task. Inspect partial installs and preserve user files, then choose a materially lighter backend or an external service within the user's budget. Verify package metadata: optional extras add dependencies and do not remove default ones; never invent an extra such as basic-pitch[tflite]. For audio-to-MIDI, prefer a verified TFLite or ONNX inference setup in an isolated venv over full TensorFlow; test on a short audio segment before processing the whole file. If no viable path remains, report the concrete blocker and useful artifacts. Do not claim success until the output has been checked."
     );
   }
   systemPromptParts.push("End by calling complete_session with a concise final message.");
