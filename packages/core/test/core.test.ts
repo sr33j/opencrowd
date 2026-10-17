@@ -216,9 +216,16 @@ describe("shell policy", () => {
     // A 1 ms ceiling still runs (and times out) rather than being rejected as invalid input.
     for (const timeout_ms of [0, -5, -100]) {
       const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms }, { session });
-      expect(tiny.ok).toBe(true);
+      expect(tiny.ok).toBe(false);
       expect(tiny.data).toMatchObject({ timed_out: true });
     }
+  });
+
+  it("reports nonzero shell exits as failures with the diagnostic output intact", async () => {
+    const session = await createSession({ workspaceRoot: await tempRoot(), shellEnabled: true });
+    const result = await executeTool("run_shell", { command: "printf partial; printf 'Killed\\n' >&2; exit 137" }, { session });
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining("137"),
+      data: { exit_code: 137, stdout: "partial", stderr: "Killed\n", timed_out: false } });
   });
 
   it("resolves artifact cwd and returns spawn failures as tool results", async () => {

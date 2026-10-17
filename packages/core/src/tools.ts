@@ -24,15 +24,24 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         return ok({ content: await readArtifact(context.session, requiredString(args.path, "path")) });
       case "list_files":
         return ok(await listArtifacts(context.session, optionalString(args.prefix, "prefix") ?? ""));
-      case "run_shell":
+      case "run_shell": {
         context.onProgress?.({ type: "running_shell", message: "Running gated shell command" });
-        return ok(await runShell(
+        const result = await runShell(
           context.session,
           requiredString(args.command, "command"),
           optionalString(args.cwd, "cwd") ?? context.session.workspaceRoot,
           shellTimeoutMs(args.timeout_ms),
           { signal: context.signal }
-        ));
+        );
+        if (result.timed_out || result.exit_code !== 0) return {
+          ok: false,
+          error: result.timed_out ? "Shell command timed out; inspect partial output before retrying."
+            : result.exit_code === null ? "Shell command was terminated; inspect stderr and resource limits before retrying."
+            : `Shell command exited with code ${result.exit_code}; inspect stderr and partial output before choosing the next approach.`,
+          data: result
+        };
+        return ok(result);
+      }
       case "spawn_subagent":
       case "check_subagents":
         return {
