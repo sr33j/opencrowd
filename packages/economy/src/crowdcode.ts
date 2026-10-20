@@ -49,6 +49,18 @@ export interface ReviewSubmission {
   taskContext?: string;
 }
 
+/** A cross-chain search for CrowdCode to rank (its `find_service` tool). */
+export interface ServiceSearch {
+  query: string;
+  /** Networks this payer settles: base, solana, tempo (and monad when preferred). */
+  networks: string[];
+  /** Available USDC per network, when known. */
+  balances?: Partial<Record<string, number>>;
+  /** Endpoints found elsewhere (AgentCash search) to rank together with CrowdCode's catalogs. */
+  candidates: Record<string, unknown>[];
+  limit: number;
+}
+
 export interface ReviewResult {
   ok: boolean;
   error?: string;
@@ -59,6 +71,8 @@ export interface CrowdCodeAdapter {
   manage?(name: string, args: Record<string, unknown>): Promise<ToolResult>;
   getServiceScore(query: ServiceQuery): Promise<ServiceEvidence>;
   reviewService(review: ReviewSubmission): Promise<ReviewResult>;
+  /** Search every catalog across chains and rank for this payer; absent on older adapters. */
+  findServices?(search: ServiceSearch): Promise<ToolResult>;
 }
 
 export class McpCrowdCodeAdapter implements CrowdCodeAdapter {
@@ -66,6 +80,10 @@ export class McpCrowdCodeAdapter implements CrowdCodeAdapter {
 
   async manage(name: string, args: Record<string, unknown>): Promise<ToolResult> {
     return this.connection.call(name, args);
+  }
+
+  async findServices(search: ServiceSearch): Promise<ToolResult> {
+    return this.connection.call("find_service", { ...search });
   }
 
   async getServiceScore(query: ServiceQuery): Promise<ServiceEvidence> {

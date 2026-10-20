@@ -88,9 +88,16 @@ Paid services settle in USDC on the network you prefer when they offer it:
 x402 on Base (the default) or Solana, MPP on Tempo, and x402 on Monad when
 you choose it. Solana uses AgentCash's separate Solana address
 (`~/.agentcash/solana-wallet.json`); `opencrowd wallet accounts` lists every
-network's address and balance. When a service does not offer your preferred
-network, the first of Base, Solana and Tempo whose balance covers the price is
-used.
+network's address and balance. When your preferred network is not offered or
+its balance does not cover the price, the first of Base, Solana and Tempo whose
+balance covers it is used.
+
+`find_paid_service` searches across all of these networks. With CrowdCode on,
+CrowdCode merges AgentCash search with Coinbase's x402 catalog, the mpp.dev MPP
+catalog and its reviewed services, and ranks the results: quality first, then
+the effective price on each service's best network (including a transfer
+between your own networks when that network's balance is short), then your
+balance there. With CrowdCode off, AgentCash's order is used.
 
 ```sh
 opencrowd config set payment-network solana   # or --payment-network solana per run

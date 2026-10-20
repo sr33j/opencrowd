@@ -1,5 +1,5 @@
 import { McpConnection, type McpCallResult } from "./mcp.js";
-import { BaseServiceDiscovery } from "./discovery.js";
+import { BaseServiceDiscovery, type SearchOptions } from "./discovery.js";
 import { readAgentCashWallet, type PaymentNetwork } from "@opencrowd/core";
 import { MONAD_NETWORK, MONAD_USDC, MonadX402Payer, monadUsdcBalance } from "./monad.js";
 import { networkName, type OfferNetwork } from "./offers.js";
@@ -69,7 +69,7 @@ export interface AgentCashAdapter {
   /** List endpoints at a known origin. */
   discoverEndpoints(origin: string): Promise<McpCallResult>;
   /** Search for a capability across origins. */
-  search(query: string, options?: { limit?: number; broad?: boolean }): Promise<McpCallResult>;
+  search(query: string, options?: SearchOptions): Promise<McpCallResult>;
   /** Exact input/output schema, auth mode, and price information for one endpoint. */
   checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult>;
   /** Execute one potentially-paid call. Never auto-retried. */
@@ -180,7 +180,7 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
     return this.discovery.discoverEndpoints(origin);
   }
 
-  async search(query: string, options: { limit?: number; broad?: boolean } = {}): Promise<McpCallResult> {
+  async search(query: string, options: SearchOptions = {}): Promise<McpCallResult> {
     return this.discovery.search(query, options);
   }
 

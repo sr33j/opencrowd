@@ -219,7 +219,10 @@ export class EconomyGateway {
       return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
     }
     if (query) {
-      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit) });
+      // CrowdCode ranks across chains when it is on; off, or on an older adapter, AgentCash's order stands.
+      const findServices = this.options.crowdcode.findServices?.bind(this.options.crowdcode);
+      const rank = findServices && await this.crowdcodeEnabled().catch(() => false) ? findServices : undefined;
+      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit), ...(rank ? { rank } : {}) });
       return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
     }
     return { ok: false, error: "find_paid_service requires `origin` (known origin) or `query` (capability search)" };
@@ -758,7 +761,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "find_paid_service",
-    description: "Discover paid capability: pass `origin` to list a known origin's endpoints, or `query` to search for an unknown capability.",
+    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, ranked best first by CrowdCode: quality, then effective price on your best network (including a transfer between your own networks when its balance is short), then your balance there. `origin` lists a known origin's endpoints.",
     parameters: {
       type: "object",
       properties: {

@@ -99,19 +99,19 @@ export function classifyOffer(option: Record<string, any>): ServiceOffer {
 }
 
 export interface OfferSelection {
-  /** Preferred network; its offer wins whenever it is payable. */
+  /** Preferred network; its offer wins whenever it is payable and its balance covers it. */
   preferred?: PaymentNetwork;
   /** Rails this payer can settle. */
   rails: readonly PaymentRail[];
-  /** Spendable USDC per network, consulted only when the preferred network is not offered. */
+  /** Spendable USDC per network. */
   balances?: Partial<Record<OfferNetwork, number>>;
 }
 
 /**
- * Choose the offer to pay. The preferred network (default Base) wins whenever
- * it is offered, exactly as before multichain support. Otherwise the first
- * network in Base, Solana, Tempo, Monad order whose balance covers its price;
- * with no balance information, or none sufficient, the first payable network.
+ * Choose the offer to pay: the first network, preferred (default Base) then
+ * Base, Solana, Tempo, Monad, whose balance covers its price. Without balance
+ * information, or with none sufficient, the preferred network when offered,
+ * else the first payable network.
  */
 export function selectOffer(offers: ServiceOffer[], selection: OfferSelection): ServiceOffer | undefined {
   const preferred = selection.preferred ?? "base";
@@ -119,8 +119,6 @@ export function selectOffer(offers: ServiceOffer[], selection: OfferSelection): 
   const cheapest = (name: OfferNetwork) => payable.filter((offer) => offer.network_name === name)
     .sort((a, b) => (a.price_usd ?? Infinity) - (b.price_usd ?? Infinity))[0];
   const order = [preferred, ...FALLBACK_ORDER.filter((name) => name !== preferred)];
-  const first = cheapest(preferred);
-  if (first) return first;
   const candidates = order.map(cheapest).filter((offer): offer is ServiceOffer => offer !== undefined);
   const balances = selection.balances;
   return (balances && candidates.find((offer) => (balances[offer.network_name!] ?? 0) >= (offer.price_usd ?? 0))) || candidates[0];
