@@ -654,6 +654,8 @@ export interface LoopCheckpoint {
   completionNudges: number;
   /** Last complete answer held while a completion gate asks for follow-up. */
   pendingFinalMessage?: string;
+  /** The held answer is the user's; gate follow-up work must not replace it. */
+  finalAnswerHeld?: boolean;
   outputContinuationNudges: number;
   outputContinuationPrefix: string;
   serviceCallFailures: number;
@@ -801,6 +803,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     "Before finishing a substantive task, consider whether a follow-up, reminder, monitoring loop, recurring report, or maintenance check would materially advance the owner's goal; create one when the need is clear, but do not schedule ordinary one-off work.",
     "Financial state: the current hosted financial snapshot is authoritative; historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. When the snapshot lists wallet networks, each network's balance is separate: a payment on a network needs that network's available balance. Report the wallet to the owner as one total, mentioning the per-network split only when it matters. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for refreshed financial state. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
   );
+  if (options.hosted) systemPromptParts.push(
+    "Files you produce: every file in this session's workspace, whether written with save_file or by a shell command, is published to the owner as a downloadable, previewable file. To point at one in your final message, write its exact workspace-relative path as plain text, for example generated/report.pdf — the owner's interface turns that path into a working download and preview link. Never invent a download URL, a sandbox: link, a /mnt/data path, or any other path the owner cannot open, and never claim a file exists before you have verified it."
+  );
   if (options.dynamicTools) {
     systemPromptParts.push(
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover, inspect_paid_service to see the exact schema/price/reputation, call_paid_service to execute through the enforced purchase lifecycle, and review_paid_service for the required review after every confirmed paid call (success or failure). The same review tool accepts unpaid experiences; review relevant free results or failed attempts without inventing payment evidence. Distinguish provider faults from local errors and uncertain failures.",
@@ -876,13 +881,18 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   const repeatedFailures = new Map<string, number>(options.resume?.repeatedFailures);
   let completionNudges = options.resume?.completionNudges ?? 0;
   let pendingFinalMessage = options.resume?.pendingFinalMessage;
+  // Once a completion gate holds a finished answer, the extra turn it buys is
+  // housekeeping (required reviews, CrowdCode reflection). Its closing words
+  // must never become the answer the owner reads.
+  let finalAnswerHeld = options.resume?.finalAnswerHeld ?? false;
+  let supersededFinalMessage: string | undefined;
   let outputContinuationNudges = options.resume?.outputContinuationNudges ?? 0;
   let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
   let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
   const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
     await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState, deliveredMessageIds: [...deliveredMessageIds],
-      completionNudges, pendingFinalMessage, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
+      completionNudges, pendingFinalMessage, finalAnswerHeld, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
       repeatedFailures: [...repeatedFailures.entries()] }));
   };
   const injectMessages = async (turn: number) => {
@@ -895,6 +905,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     if (fresh.length) {
       // A saved answer predates this user instruction and cannot answer it.
       pendingFinalMessage = undefined;
+      finalAnswerHeld = false;
+      supersededFinalMessage = undefined;
       outputContinuationPrefix = "";
       await checkpoint(turn);
     }
@@ -902,6 +914,18 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     if (pending.length) await options.inbox?.delivered(pending.map(m => m.id));
     return fresh.length > 0;
   };
+  /** The answer in hand when a gate first blocks is the user's; later closing
+   * words (a reflection write-up, a review acknowledgement) only annotate it. */
+  const recordFinalMessage = (text: string | undefined) => {
+    if (!text?.trim()) return;
+    if (!finalAnswerHeld) pendingFinalMessage = text;
+    else if (text.trim() !== pendingFinalMessage?.trim()) supersededFinalMessage = text;
+  };
+  const gateNudge = (blocker: string) => finalAnswerHeld
+    ? `Your final answer is already saved and will be delivered to the user exactly as written; nothing you write now can replace it. Before this run ends: ${blocker} Then call complete_session again to finish; a one-line acknowledgement is enough, and do not restate the answer.`
+    : `You cannot finish yet: ${blocker}`;
+  const withReflection = (summary: Record<string, unknown>) =>
+    supersededFinalMessage ? { ...summary, reflection_note: supersededFinalMessage } : summary;
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
   const subagentLimiter = createLimiter(options.subagent?.maxParallel ?? 4);
@@ -987,7 +1011,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       if (await injectMessages(turn + 1)) continue;
       const finalMessage = response.content.trim()
         ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
-      if (finalMessage.trim()) pendingFinalMessage = finalMessage;
+      recordFinalMessage(finalMessage);
       const blocker = await options.completionGate?.(completionNudges > 0);
       if (blocker) {
         if (completionNudges >= 1) {
@@ -995,14 +1019,15 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
         completionNudges += 1;
-        const nudge: LlmMessage = { role: "user", content: `You cannot finish yet: ${blocker}` };
+        if (pendingFinalMessage?.trim()) finalAnswerHeld = true;
+        const nudge: LlmMessage = { role: "user", content: gateNudge(blocker) };
         messages.push(nudge);
         await options.onMessage?.(nudge);
         await checkpoint(turn + 1);
         continue;
       }
       if (!pendingFinalMessage?.trim()) throw new Error("The model ended without an answer.");
-      const summary = await completeSession(session, pendingFinalMessage);
+      const summary = withReflection(await completeSession(session, pendingFinalMessage));
       return { outcome: "completed", summary, turns: turn + 1 };
     }
     // Launch every spawn_subagent in this reply immediately (bounded
@@ -1146,7 +1171,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       if (!result.ok) continue;
       const finalMessage = result.data && typeof result.data === "object"
         ? (result.data as Record<string, unknown>).final_message : undefined;
-      if (typeof finalMessage === "string" && finalMessage.trim()) pendingFinalMessage = finalMessage;
+      if (typeof finalMessage === "string") recordFinalMessage(finalMessage);
       const blocker = await options.completionGate?.(completionNudges > 0);
       if (blocker) {
         if (completionNudges >= 1) {
@@ -1154,9 +1179,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
         completionNudges += 1;
+        if (pendingFinalMessage?.trim()) finalAnswerHeld = true;
         const gateMessage = {
           role: "user",
-          content: `You cannot finish yet: ${blocker}`
+          content: gateNudge(blocker)
         } as LlmMessage;
         messages.push(gateMessage);
         await options.onMessage?.(gateMessage);
@@ -1166,16 +1192,16 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       if (!pendingFinalMessage?.trim()) throw new Error("The model ended without an answer.");
       const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
       if (result.data && typeof result.data === "object") {
-        const summary = { ...result.data, final_message: pendingFinalMessage } as Record<string, unknown>;
+        const summary = withReflection({ ...result.data, final_message: pendingFinalMessage }) as Record<string, unknown>;
         if (backgroundResults) {
           summary.background_subagents = backgroundResults;
         }
         return { outcome: "completed", summary, turns: turn + 1 };
       }
-      const summary = await completeSession(
+      const summary = withReflection(await completeSession(
         session,
         pendingFinalMessage
-      );
+      ));
       if (backgroundResults) {
         summary.background_subagents = backgroundResults;
       }

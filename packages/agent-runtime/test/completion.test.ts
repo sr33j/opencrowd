@@ -70,12 +70,51 @@ it("retains the answer and does not repeat reflection after a checkpoint restart
   expect(provider.complete).toHaveBeenCalledTimes(1);
 });
 
-it.each(["tool", "text"])("uses a revised %s answer after reflection", async kind => {
+it.each(["tool", "text"])("keeps the delivered answer when reflection closes with a %s summary", async kind => {
   const tools = reflection();
-  const revised = "Updated recommendation based on the follow-up.";
+  const reflectionText = "Reflection completed. I submitted one paid-service demand.";
   const provider = { complete: vi.fn().mockResolvedValueOnce(complete())
-    .mockResolvedValueOnce(kind === "tool" ? complete(revised) : { content: revised, toolCalls: [] }) };
+    .mockResolvedValueOnce(kind === "tool" ? complete(reflectionText) : { content: reflectionText, toolCalls: [] }) };
   const result = await runAgentTaskDetailed(await session(), "Find a role", { provider, completionGate: tools.completionGate });
+  expect(result.summary.final_message).toBe(answer);
+  // The reflection is kept for diagnostics, never as the user-facing answer.
+  expect(result.summary.reflection_note).toBe(reflectionText);
+  expect(provider.complete.mock.calls[1][0].filter((m: { role: string }) => m.role === "user").at(-1).content)
+    .toContain("already saved");
+});
+
+it("keeps the answer while the model files a required review after completing", async () => {
+  const tools = reflection(true);
+  await tools.execute("request_service", {});
+  const provider = { complete: vi.fn().mockResolvedValueOnce(complete())
+    .mockResolvedValueOnce(complete("Review submitted.")) };
+  const result = await runAgentTaskDetailed(await session(), "Find a role", { provider, completionGate: async () => undefined });
+  expect(result.summary.final_message).toBe(answer);
+});
+
+it("does not hold an answer the gate blocked before one existed", async () => {
+  let blocked = false;
+  const provider = { complete: vi.fn()
+    .mockResolvedValueOnce({ content: " ", toolCalls: [] })
+    .mockResolvedValueOnce(complete()) };
+  const result = await runAgentTaskDetailed(await session(), "Find a role", { provider,
+    completionGate: async () => (blocked ? undefined : ((blocked = true), "A paid purchase still needs its required review.")) });
+  expect(result.summary.final_message).toBe(answer);
+});
+
+it("replaces a held answer once the user sends a new instruction", async () => {
+  const current = await session();
+  const inbox = new FileSteeringInbox(join(current.sessionDir, "inbox.json"));
+  const revised = "Here is the company history instead.";
+  let calls = 0;
+  const tools = reflection();
+  const result = await runAgentTaskDetailed(current, "Find a role", { inbox, completionGate: tools.completionGate,
+    provider: { complete: async () => {
+      if (++calls === 1) return complete();
+      if (calls === 2) { await inbox.push({ id: "new", prompt: "Instead, explain the company history." }); return empty; }
+      return complete(revised);
+    } }
+  });
   expect(result.summary.final_message).toBe(revised);
 });
 

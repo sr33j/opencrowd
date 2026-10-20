@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.1 — 2026-10-20
+
+- A run always ends with the answer the agent gave. The CrowdCode reflection step (and a pending required review) buys an extra turn after `complete_session`; whatever the agent said in that turn used to overwrite the answer, so the owner read "Reflection completed. I submitted one paid-service demand" instead of the result. The delivered answer is now held and returned unchanged; the closing text is kept as `reflection_note` for diagnostics, and the gate tells the agent its answer is already saved. A new user instruction still clears the held answer.
+- Hosted agents are told how to point at the files they produce: write the exact workspace-relative path (`generated/report.pdf`), never an invented download URL, a `sandbox:` link or a `/mnt/data` path. The hosted web UI turns those paths into working download and preview links.
+
 ## 0.10.0 — 2026-10-20
 
 - Find the best service across Base, Solana and Tempo. `find_paid_service` with a query now sends AgentCash's results, the payer's networks and its per-network balances to CrowdCode's new `find_service`, which adds Coinbase's x402 catalog, the mpp.dev MPP catalog and CrowdCode's reviewed services, then ranks by CrowdCode quality, the effective price on each service's best network (including about $0.03 to move USDC between your own networks when that network's balance is short), then the balance there. AgentCash's default search found 2 of 29 Solana-only and 49 of 127 MPP catalog services; these are now found. Results keep that order after the usual payability probe and show `rank`, `quality`, `best_network`, `effective_price_usd`, `transfer_needed` and `sources`. With CrowdCode off, or when its ranking is unavailable, AgentCash's order is used. Both CLI and hosted agents use it; the system prompt tells agents to prefer the top service that fits, whatever its network, and to move funds between their networks when needed if they have a tool for it.
