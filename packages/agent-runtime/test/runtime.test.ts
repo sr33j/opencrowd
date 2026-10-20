@@ -1070,6 +1070,32 @@ describe("agent loop transcript", () => {
     expect(systemPrompt).toContain("enforced in code");
   });
 
+  it("tells hosted agents to pay for a capability before asking the owner for credentials, and how to name files they produced", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
+    let systemPrompt = "";
+    const capture: LlmProvider = {
+      async complete(messages): Promise<LlmResponse> {
+        systemPrompt = messages.find((message) => message.role === "system")?.content ?? "";
+        return { content: "done", toolCalls: [] };
+      }
+    };
+    await runAgentTask(session, "email the summary", { provider: capture, hosted: true, knowledge: false,
+      dynamicTools: { definitions: [], execute: async () => ({ ok: true, data: {} }) } });
+    // A paid email/SMS/phone service the agent can pay for beats stopping to
+    // ask the owner for a personal token they must go and create.
+    expect(systemPrompt).toContain("Buy the capability before asking for the owner's credentials");
+    expect(systemPrompt).toContain("Ask for a secret only when the work genuinely needs the owner's own account or identity");
+    // Produced files are named by workspace-relative path, not an invented URL.
+    expect(systemPrompt).toContain("write its exact workspace-relative path");
+    expect(systemPrompt).toContain("Never invent a download URL, a sandbox: link, a /mnt/data path");
+
+    const local = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
+    await runAgentTask(local, "email the summary", { provider: capture, knowledge: false,
+      dynamicTools: { definitions: [], execute: async () => ({ ok: true, data: {} }) } });
+    expect(systemPrompt).not.toContain("Buy the capability before asking for the owner's credentials");
+  });
+
   it("includes budget snapshots on every tool result message", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
