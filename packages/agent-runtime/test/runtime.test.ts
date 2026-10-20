@@ -1086,8 +1086,9 @@ describe("agent loop transcript", () => {
     // ask the owner for a personal token they must go and create.
     expect(systemPrompt).toContain("Buy the capability before asking for the owner's credentials");
     expect(systemPrompt).toContain("Ask for a secret only when the work genuinely needs the owner's own account or identity");
-    // Produced files are named by workspace-relative path, not an invented URL.
-    expect(systemPrompt).toContain("write its exact workspace-relative path");
+    // Only artifacts/ reaches the owner, named at the path they see it at.
+    expect(systemPrompt).toContain("only the artifacts/ directory of this session reaches the owner");
+    expect(systemPrompt).toContain("artifacts/generated/report.pdf is generated/report.pdf to them");
     expect(systemPrompt).toContain("Never invent a download URL, a sandbox: link, a /mnt/data path");
 
     const local = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
