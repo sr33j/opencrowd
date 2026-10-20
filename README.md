@@ -84,6 +84,18 @@ There is one wallet: AgentCash's. OpenCrowd shows public addresses,
 balances, and funding links (`/wallet`, `/fund`) and never manages, copies,
 or exports keys. See [SECURITY.md](SECURITY.md) for the enforcement model.
 
+Paid services settle in USDC on the network you prefer when they offer it:
+x402 on Base (the default) or Solana, MPP on Tempo, and x402 on Monad when
+you choose it. Solana uses AgentCash's separate Solana address
+(`~/.agentcash/solana-wallet.json`); `opencrowd wallet accounts` lists every
+network's address and balance. When a service does not offer your preferred
+network, the first of Base, Solana and Tempo whose balance covers the price is
+used.
+
+```sh
+opencrowd config set payment-network solana   # or --payment-network solana per run
+```
+
 ## Spending limits
 
 By default, each model or paid tool call can spend up to **$1** automatically,
@@ -137,6 +149,7 @@ opencrowd run --budget 1.00 "Find a service and summarize options"
 opencrowd run --session <session-id> "Follow up on the previous result"
 opencrowd config show
 opencrowd wallet balance
+opencrowd wallet accounts
 opencrowd doctor
 opencrowd evals gaia --tier smoke --harness opencrowd,claude,codex
 opencrowd evals suite --set all --tag baseline --model openai/gpt-5.6-luna --subagent-model off

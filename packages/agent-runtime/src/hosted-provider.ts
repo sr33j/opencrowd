@@ -1,4 +1,4 @@
-import { FinancialStateSchema, type FinancialState, ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
+import { FinancialStateSchema, parseNetworkBalances, type FinancialState, ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
@@ -95,9 +95,13 @@ export interface HostedBridgeOptions { socketPath: string; runId: string; sessio
 export async function readHostedFinancialState(options: HostedBridgeOptions): Promise<FinancialState> {
   try {
     const reply = await postHostedTool(options, "economy.balance", {}, { timeoutMs: 10000 });
-    const parsed = FinancialStateSchema.safeParse((reply.data as { financial_state?: unknown } | undefined)?.financial_state);
-    if (reply.ok && parsed.success && parsed.data.status === "available" && parsed.data.run_id === options.runId)
-      return parsed.data;
+    const data = reply.data as { financial_state?: unknown; networks?: unknown } | undefined;
+    const parsed = FinancialStateSchema.safeParse(data?.financial_state);
+    if (reply.ok && parsed.success && parsed.data.status === "available" && parsed.data.run_id === options.runId) {
+      // Control may report per-network balances beside the snapshot rather than inside it.
+      const networks = parsed.data.wallet.networks ?? parseNetworkBalances(data?.networks);
+      return networks ? { ...parsed.data, wallet: { ...parsed.data.wallet, networks } } : parsed.data;
+    }
   } catch { /* unavailable is explicit; never fall back to local accounting */ }
   return { status: "unavailable", reason: "Hosted financial state could not be read. Do not infer balance or spending from the local session budget." };
 }

@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 /**
@@ -26,6 +26,20 @@ export async function readAgentCashWallet(): Promise<AgentCashWalletFile | undef
       ? parsed.privateKey as `0x${string}`
       : undefined;
     return address && privateKey ? { address, privateKey } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * AgentCash keeps a separate Solana key in `solana-wallet.json` beside the EVM
+ * wallet and pays Solana x402 from it. Only the public address is read here;
+ * OpenCrowd never loads the Solana key.
+ */
+export async function readAgentCashSolanaAddress(): Promise<string | undefined> {
+  try {
+    const parsed = JSON.parse(await readFile(join(dirname(agentCashWalletPath()), "solana-wallet.json"), "utf8")) as Record<string, unknown>;
+    return typeof parsed.address === "string" && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(parsed.address) ? parsed.address : undefined;
   } catch {
     return undefined;
   }

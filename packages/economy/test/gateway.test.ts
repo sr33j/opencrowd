@@ -314,7 +314,7 @@ describe("outcome reconciliation", () => {
 
     const result = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("does not support for automatic payment");
+    expect(result.error).toContain("no payment rail this agent can pay automatically");
     expect(agentcash.fetchCalls).toHaveLength(0);
   });
 });

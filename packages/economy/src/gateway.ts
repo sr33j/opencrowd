@@ -14,6 +14,7 @@ import {
 } from "@opencrowd/core";
 import type { AgentCashAdapter, PaidFetchResult, PaymentRail } from "./agentcash.js";
 import type { CrowdCodeAdapter, ServiceEvidence } from "./crowdcode.js";
+import { describeRails } from "./offers.js";
 import {
   loadApprovalRules,
   matchApprovalRule,
@@ -84,8 +85,13 @@ export interface EconomyGatewayOptions {
   approvalRulesPath?: string;
   /** Reject services with sufficient evidence below this score (default 2). */
   minServiceScore?: number;
+  /** Rails this payer may settle automatically (default VERIFIED_RAILS). */
+  paymentRails?: readonly PaymentRail[];
   onProgress?: (event: ProgressEvent) => void;
 }
+
+/** Rails CrowdCode verifies end to end: x402 on Base, Solana and Monad, and MPP on Tempo. */
+export const VERIFIED_RAILS: readonly PaymentRail[] = ["x402-base", "x402-solana", "x402-monad", "mppx"];
 
 export class EconomyGateway {
   /**
@@ -288,11 +294,12 @@ export class EconomyGateway {
     if (!inspection) {
       return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
     }
-    // Only rails CrowdCode verifies end-to-end may pay automatically.
-    if (inspection.rail !== "x402-base" && inspection.rail !== "x402-monad") {
+    // Only rails CrowdCode verifies end-to-end, and this payer can settle, may pay automatically.
+    const rails = this.options.paymentRails ?? VERIFIED_RAILS;
+    if (!rails.includes(inspection.rail)) {
       return {
         ok: false,
-        error: "this endpoint settles on a payment rail OpenCrowd does not support for automatic payment (allowed: x402 USDC on Base or Monad)"
+        error: `this endpoint offers no payment rail this agent can pay automatically (payable: ${describeRails(rails)})`
       };
     }
     const requestedCostCents = intArg(args.max_cost_cents) ?? inspection.priceCeilingCents;
@@ -380,7 +387,7 @@ export class EconomyGateway {
 
     const purchaseId = newPurchaseId();
     const railUsed = result.payment?.rail ?? inspection.rail;
-    const supportedRail = railUsed === "x402-base" || railUsed === "x402-monad" || railUsed === "mppx";
+    const supportedRail = VERIFIED_RAILS.includes(railUsed);
     const record: PurchaseRecord = {
       purchase_id: purchaseId,
       session_id: session.sessionId,
@@ -568,6 +575,8 @@ export class EconomyGateway {
       paymentProvider: evidence?.reference ? (state.record.rail === "mppx" ? "mppx" : "x402") : undefined,
       paymentProof: evidence?.proof,
       paymentTargetRef: evidence?.reference ? evidence.payTo : undefined,
+      // Solana pays from a different address than the EVM reviewer key.
+      ...(state.record.rail === "x402-solana" && evidence?.payer ? { payer: evidence.payer } : {}),
       taskContext: stringArg(args.task_context)
     });
     if (!result.ok) {

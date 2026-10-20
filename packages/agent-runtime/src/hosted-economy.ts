@@ -4,7 +4,8 @@ import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { SpendingDeclined, type SessionState } from "@opencrowd/core";
 import {
-  EconomyGateway, BaseServiceDiscovery, summarizeEvidence,
+  EconomyGateway, BaseServiceDiscovery, summarizeEvidence, classifyOffer, describeRails, HOSTED_RAILS, railForNetwork, selectOffer,
+  type ServiceOffer,
   type AgentCashAdapter,
   type CrowdCodeAdapter,
   type McpCallResult,
@@ -43,7 +44,6 @@ const RECONCILE_DELAY_MS = 2_000;
 const NOT_SENT_CODES = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ENOTDIR"]);
 const FREE_FETCH_TIMEOUT_MS = 30_000;
 const USDC_ATOMIC_PER_USD = 1_000_000;
-const BASE_NETWORK = "eip155:8453";
 /** Gateway tools that have no hosted counterpart worth advertising. */
 const HIDDEN_HOSTED_TOOLS = new Set(["bridge_usdc"]);
 
@@ -111,9 +111,6 @@ class ServiceDirectory {
 }
 
 export class HostedAgentCashAdapter implements AgentCashAdapter {
-  /** Rails observed by inspection; `fetch` refuses anything but Base x402 regardless of the caller's rail. */
-  private readonly inspectedRails = new Map<string, PaymentRail | "free">();
-
   constructor(
     private readonly directory: ServiceDirectory,
     private readonly socket: HostedBridgeOptions,
@@ -127,7 +124,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       const result = reply.data as any;
       if (!reply.ok || result?.status !== 200) return { ok: false, error: reply.error ?? "AgentCash search unavailable" };
       return { ok: true, data: JSON.parse(result.body) };
-    });
+    // The hosted gateway negotiates Base, Solana or Tempo per call from the agent's per-network balances.
+    }, { rails: HOSTED_RAILS, negotiated: true });
   }
   private readonly discovery: BaseServiceDiscovery;
   async read(url: string): Promise<McpCallResult> {
@@ -153,15 +151,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
     const refuse = (error: string): PaidFetchResult => ({ ok: false, ambiguous: false, data: undefined, error });
-    const inspected = this.inspectedRails.get(`${request.method.toUpperCase()} ${request.url}`);
-    if (request.rail === "mppx" || inspected === "mppx") {
-      return refuse("this service settles on MPP/Tempo; hosted agents can only pay x402 services on Base");
-    }
-    if (request.rail === "x402-monad" || inspected === "x402-monad") {
-      return refuse("this service was inspected for Monad settlement; hosted agents can only pay x402 services on Base");
-    }
-    if (request.rail === "unsupported" || inspected === "unsupported") {
-      return refuse("this service settles on a payment network hosted agents cannot pay (only x402 USDC on Base)");
+    // Refused before the bridge: the hosted gateway cannot settle these rails (Monad, other chains or tokens).
+    if (!HOSTED_RAILS.includes(request.rail)) {
+      return refuse(`this service settles on a payment network hosted agents cannot pay; hosted agents pay ${describeRails(HOSTED_RAILS)}`);
     }
     const serviceId = await this.directory.resolveServiceId(request.url)
       ?? `url:${createHash("sha256").update(request.url).digest("hex")}`;
@@ -206,6 +198,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       const status = numberValue(data.status);
       const outcome = data.outcome === "paid_success" ? "paid_success" : "paid_failure";
       const paidAtomic = numberValue(data.amount_atomic);
+      // The gateway chose the network; an older gateway that omits it paid on Base.
+      const network = stringValue(data.network);
       return {
         ok: outcome === "paid_success",
         ambiguous: false,
@@ -214,10 +208,12 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
         authMode: "paid",
         error: outcome === "paid_success" ? undefined : `the paid call returned HTTP ${status ?? "?"}`,
         payment: {
-          rail: "x402-base",
+          rail: network ? railForNetwork(network) ?? "unsupported" : "x402-base",
           paidUsd: paidAtomic === undefined ? undefined : paidAtomic / USDC_ATOMIC_PER_USD,
+          // The bare transaction is how the hosted gateway finds its settled attempt for the review.
           reference: stringValue(data.transaction),
-          payTo: stringValue(data.pay_to)
+          payTo: stringValue(data.pay_to),
+          payer: stringValue(data.payer)
         }
       };
     }
@@ -357,6 +353,7 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
     approvalMode: "auto",
     hostedSpending: true,
     minServiceScore: 2,
+    paymentRails: HOSTED_RAILS,
     // Hosted rules live with the agent's session, never in a user config dir.
     approvalRulesPath: join(options.session.sessionDir, "approval-rules.json")
   });
@@ -368,57 +365,73 @@ export type { EconomyTools as HostedDynamicTools } from "./economy-tools.js";
 export function hostedDynamicTools(economy: EconomyGateway) {
   const tools = economyTools(economy, { hidden: HIDDEN_HOSTED_TOOLS });
   return { ...tools, definitions: tools.definitions.map(tool => tool.name === "get_wallet_status"
-    ? { ...tool, description: "Read this hosted agent's USDC wallet balance and authoritative current-run inference spending, service spending, payment holds and authorized budget. Read-only." } : tool) };
+    ? { ...tool, description: "Read this hosted agent's USDC wallet balances (per network when reported: Base, Solana, Tempo) and authoritative current-run inference spending, service spending, payment holds and authorized budget. A payment on a network needs that network's balance. Read-only." } : tool) };
 }
 
 
 interface PaymentOffer {
+  /** The rail the hosted gateway would most likely settle (Base, then Solana, then Tempo); `unsupported` when none is payable. */
   rail: PaymentRail;
+  /** Cheapest payable price; with no payable offer, the cheapest offered price. */
   priceUsd?: number;
   payTo?: string;
   network?: string;
+  /** Every offer, x402 and MPP, with its network, price and rail. */
+  offers: ServiceOffer[];
   inputSchema?: unknown;
   outputExample?: unknown;
   description?: string;
 }
 
 /**
- * Decode an x402 v2 `payment-required` header (base64 JSON) or, failing that,
- * a v1-style JSON body carrying the same `accepts` list. Parsed by hand; the
- * runtime takes no x402 client dependency for inspection.
+ * Decode a 402 into its payment offers: an x402 v2 `payment-required` header
+ * (base64 JSON) or a v1-style JSON body carrying the same `accepts` list,
+ * plus MPP challenges from `WWW-Authenticate: Payment` (one per method).
+ * Parsed by hand; the runtime takes no x402 or MPP client dependency.
  */
-export function parsePaymentRequired(header: string | null, body: string): PaymentOffer | undefined {
+export function parsePaymentRequired(header: string | null, body: string, wwwAuthenticate?: string | null): PaymentOffer | undefined {
   const decoded = header ? parseJson(Buffer.from(header, "base64").toString("utf8")) ?? parseJson(header) : undefined;
   const offer = objectValue(decoded) ?? objectValue(parseJson(body));
   const accepts = Array.isArray(offer?.accepts) ? offer.accepts.map(objectValue).filter((entry): entry is Record<string, unknown> => entry !== undefined) : [];
-  if (!offer || accepts.length === 0) {
+  const options = [...accepts.map((accept) => ({ ...accept, protocol: "x402" })), ...mppChallenges(wwwAuthenticate)];
+  if (options.length === 0) {
     return undefined;
   }
-  const networks = accepts.map((accept) => stringValue(accept.network)?.toLowerCase() ?? "");
-  const rail: PaymentRail = networks.includes(BASE_NETWORK)
-    ? "x402-base"
-    : networks.some((network) => network.includes("tempo")) ? "mppx" : "unsupported";
-  const onRail = rail === "x402-base"
-    ? accepts.filter((accept) => stringValue(accept.network)?.toLowerCase() === BASE_NETWORK)
-    : rail === "mppx" ? accepts.filter((accept) => stringValue(accept.network)?.toLowerCase().includes("tempo")) : accepts;
-  const amounts = onRail
-    .map((accept) => numberValue(accept.amount ?? accept.maxAmountRequired))
-    .filter((amount): amount is number => amount !== undefined && amount >= 0);
-  const cheapest = amounts.length ? onRail[amounts.indexOf(Math.min(...amounts))] : onRail[0];
-  const resource = objectValue(offer.resource);
+  const offers = options.map(classifyOffer);
+  const chosen = selectOffer(offers, { rails: HOSTED_RAILS });
+  const payable = offers.filter((candidate) => candidate.rail !== "unsupported" && HOSTED_RAILS.includes(candidate.rail));
+  const prices = (payable.length ? payable : offers).map((candidate) => candidate.price_usd).filter((price): price is number => price !== undefined);
+  const resource = objectValue(offer?.resource);
   // The x402 discovery extension carries the input/output schema under `info`.
-  const info = Object.values(objectValue(offer.extensions) ?? {})
+  const info = Object.values(objectValue(offer?.extensions) ?? {})
     .map((extension) => objectValue(objectValue(extension)?.info))
     .find((candidate) => candidate !== undefined);
+  const shown = chosen ?? offers[0];
   return {
-    rail,
-    priceUsd: amounts.length ? Math.min(...amounts) / USDC_ATOMIC_PER_USD : undefined,
-    payTo: stringValue(cheapest?.payTo),
-    network: stringValue(cheapest?.network),
+    rail: chosen?.rail ?? "unsupported",
+    priceUsd: prices.length ? Math.min(...prices) : undefined,
+    payTo: shown?.pay_to,
+    network: shown?.network,
+    offers,
     inputSchema: info?.input,
     outputExample: info?.output,
-    description: stringValue(resource?.description) ?? stringValue(offer.description)
+    description: stringValue(resource?.description) ?? stringValue(offer?.description)
   };
+}
+
+/** `Payment method="tempo", intent="charge", request="<base64url JSON>"` challenges as discovery-style MPP options. */
+function mppChallenges(header: string | null | undefined): Record<string, unknown>[] {
+  if (!header) return [];
+  return header.split(/,\s*(?=Payment\s)/i).filter((segment) => /^\s*Payment\s/i.test(segment)).flatMap((segment) => {
+    const params: Record<string, string> = {};
+    for (const match of segment.replace(/^\s*Payment\s+/i, "").matchAll(/(\w+)=(?:"([^"]*)"|([^\s,]+))/g)) params[match[1]] = match[2] ?? match[3] ?? "";
+    const request = objectValue(params.request ? parseJson(Buffer.from(params.request, "base64url").toString("utf8")) : undefined);
+    if (!params.method || !request) return [];
+    const details = objectValue(request.methodDetails);
+    const chainId = typeof details?.chainId === "number" ? details.chainId : 4217;
+    return [{ protocol: "mpp", paymentMethod: params.method, intent: params.intent, network: params.method === "tempo" ? `tempo:${chainId}` : params.method,
+      asset: request.currency, amount: request.amount, ...(typeof request.decimals === "number" ? { decimals: request.decimals } : {}), payTo: request.recipient }];
+  });
 }
 
 function parseListedService(raw: unknown): ListedService | undefined {

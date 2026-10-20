@@ -6,6 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSession, loadSession } from "@opencrowd/core";
 import type { Command, Event } from "@opencrowd/protocol";
 import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired } from "../src/hosted-economy.js";
+import { readHostedFinancialState } from "../src/hosted-provider.js";
+import { BASE_USDC, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
 
 const discovery = vi.hoisted(() => ({ check: vi.fn(), discover: vi.fn() }));
@@ -32,10 +34,11 @@ const LISTING = {
 const DETAIL = { ok: true, service: LISTING.services[0], score: 4.6, n_eff: 12, unproven: false, num_reviews: 15,
   summary: { strengths: ["Fast, relevant results."], caveats: ["Occasional stale snippets."] } };
 
-function offer(network: string, amount = "10000", extra: Record<string, unknown> = {}) {
+const ASSETS: Record<string, string> = { "eip155:8453": BASE_USDC, [SOLANA_NETWORK]: SOLANA_USDC, "eip155:143": MONAD_USDC };
+function offer(network: string | string[], amount = "10000", extra: Record<string, unknown> = {}) {
   return Buffer.from(JSON.stringify({
     x402Version: 2,
-    accepts: [{ scheme: "exact", network, amount, asset: "0xusdc", payTo: "0xpayee", maxTimeoutSeconds: 60, extra: {} }],
+    accepts: [network].flat().map(n => ({ scheme: "exact", network: n, amount, asset: ASSETS[n] ?? "0xusdc", payTo: "0xpayee", maxTimeoutSeconds: 60, extra: {} })),
     resource: { url: SEARCH, description: "Web search over the live index" },
     extensions: { bazaar: { info: { input: { type: "object", properties: { query: { type: "string" } } }, output: { results: [] } } } },
     ...extra
@@ -46,8 +49,14 @@ function json(body: unknown, init: ResponseInit = {}) {
   return new Response(JSON.stringify(body), { ...init, headers: { "content-type": "application/json", ...(init.headers ?? {}) } });
 }
 
-/** A fetch double serving the CrowdCode API plus one x402 endpoint; records every call. */
-function fakeFetch(options: { endpointStatus?: number; header?: string; detailStatus?: number } = {}) {
+/** An MPP `tempo` charge challenge for USDC.e. */
+function mppChallenge(amount = "15000", currency = TEMPO_USDC) {
+  const request = Buffer.from(JSON.stringify({ amount, currency, decimals: 6, recipient: "0xtempo", methodDetails: { chainId: 4217 } })).toString("base64url");
+  return `Payment id="ch_1", realm="weather.example", method="tempo", intent="charge", request="${request}"`;
+}
+
+/** A fetch double serving the CrowdCode API plus one x402/MPP endpoint; records every call. */
+function fakeFetch(options: { endpointStatus?: number; header?: string | null; wwwAuthenticate?: string; detailStatus?: number } = {}) {
   const calls: { url: string; method: string; body?: string }[] = [];
   const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input); const method = init?.method ?? "GET";
@@ -57,7 +66,9 @@ function fakeFetch(options: { endpointStatus?: number; header?: string; detailSt
     if (url.startsWith(`${CROWDCODE}/api/services/`)) return json({ ok: false, error: "not found" }, { status: 404 });
     if (url === SEARCH || url === SOCIAL || url === WEATHER) {
       const status = options.endpointStatus ?? 402;
-      if (status === 402) return new Response("payment required", { status: 402, headers: { "payment-required": options.header ?? offer("eip155:8453") } });
+      if (status === 402) return new Response("payment required", { status: 402, headers: {
+        ...(options.header === null ? {} : { "payment-required": options.header ?? offer("eip155:8453") }),
+        ...(options.wwwAuthenticate ? { "www-authenticate": options.wwwAuthenticate } : {}) } });
       return json({ results: ["free result"] }, { status });
     }
     return new Response("nope", { status: 404 });
@@ -66,9 +77,14 @@ function fakeFetch(options: { endpointStatus?: number; header?: string; detailSt
     const method = url === WEATHER ? "GET" : "POST";
     const r = await fetcher(url, { method, ...(sampleInputBody ? { body: JSON.stringify(sampleInputBody) } : {}) });
     if (r.status >= 400 && r.status !== 402) return { found: false, message: `HTTP ${r.status}` };
-    const p = r.status === 402 ? JSON.parse(Buffer.from(r.headers.get("payment-required")!, "base64").toString()) : undefined;
-    return { found: true, advisories: [{ method, authMode: p ? "paid" : "unprotected", summary: "Web search over the live index",
-      inputSchema: { type: "object" }, outputSchema: { results: [] }, paymentOptions: p?.accepts.map((a: any) => ({ ...a, protocol: "x402", asset: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913" })) }] };
+    // Like @agentcash/discovery: x402 accepts plus MPP challenges from WWW-Authenticate.
+    const header = r.headers.get("payment-required");
+    const p = r.status === 402 && header ? JSON.parse(Buffer.from(header, "base64").toString()) : undefined;
+    const mpp = r.status === 402 ? parsePaymentRequired(null, "", r.headers.get("www-authenticate"))?.offers ?? [] : [];
+    const paymentOptions = [...(p?.accepts ?? []).map((a: any) => ({ ...a, protocol: "x402" })),
+      ...mpp.map(o => ({ protocol: "mpp", paymentMethod: "tempo", intent: "charge", network: o.network, asset: TEMPO_USDC, amount: String(Math.round(o.price_usd! * 1e6)), payTo: o.pay_to }))];
+    return { found: true, advisories: [{ method, authMode: r.status === 402 ? "paid" : "unprotected", summary: "Web search over the live index",
+      inputSchema: { type: "object" }, outputSchema: { results: [] }, paymentOptions: r.status === 402 ? paymentOptions : undefined }] };
   });
   discovery.discover.mockResolvedValue({ found: true, origin: "https://weather.example", endpoints: [{ path: "/api/forecast", method: "GET", protocols: ["x402"] }] });
   return { fetcher, calls };
@@ -106,15 +122,24 @@ describe("hosted economy: discovery and inspection", () => {
     expect((result.data as any).services).toEqual([expect.objectContaining({ endpoint: SEARCH, network: "eip155:8453", payable: true })]);
   });
 
-  it("decodes an x402 v2 payment-required header into rail, price, payee and schema", () => {
+  it("decodes x402 headers and MPP challenges into every offered network, price, payee and schema", () => {
     const base = parsePaymentRequired(offer("eip155:8453", "50000"), "")!;
     expect(base).toMatchObject({ rail: "x402-base", priceUsd: 0.05, payTo: "0xpayee", network: "eip155:8453", description: "Web search over the live index" });
     expect(base.inputSchema).toEqual({ type: "object", properties: { query: { type: "string" } } });
     expect(base.outputExample).toEqual({ results: [] });
-    expect(parsePaymentRequired(offer("tempo:mainnet"), "")?.rail).toBe("mppx");
-    expect(parsePaymentRequired(offer("solana:mainnet"), "")?.rail).toBe("unsupported");
-    expect(parsePaymentRequired(null, JSON.stringify({ accepts: [{ network: "eip155:8453", amount: "1000" }] }))).toMatchObject({ rail: "x402-base", priceUsd: 0.001 });
+    expect(parsePaymentRequired(offer(SOLANA_NETWORK), "")).toMatchObject({ rail: "x402-solana", network: SOLANA_NETWORK, priceUsd: 0.01 });
+    // MPP arrives in WWW-Authenticate, with or without an x402 header beside it.
+    const tempo = parsePaymentRequired(null, "", mppChallenge())!;
+    expect(tempo).toMatchObject({ rail: "mppx", priceUsd: 0.015, payTo: "0xtempo", offers: [{ network: "tempo:4217", network_name: "tempo", protocol: "mpp", rail: "mppx" }] });
+    const both = parsePaymentRequired(offer([SOLANA_NETWORK, "eip155:143"], "20000"), "", mppChallenge("15000"))!;
+    expect(both.offers.map(o => [o.network_name, o.rail, o.price_usd])).toEqual([["solana", "x402-solana", 0.02], ["monad", "x402-monad", 0.02], ["tempo", "mppx", 0.015]]);
+    expect(both).toMatchObject({ rail: "x402-solana", priceUsd: 0.015 });
+    expect(parsePaymentRequired(offer("eip155:143"), "")?.rail).toBe("unsupported");
+    expect(parsePaymentRequired(null, "", mppChallenge("1", "0xnotusdc"))?.rail).toBe("unsupported");
+    expect(parsePaymentRequired(offer("tempo:mainnet"), "")?.rail).toBe("unsupported");
+    expect(parsePaymentRequired(null, JSON.stringify({ accepts: [{ network: "eip155:8453", asset: BASE_USDC, amount: "1000" }] }))).toMatchObject({ rail: "x402-base", priceUsd: 0.001 });
     expect(parsePaymentRequired(null, "not an offer")).toBeUndefined();
+    expect(parsePaymentRequired(null, "", 'Bearer realm="x"')).toBeUndefined();
   });
 
   it("inspects a 402 endpoint into a Base x402 rail with a 1-cent ceiling and CrowdCode reputation", async () => {
@@ -133,11 +158,25 @@ describe("hosted economy: discovery and inspection", () => {
     expect(calls.some(c => c.url === `${CROWDCODE}/api/services/svc_search`)).toBe(true);
   });
 
-  it("reports MPP/Tempo and free endpoints honestly and treats an unlisted service as unproven", async () => {
-    const tempo = fakeFetch({ header: offer("tempo:mainnet") });
+  it("reports Tempo, Solana, Monad and free endpoints honestly and treats an unlisted service as unproven", async () => {
+    const tempo = fakeFetch({ header: null, wwwAuthenticate: mppChallenge() });
     const { gateway } = await economy(tempo.fetcher, "/nonexistent/bridge.sock");
     const social = await gateway.execute("inspect_paid_service", { url: SOCIAL });
-    expect(social.data).toMatchObject({ rail: "unsupported", schema: { rail: "unsupported", payable: false } });
+    expect(social.data).toMatchObject({ rail: "mppx", price_ceiling_cents: 2, schema: { rail: "mppx", payable: true, network: "eip155:4217",
+      offers: [{ network: "tempo", protocol: "mpp", price_usd: 0.015, payable: true }] } });
+    const multi = fakeFetch({ header: offer([SOLANA_NETWORK, "eip155:8453"], "30000"), wwwAuthenticate: mppChallenge("10000") });
+    const many = await economy(multi.fetcher, "/nonexistent/bridge.sock");
+    const offered = await many.gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    // The hosted gateway picks the network at payment time, so the ceiling covers the dearest payable offer.
+    expect(offered.data).toMatchObject({ rail: "x402-base", price_ceiling_cents: 3, schema: { offers: [
+      { network: "solana", price_usd: 0.03, payable: true }, { network: "base", price_usd: 0.03, payable: true }, { network: "tempo", price_usd: 0.01, payable: true }] } });
+    const monad = fakeFetch({ header: offer("eip155:143") });
+    const monadOnly = await economy(monad.fetcher, "/nonexistent/bridge.sock");
+    const refused = await monadOnly.gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    expect(refused.data).toMatchObject({ rail: "unsupported", schema: { payable: false, offers: [{ network: "monad", payable: false }],
+      note: expect.stringContaining("payable here: x402 USDC on Base, x402 USDC on Solana or MPP USDC.e on Tempo") } });
+    const call = await monadOnly.gateway.execute("call_paid_service", { url: SEARCH, method: "POST", max_cost_cents: 1 });
+    expect(call).toMatchObject({ ok: false, error: expect.stringContaining("payable: x402 USDC on Base, x402 USDC on Solana or MPP USDC.e on Tempo") });
     const free = fakeFetch({ endpointStatus: 200 });
     const unlisted = await economy(free.fetcher, "/nonexistent/bridge.sock");
     const result = await unlisted.gateway.execute("inspect_paid_service", { url: "https://weather.example/api/forecast", method: "GET" });
@@ -274,13 +313,62 @@ describe("hosted economy: payment over the bridge", () => {
     expect(capped.ok).toBe(false); expect(capped.error).toContain("(per_call_cap)");
     expect((await gateway.listPurchasesRedacted())[0]).toMatchObject({ outcome: "free", charged_cost_cents: 0 });
     const directory = (gateway as any).options.agentcash as HostedAgentCashAdapter;
+    for (const rail of ["x402-monad", "unsupported"] as const) {
+      const refused = await directory.fetch({ url: SOCIAL, method: "POST", maxAmountUsd: 0.01, rail });
+      expect(refused).toMatchObject({ ok: false, ambiguous: false, error: expect.stringContaining("hosted agents pay x402 USDC on Base, x402 USDC on Solana or MPP USDC.e on Tempo") });
+    }
+    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(1);
+    // MPP/Tempo now reaches the gateway, which negotiates and pays it.
     const mpp = await directory.fetch({ url: SOCIAL, method: "POST", maxAmountUsd: 0.01, rail: "mppx" });
-    expect(mpp).toMatchObject({ ok: false, ambiguous: false, error: expect.stringMatching(/MPP\/Tempo/) });
+    expect(mpp).toMatchObject({ ok: false, ambiguous: false, error: expect.stringContaining("per_call_cap") });
     const unlisted = await directory.fetch({ url: "https://unknown.example/api", method: "POST", maxAmountUsd: 0.01, rail: "x402-base" });
     expect(unlisted).toMatchObject({ ok: false, ambiguous: false, error: expect.stringContaining("per_call_cap") });
-    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(2);
+    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(3);
     expect(requests.at(-1)?.arguments.service_id).toMatch(/^url:/);
     expect(await directory.bridge()).toMatchObject({ ok: false, error: expect.stringContaining("not available for hosted agents") });
+  });
+
+  it.each([
+    ["solana", SOLANA_NETWORK, "x402-solana", "x402", "5wHu1qwD7q5ifaN5nwdcDqNFo53GJqa7nLp2BeeEpcHCusb4GzARz4GjgzsEHMkBMgCJMGa6GSQ1VG96Exv8kt2W"],
+    ["tempo", "eip155:4217", "mppx", "mppx", `0x${"cd".repeat(32)}`]
+  ])("records a %s payment chosen by the gateway and reviews it with the gateway's transaction", async (_name, network, rail, provider, transaction) => {
+    const { fetcher } = fakeFetch({ header: offer([SOLANA_NETWORK, "eip155:8453"]), wwwAuthenticate: mppChallenge("10000") });
+    const { socketPath, requests } = await bridge((name) => name === "economy.pay"
+      ? { ok: true, data: { ...SETTLED.data, transaction, network, payer: "agent-payer" } } : { ok: true, data: { accepted: true } });
+    const { session, gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "q" } });
+    expect(call).toMatchObject({ ok: true, data: { outcome: "paid_success", review_required: true } });
+    const [purchase] = await (await import("@opencrowd/economy")).listPurchases(session);
+    expect(purchase.record).toMatchObject({ rail, evidence: { rail, reference: transaction, payer: "agent-payer" } });
+    await gateway.execute("review_paid_service", { purchase_id: (call.data as any).purchase_id, rating: 4, reason: "fine" });
+    // The strict hosted review contract is unchanged: no payer fields, the bare transaction the gateway stored.
+    expect(requests.find(r => r.name === "economy.review")!.arguments).toEqual({ api_endpoint: SEARCH, payment_provider: provider, payment_target_ref: "0xpayee",
+      payment_reference: transaction, rating: 4, reason: "fine" });
+  });
+
+  it("reads per-network balances beside or inside the financial snapshot and keeps working without them", async () => {
+    const snapshot = { status: "available", run_id: "11111111-1111-4111-8111-111111111111", observed_at: "2026-10-20T00:00:00.000Z", currency: "USDC",
+      wallet: { balance_status: "available", balance_usdc: "3.000000", reserved_usdc: "0.000000", available_usdc: "3.000000" },
+      current_run: { inference_spent_usdc: "0.000000", service_spent_usdc: "0.000000", total_spent_usdc: "0.000000", reserved_usdc: "0.000000",
+        budget_limit_usdc: "1.000000", remaining_budget_usdc: "1.000000", per_call_approval_threshold_usdc: "0.100000", approval_mode: "auto" } };
+    const networks = [{ network: "base", caip2: "eip155:8453", address: "0xagent", balanceAtomic: "1000000", status: "available" },
+      { network: "solana", caip2: SOLANA_NETWORK, address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", balanceAtomic: "2000000", status: "available" },
+      { network: "tempo", caip2: "eip155:4217", address: "0xagent", balanceAtomic: null, status: "unavailable" }, { bogus: true }];
+    const read = async (data: unknown) => {
+      const { socketPath } = await bridge(() => ({ ok: true, data }));
+      return readHostedFinancialState({ socketPath, runId: snapshot.run_id, sessionId: "s" });
+    };
+    expect(await read({ financial_state: snapshot, networks })).toMatchObject({ status: "available", wallet: { balance_usdc: "3.000000", networks: [
+      { network: "base", balance_status: "available", balance_usdc: "1.000000" },
+      { network: "solana", address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", balance_usdc: "2.000000" },
+      { network: "tempo", balance_status: "unavailable", balance_usdc: null }] } });
+    const inside = { ...snapshot, wallet: { ...snapshot.wallet, networks: [{ network: "solana", balance_status: "available", balance_usdc: "2.000000", reserved_usdc: "0.500000", available_usdc: "1.500000" }] } };
+    // A snapshot that already carries networks wins over the rows beside it.
+    expect(await read({ financial_state: inside, networks })).toMatchObject({ wallet: { networks: [{ network: "solana", available_usdc: "1.500000" }] } });
+    const legacy = await read({ financial_state: snapshot });
+    expect(legacy).toMatchObject({ status: "available", wallet: { balance_usdc: "3.000000" } });
+    expect((legacy as any).wallet.networks).toBeUndefined();
   });
 
   it("reads the wallet through economy.balance", async () => {
@@ -309,8 +397,9 @@ describe("hosted economy: worker wiring", () => {
       economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
     expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
-    expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallet on Base");
-    expect(systemPrompt).toContain("Only x402 USDC on Base is payable");
+    expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallets on Base, Solana and Tempo");
+    expect(systemPrompt).toContain("Payable: x402 USDC on Base or Solana and MPP USDC.e on Tempo");
+    expect(systemPrompt).toContain("Other networks, including Monad, are not payable here");
     expect(systemPrompt).not.toContain("Paid external services are unavailable");
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
     expect(events.filter(e => e.type === "tool.started").map(e => [e.payload.toolName, e.payload.input])).toEqual([

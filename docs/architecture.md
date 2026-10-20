@@ -307,9 +307,14 @@ Invariants (each is runtime-enforced and tested):
 - Pending reviews survive restart.
 - Raw payment proof is stored for review but omitted from the model and normal
   CLI rendering.
-- Only rails CrowdCode verifies end-to-end are allowed for automatic payment:
-  Base x402 and Tempo MPP normalized to `mppx`. Unsupported automatic paid
-  rails are rejected.
+- Only rails CrowdCode verifies end-to-end, and the payer can settle, are
+  allowed for automatic payment: x402 on Base (`x402-base`), Solana
+  (`x402-solana`) and Monad (`x402-monad`, local and only when preferred), and
+  Tempo MPP normalized to `mppx`. Hosted agents pay Base, Solana and Tempo
+  through the hosted gateway. Unsupported automatic paid rails are rejected.
+- Offer selection keeps the preferred network (default Base) whenever it is
+  offered; otherwise the first of Base, Solana, Tempo whose balance covers the
+  price. Solana reviews carry `x402:solana:<signature>` and the Solana payer.
 
 Purchases live in an append-only `sessions/<session-id>/purchases.jsonl`.
 Full responses belong in artifacts, not the ledger.

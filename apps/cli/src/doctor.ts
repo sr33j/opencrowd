@@ -1,4 +1,4 @@
-import { loadConfig, configPath, readAgentCashWallet, resolvePaymentNetwork } from "@opencrowd/core";
+import { loadConfig, configPath, readAgentCashSolanaAddress, readAgentCashWallet, resolvePaymentNetwork } from "@opencrowd/core";
 import { MONAD_NETWORK, monadRpcUrl, monadUsdcBalance, sharedEconomyRuntime } from "@opencrowd/economy";
 import { sharedTypedProvider } from "@opencrowd/agent-runtime";
 
@@ -54,6 +54,16 @@ export async function runDoctor(log: (line: string) => void): Promise<boolean> {
           throw new Error(balance.error ?? "get_balance failed");
         }
         return "connected; balance readable";
+      }
+    },
+    {
+      name: "solana account",
+      run: async () => {
+        const address = await readAgentCashSolanaAddress();
+        if (!address) {
+          throw new Error("skipped: no AgentCash Solana wallet yet (AgentCash creates it on first use)");
+        }
+        return `${address} (x402 USDC on Solana via AgentCash; preferred payment network: ${resolvePaymentNetwork(config)})`;
       }
     },
     {

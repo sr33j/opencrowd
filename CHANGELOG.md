@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Pay x402 services on Solana through AgentCash's Solana account. Set `--payment-network solana`, `OPENCROWD_PAYMENT_NETWORK=solana` or `opencrowd config set payment-network solana` to prefer it. AgentCash is pinned to Solana for those calls. Reviews carry `x402:solana:<signature>` and the Solana payer address. They carry no payer signature: AgentCash 0.17 cannot sign messages with its Solana key, and crowdcode-mcp builds the canonical payload.
+- Choose among a service's offers across networks. The preferred network (default Base) still wins whenever it is offered, so current users see no change. Otherwise OpenCrowd uses the first of Base, Solana and Tempo (MPP) whose AgentCash balance covers the price, plus Monad when preferred. MPP `tempo` charges in USDC.e are now paid automatically. Inspection lists every offered network with its price and payability.
+- Show each network's address and USDC in `wallet balance`, the new `wallet accounts`, `wallet address` (Solana address), `/status` and `opencrowd doctor`.
+- Hosted agents can now pay MPP on Tempo and x402 on Solana as well as Base. The hosted gateway picks the network, and receipts record it. Inspection reports every offered network and quotes the ceiling across payable ones. MPP challenges are read from `WWW-Authenticate: Payment`. Monad-only and other-chain services are refused, with a message listing what hosted agents can pay. When control reports per-network balances, the hosted financial snapshot and prompt describe them.
+
 ## 0.7.0 — 2026-10-14
 
 - Upgrade the default CrowdCode MCP client to `crowdcode-mcp@0.7.0`, which accepts x402 Monad payment receipts. Configs still pinned to the previous shipped default (0.6.0) upgrade automatically; other custom pins are preserved.

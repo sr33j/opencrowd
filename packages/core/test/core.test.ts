@@ -17,6 +17,7 @@ import {
   loadConfig,
   openCrowdToolDefinition,
   summarizeToolInput,
+  readAgentCashSolanaAddress,
   readAgentCashWallet,
   requireAgentCashWallet,
   reserveBudget,
@@ -153,6 +154,16 @@ describe("AgentCash wallet contract", () => {
     await expect(requireAgentCashWallet()).resolves.toMatchObject({
       address: "0x1111111111111111111111111111111111111111"
     });
+  });
+
+  it("reads only the public address of AgentCash's Solana wallet beside it", async () => {
+    const root = await tempRoot();
+    process.env.AGENTCASH_WALLET_PATH = join(root, "wallet.json");
+    await expect(readAgentCashSolanaAddress()).resolves.toBeUndefined();
+    await writeFile(join(root, "solana-wallet.json"), JSON.stringify({ privateKey: "4Z7cXSyeFR8wNGMVXUE1TwtKn5D5Vu7FzEv69dokLv7K", address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", createdAt: "2026-10-20" }));
+    await expect(readAgentCashSolanaAddress()).resolves.toBe("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin");
+    await writeFile(join(root, "solana-wallet.json"), JSON.stringify({ address: "0x1111111111111111111111111111111111111111" }));
+    await expect(readAgentCashSolanaAddress()).resolves.toBeUndefined();
   });
 
   it("fails with an installation hint when no AgentCash wallet exists", async () => {

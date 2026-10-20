@@ -41,13 +41,16 @@ export interface OpenCrowdConfig {
   /** Default external-service approval mode for new sessions. */
   approval: ApprovalMode;
   /**
-   * Preferred x402 settlement network when a service offers several. `monad`
-   * pays eip155:143 USDC natively when offered and falls back to Base.
+   * Preferred settlement network when a service offers several. Its offer wins
+   * whenever present; otherwise the first of Base, Solana and Tempo (MPP) the
+   * wallet's balance covers. `solana` pays x402 through AgentCash's Solana
+   * account; `monad` pays eip155:143 USDC natively and is used only when set.
    */
   paymentNetwork: PaymentNetwork;
 }
 
-export type PaymentNetwork = "base" | "monad";
+export type PaymentNetwork = "base" | "solana" | "monad";
+export const PAYMENT_NETWORKS: readonly PaymentNetwork[] = ["base", "solana", "monad"];
 
 export const DEFAULT_CONFIG: OpenCrowdConfig = {
   configVersion: 3,
@@ -155,6 +158,7 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
 export function parsePaymentNetwork(value: unknown): PaymentNetwork | undefined {
   const normalized = typeof value === "string" ? value.trim().toLowerCase() : undefined;
   if (normalized === "monad" || normalized === "eip155:143") return "monad";
+  if (normalized === "solana" || normalized === "solana:5eykt4usfv8p8njdtrepy1vzqkqzkvdp") return "solana";
   if (normalized === "base" || normalized === "eip155:8453") return "base";
   return undefined;
 }
@@ -164,7 +168,7 @@ export function resolvePaymentNetwork(config?: Pick<OpenCrowdConfig, "paymentNet
   const env = process.env.OPENCROWD_PAYMENT_NETWORK;
   if (env !== undefined && env.trim() !== "") {
     const parsed = parsePaymentNetwork(env);
-    if (!parsed) throw new Error("OPENCROWD_PAYMENT_NETWORK must be base or monad");
+    if (!parsed) throw new Error(`OPENCROWD_PAYMENT_NETWORK must be ${PAYMENT_NETWORKS.join(", ")}`);
     return parsed;
   }
   return config?.paymentNetwork ?? DEFAULT_CONFIG.paymentNetwork;

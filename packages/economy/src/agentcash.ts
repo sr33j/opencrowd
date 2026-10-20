@@ -2,6 +2,7 @@ import { McpConnection, type McpCallResult } from "./mcp.js";
 import { BaseServiceDiscovery } from "./discovery.js";
 import { readAgentCashWallet, type PaymentNetwork } from "@opencrowd/core";
 import { MONAD_NETWORK, MONAD_USDC, MonadX402Payer, monadUsdcBalance } from "./monad.js";
+import { networkName, type OfferNetwork } from "./offers.js";
 
 /**
  * Typed adapter over the AgentCash MCP server. AgentCash owns wallet custody,
@@ -9,7 +10,7 @@ import { MONAD_NETWORK, MONAD_USDC, MonadX402Payer, monadUsdcBalance } from "./m
  * OpenCrowd consumes them through this typed surface only.
  */
 
-export type PaymentRail = "x402-base" | "x402-monad" | "mppx" | "unsupported";
+export type PaymentRail = "x402-base" | "x402-solana" | "x402-monad" | "mppx" | "unsupported";
 
 export interface PaidFetchRequest {
   operationId?: string;
@@ -45,12 +46,14 @@ export interface PaidFetchResult {
 export interface PaymentEvidence {
   paidUsd?: number;
   rail?: PaymentRail;
-  /** Settlement reference: x402 tx hash or MPP receipt reference. */
+  /** Settlement reference: x402 tx hash (`x402:<network>:<tx>` off Base) or MPP receipt reference. */
   reference?: string;
   /** Raw base64 receipt header (payment-response / Payment-Receipt). */
   proof?: string;
   /** The real payee from the payment challenge. */
   payTo?: string;
+  /** The paying address from the settlement receipt (the Solana address for x402-solana). */
+  payer?: string;
 }
 
 export interface WalletStatusResult {
@@ -84,12 +87,23 @@ export interface McpAgentCashAdapterOptions {
   monadBalance?: (address: string) => Promise<number>;
 }
 
+/** One AgentCash account: USDC on a network for the address AgentCash pays from there. */
+export interface WalletAccount {
+  network: string;
+  address?: string;
+  usdc?: number;
+  depositLink?: string;
+}
+
+const ACCOUNTS_TTL_MS = 30_000;
+
 export class McpAgentCashAdapter implements AgentCashAdapter {
   private readonly discovery: BaseServiceDiscovery;
   private readonly monad: MonadX402Payer;
+  private accountsCache?: { until: number; accounts: Promise<WalletAccount[]> };
   constructor(private readonly connection: McpConnection, private readonly options: McpAgentCashAdapterOptions = {}) {
     this.discovery = new BaseServiceDiscovery((query, options) => this.connection.call("search", { query, ...options }),
-      { paymentNetwork: options.paymentNetwork });
+      { paymentNetwork: options.paymentNetwork, balances: () => this.networkBalances() });
     this.monad = options.monad ?? new MonadX402Payer();
   }
   read(url: string): Promise<McpCallResult> {
@@ -99,13 +113,41 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
   }
 
   async getBalance(): Promise<WalletStatusResult> {
-    const [result, monad] = await Promise.all([this.connection.call("get_balance", {}), this.monadBalance()]);
+    const [result, monad, accounts] = await Promise.all([this.connection.call("get_balance", {}), this.monadBalance(),
+      this.accounts(true).catch(() => undefined)]);
     if (!result.ok) return { ok: false, data: result.data, error: result.error };
     // AgentCash does not know Monad; report its USDC for the same address alongside.
+    // Accounts carry each network's address (Solana differs from the EVM one) and USDC.
     const data = result.data && typeof result.data === "object" && !Array.isArray(result.data)
-      ? { ...(result.data as Record<string, unknown>), monad }
-      : { agentcash: result.data, monad };
+      ? { ...(result.data as Record<string, unknown>), ...(accounts ? { accounts } : {}), monad }
+      : { agentcash: result.data, ...(accounts ? { accounts } : {}), monad };
     return { ok: true, data };
+  }
+
+  /** AgentCash's per-network accounts (`list_accounts`), briefly cached for offer selection. */
+  accounts(refresh = false): Promise<WalletAccount[]> {
+    if (!refresh && this.accountsCache && this.accountsCache.until > Date.now()) return this.accountsCache.accounts;
+    const accounts = this.connection.call("list_accounts", {}).then((result) => {
+      if (!result.ok) throw new Error(result.error ?? "list_accounts failed");
+      return parseWalletAccounts(result.data);
+    });
+    this.accountsCache = { until: Date.now() + ACCOUNTS_TTL_MS, accounts };
+    accounts.catch(() => { this.accountsCache = undefined; });
+    return accounts;
+  }
+
+  /** Spendable USDC per network, for choosing among a service's offers. */
+  async networkBalances(): Promise<Partial<Record<OfferNetwork, number>>> {
+    const balances: Partial<Record<OfferNetwork, number>> = {};
+    for (const account of await this.accounts()) {
+      const name = networkName(account.network);
+      if (name && account.usdc !== undefined) balances[name] = (balances[name] ?? 0) + account.usdc;
+    }
+    if (this.options.paymentNetwork === "monad") {
+      const monad = await this.monadBalance();
+      if (typeof monad.usdc === "number") balances.monad = monad.usdc;
+    }
+    return balances;
   }
 
   private async monadBalance(): Promise<Record<string, unknown>> {
@@ -134,9 +176,12 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
     if (request.rail === "x402-monad") return this.monad.fetch(request);
+    // Pin AgentCash to the inspected network so it never pays on another chain.
     const railParams = request.rail === "mppx"
       ? { paymentNetwork: "tempo", paymentProtocol: "mpp" }
-      : { paymentNetwork: "base", paymentProtocol: "x402" };
+      : request.rail === "x402-solana"
+        ? { paymentNetwork: "solana", paymentProtocol: "x402" }
+        : { paymentNetwork: "base", paymentProtocol: "x402" };
     const result = await this.connection.call("fetch", {
       url: request.url,
       method: request.method,
@@ -293,23 +338,45 @@ function parsePaymentEvidence(record: Record<string, unknown>, requestedRail: Pa
   }
   const network = stringValue(payment?.network ?? record.network ?? receipt?.network)?.toLowerCase();
   const protocol = stringValue(payment?.protocol ?? record.protocol ?? record.paymentProtocol)?.toLowerCase();
-  const rail: PaymentRail = network === "tempo" || protocol === "mpp" || protocol === "mppx"
+  const named = networkName(network);
+  const rail: PaymentRail = named === "tempo" || protocol === "mpp" || protocol === "mppx"
     ? "mppx"
-    : network === "base" || network === "eip155:8453" || protocol === "x402"
-      ? "x402-base"
-      : network === undefined && protocol === undefined
-        ? requestedRail
-        : "unsupported";
+    : named === "solana"
+      ? "x402-solana"
+      : named === "base" || (network === undefined && protocol === "x402")
+        ? (requestedRail === "x402-solana" && named === undefined ? "x402-solana" : "x402-base")
+        : network === undefined && protocol === undefined
+          ? requestedRail
+          : "unsupported";
+  // CrowdCode verifies off-Base x402 settlements from a chain-qualified reference.
+  if (rail === "x402-solana" && !reference.startsWith("x402:")) reference = `x402:solana:${reference}`;
   return {
     paidUsd,
     rail,
     reference,
+    payer: stringValue(payment?.payer ?? receipt?.payer),
     proof,
     payTo: stringValue(
       payment?.payTo ?? payment?.pay_to ?? payment?.recipient
       ?? receipt?.payTo ?? receipt?.pay_to ?? receipt?.recipient ?? receipt?.payee
     )
   };
+}
+
+/** AgentCash `list_accounts`: `{ accounts: [{ network, address, balance, depositLink }] }`. */
+export function parseWalletAccounts(data: unknown): WalletAccount[] {
+  const record = objectValue(data);
+  const rows = Array.isArray(data) ? data : Array.isArray(record?.accounts) ? record.accounts : [];
+  return rows.map(objectValue).filter((row): row is Record<string, unknown> => row !== undefined && stringValue(row.network) !== undefined)
+    .map((row) => {
+      const usdc = numberValue(row.balance ?? row.usdc ?? row.balanceUsd);
+      return {
+        network: stringValue(row.network)!,
+        ...(stringValue(row.address) ? { address: stringValue(row.address) } : {}),
+        ...(usdc !== undefined ? { usdc } : {}),
+        ...(stringValue(row.depositLink) ? { depositLink: stringValue(row.depositLink) } : {})
+      };
+    });
 }
 
 function normalizedHeaders(value: unknown): Record<string, unknown> {

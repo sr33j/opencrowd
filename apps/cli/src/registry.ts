@@ -88,6 +88,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
           ? formatCents(wallet.totalCents)
           : wallet.error ? `unavailable (${wallet.error})` : "unknown";
         if (wallet.monadCents !== undefined) rows.wallet_monad_usdc = formatCents(wallet.monadCents);
+        if (wallet.solanaAddress) rows.wallet_solana = `${wallet.solanaAddress}${wallet.solanaCents !== undefined ? ` · ${formatCents(wallet.solanaCents)}` : ""}`;
       }
       return { kind: "text", label: "Status", body: renderKeyValues(rows) };
     }
