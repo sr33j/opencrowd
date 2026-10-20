@@ -68,6 +68,8 @@ interface Inspection {
   method: string;
   rail: PaymentRail;
   priceCeilingCents?: number;
+  /** Payee of the inspected offer, for reviews whose receipt omits it. */
+  payTo?: string;
   evidence: ServiceEvidence;
   inspectedAt: string;
 }
@@ -240,11 +242,14 @@ export class EconomyGateway {
     const evidence = await this.serviceEvidence(endpoint);
     const rail = railFromSchema(schema.data);
     const priceCeilingCents = priceCeilingFromSchema(schema.data);
+    const payTo = schema.data && typeof schema.data === "object" && typeof (schema.data as { pay_to?: unknown }).pay_to === "string"
+      ? (schema.data as { pay_to: string }).pay_to : undefined;
     await this.rememberInspection(inspectionKey(endpoint, method), {
       endpoint,
       method,
       rail,
       priceCeilingCents,
+      ...(payTo ? { payTo } : {}),
       evidence,
       inspectedAt: new Date().toISOString()
     });
@@ -403,7 +408,11 @@ export class EconomyGateway {
       // Confirmed paid successes AND paid failures require reviews; free,
       // SIWX, and unknown outcomes create no paid receipt to review.
       review_required: paid && supportedRail && await this.crowdcodeEnabled(),
-      evidence: result.payment,
+      // x402 Solana receipts carry no payee; CrowdCode needs it to verify a new
+      // service, so use the inspected offer's when the payment settled on that rail.
+      evidence: result.payment && !result.payment.payTo && inspection.payTo && railUsed === inspection.rail
+        ? { ...result.payment, payTo: inspection.payTo }
+        : result.payment,
       notes: result.ambiguous
         ? `${result.ambiguityReason ?? "ambiguous"}: payment state unknown; never auto-retried`
         : result.error

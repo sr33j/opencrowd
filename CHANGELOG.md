@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1 — 2026-10-20
+
+- Send the seller's payee with Solana purchase reviews. x402 Solana receipts omit it, so CrowdCode rejected reviews of services it had not seen before ("payment recipient is not registered"); the payee now comes from the inspected offer when the payment settled on that rail.
+
 ## 0.8.0 — 2026-10-20
 
 - Upgrade the default CrowdCode MCP client to `crowdcode-mcp@0.8.0`, which verifies x402 Solana payments and signs the Solana payer link from the AgentCash Solana wallet, so Solana purchase reviews count as verified. Configs pinned to a previously shipped default (through 0.7.0) upgrade automatically; other custom pins are preserved.
