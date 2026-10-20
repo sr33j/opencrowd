@@ -56,7 +56,7 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   configVersion: 3,
   mcpServers: {
     agentcash: { command: "npx", args: ["--yes", "agentcash@0.17"] },
-    crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.9.0"] }
+    crowdcode: { command: "npx", args: ["--yes", "crowdcode-mcp@0.9.1"] }
   },
   // GAIA provider benchmark (2026-08-25): same-model BlockRun matched the
   // current route's accuracy and completed the sample 6.7x faster. The
@@ -132,7 +132,7 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
   // Upgrade previously shipped defaults, preserving other custom pins, commands,
   // allowlists, and extra vendor options.
   if (servers.crowdcode?.command === "npx" &&
-      ["0.5", "0.5.2", "0.5.3", "0.6.0", "0.7.0", "0.8.0"].some(version => JSON.stringify(servers.crowdcode!.args) === JSON.stringify(["--yes", `crowdcode-mcp@${version}`]))) {
+      ["0.5", "0.5.2", "0.5.3", "0.6.0", "0.7.0", "0.8.0", "0.9.0"].some(version => JSON.stringify(servers.crowdcode!.args) === JSON.stringify(["--yes", `crowdcode-mcp@${version}`]))) {
     servers.crowdcode = { ...servers.crowdcode, args: [...DEFAULT_CONFIG.mcpServers.crowdcode!.args] };
   }
   return {
