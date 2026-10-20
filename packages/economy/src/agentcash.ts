@@ -75,7 +75,21 @@ export interface AgentCashAdapter {
   /** Execute one potentially-paid call. Never auto-retried. */
   fetch(request: PaidFetchRequest): Promise<PaidFetchResult>;
   /** Explicit USDC bridge between supported networks. */
-  bridge(input: { from: string; to: string; amountUsd: number }): Promise<McpCallResult>;
+  bridge(input: BridgeRequest): Promise<McpCallResult>;
+}
+
+/**
+ * A move of the payer's own USDC between its networks. The hosted adapter
+ * also quotes (`quoteOnly`), keys the move by the tool call (`operationId`) and
+ * reports on a pending move (`transferId`); AgentCash only moves.
+ */
+export interface BridgeRequest {
+  from: string;
+  to: string;
+  amountUsd: number;
+  quoteOnly?: boolean;
+  operationId?: string;
+  transferId?: string;
 }
 
 export interface McpAgentCashAdapterOptions {
