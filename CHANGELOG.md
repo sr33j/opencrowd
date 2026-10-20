@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.0 — 2026-10-20
+
+- The machine that runs an agent can now allow a single `run_shell` command to take longer than five minutes. `OPENCROWD_MAX_SHELL_TIMEOUT_MS` lets the host raise the cap to what its CPU, memory and disk justify; it can only be raised, never lowered, and never past 45 minutes, and the `run_shell` schema advertises the machine's real cap so the model asks for a timeout it can actually get. Local CLI runs are unchanged at five minutes unless the variable is set. Fetching Mathlib's prebuilt `.olean` files, or any comparable download or compile, no longer dies at the old ceiling.
+- Hosted agents are told how to install a heavy toolchain instead of filling the disk: measure `df -h "$HOME"`, `free -m` and `nproc` first, install under `$HOME` (the persistent volume, excluded from the per-run workspace backup, while the session workspace is archived after every run with a 25 MB cap), pass a real `timeout_ms`, keep build output in a file, re-check free space between steps, and after two `No space left on device` or OOM failures stop retrying and tell the owner which limit was hit and how much is needed. A concrete Lean 4 recipe follows: elan into `$HOME`, the project under `$HOME` so `lake-manifest.json` pins the toolchain, `lake exe cache get` before `lake build`, never compile Mathlib from source, roughly 2 GB for the toolchain and 10 GB for the cache, and a file containing `sorry` is not a proof.
+
 ## 0.10.1 — 2026-10-20
 
 - A run always ends with the answer the agent gave. The CrowdCode reflection step (and a pending required review) buys an extra turn after `complete_session`; whatever the agent said in that turn used to overwrite the answer, so the owner read "Reflection completed. I submitted one paid-service demand" instead of the result. The delivered answer is now held and returned unchanged; the closing text is kept as `reflection_note` for diagnostics, and the gate tells the agent its answer is already saved. A new user instruction still clears the held answer.
