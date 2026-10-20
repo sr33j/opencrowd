@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.2 — 2026-10-20
+
+- Correct what the hosted prompt says about delivering files. 0.11.1 told agents every file in the session workspace reaches the owner; only `artifacts/` does, so an agent asked to "save it under generated/" wrote outside the published tree and the owner received nothing. The prompt now states that `artifacts/` is the delivered directory, that the owner sees each file without that prefix, and that the final message should name a file at exactly the path the owner sees.
+
 ## 0.11.1 — 2026-10-20
 
 - Hosted agents buy a capability before asking the owner for personal credentials. Asked to send an email, an agent would call `request_secret` for a GMAIL_ACCESS_TOKEN and stop, when a paid email service it could pay for itself cost $0.02. The hosted prompt now says to search for a payable service for email, SMS, phone, publishing, storage and similar work and pay for it, and to request a secret only when the task genuinely needs the owner's own account or identity, or when nothing payable covers it — never ending a run on a secret request that a purchase would have finished.
