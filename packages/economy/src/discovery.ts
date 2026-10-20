@@ -185,14 +185,17 @@ function agentCashCandidate(result: any): Record<string, unknown> | undefined {
   }
 }
 
-/** CrowdCode's ranking fields for a verified service; the network shown is the ranked one when the endpoint offers it. */
+/**
+ * CrowdCode's ranking fields for a verified service. `network` stays what this
+ * payer would pay on; `best_network` is CrowdCode's choice when the endpoint offers it.
+ */
 function ranked(ranking: any, schema: any): Record<string, unknown> {
   const best = ranking.best ?? {};
   const offered = Array.isArray(schema.offers) && schema.offers.some((offer: any) => offer.payable && offer.network === best.network);
   const quality = ranking.quality ?? {};
   return {
     rank: ranking.rank,
-    ...(offered ? { network: NETWORK_CAIP2[best.network as OfferNetwork] ?? schema.network, best_network: best.network } : {}),
+    ...(offered ? { best_network: best.network } : {}),
     ...(typeof best.effective_price_usd === "number" ? { effective_price_usd: best.effective_price_usd } : {}),
     ...(best.transfer_needed ? { transfer_needed: true } : {}),
     quality: { score: quality.score, n_eff: quality.n_eff, reviews: quality.num_reviews, verified_reviews: quality.num_verified_reviews,

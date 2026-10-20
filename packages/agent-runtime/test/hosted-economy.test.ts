@@ -143,9 +143,9 @@ describe("hosted economy: discovery and inspection", () => {
     const data = result.data as any;
     // The unreachable top result is dropped; the rest keep CrowdCode's order and best network.
     expect(data.services.map((s: any) => [s.rank, s.endpoint, s.best_network])).toEqual([[2, SEARCH, "solana"], [3, WEATHER, "tempo"]]);
-    expect(data.services[0]).toMatchObject({ network: SOLANA_NETWORK, transfer_needed: true, effective_price_usd: 0.04, sources: ["agentcash", "cdp-bazaar"],
+    expect(data.services[0]).toMatchObject({ network: "eip155:8453", best_network: "solana", transfer_needed: true, effective_price_usd: 0.04, sources: ["agentcash", "cdp-bazaar"],
       quality: { score: 4.3, reviews: 4, verified_reviews: 3, payers_30d: 12 } });
-    expect(data.services[1]).toMatchObject({ method: "GET", network: "eip155:4217" });
+    expect(data.services[1]).toMatchObject({ method: "GET", best_network: "tempo" });
     expect(data.note).toContain("Ranked by CrowdCode across Base, Solana and Tempo");
   });
 
