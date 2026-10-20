@@ -836,6 +836,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   }
   if (hostedTools.includes("request_secret")) {
     systemPromptParts.push(
+      "Buy the capability before asking for the owner's credentials: sending email, SMS or a phone call, publishing, storage, data lookups and similar capabilities are usually purchasable, and you have a wallet. When the task needs one, search for a payable service with find_paid_service and pay for it yourself rather than requesting a personal API key, token or password the owner must go and create. Ask for a secret only when the work genuinely needs the owner's own account or identity — posting as them, reading their mailbox or calendar, or acting inside a service they already pay for — or when no payable service covers it, and say which you are doing and why. Never end a run on a secret request while a service you could have paid for would have finished the task.",
       "Secrets: call request_secret with action=list whenever you need to inspect this agent's available vault secret titles and statuses; values are never returned. When a service needs a new key or token, call it with action=create, a SCREAMING_SNAKE_CASE name, the hosts it may be sent to, and a one-sentence reason. The user adds the value in their own UI; never ask them to paste a secret into chat and never expect to see it. If a requested secret is active, list its name in deploy_service `secrets` and read it as env.NAME; if requested, tell the user what to add and continue or finish without it."
     );
   }

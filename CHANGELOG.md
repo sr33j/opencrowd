@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.1 — 2026-10-20
+
+- Hosted agents buy a capability before asking the owner for personal credentials. Asked to send an email, an agent would call `request_secret` for a GMAIL_ACCESS_TOKEN and stop, when a paid email service it could pay for itself cost $0.02. The hosted prompt now says to search for a payable service for email, SMS, phone, publishing, storage and similar work and pay for it, and to request a secret only when the task genuinely needs the owner's own account or identity, or when nothing payable covers it — never ending a run on a secret request that a purchase would have finished.
+
 ## 0.11.0 — 2026-10-20
 
 - The machine that runs an agent can now allow a single `run_shell` command to take longer than five minutes. `OPENCROWD_MAX_SHELL_TIMEOUT_MS` lets the host raise the cap to what its CPU, memory and disk justify; it can only be raised, never lowered, and never past 45 minutes, and the `run_shell` schema advertises the machine's real cap so the model asks for a timeout it can actually get. Local CLI runs are unchanged at five minutes unless the variable is set. Fetching Mathlib's prebuilt `.olean` files, or any comparable download or compile, no longer dies at the old ceiling.
