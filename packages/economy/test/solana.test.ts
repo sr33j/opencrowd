@@ -164,10 +164,11 @@ describe("Solana purchase lifecycle through AgentCash", () => {
     expect(fetches[0]).toMatchObject({ url: "https://svc.example/img", paymentNetwork: "solana", paymentProtocol: "x402", maxAmount: 0.01 });
     expect(JSON.stringify(result)).not.toContain(SIG);
     const [purchase] = await listPurchases(session);
-    expect(purchase.record).toMatchObject({ rail: "x402-solana", evidence: { reference: `x402:solana:${SIG}`, payer: SOLANA_PAYER } });
+    // The Solana receipt has no payee; the inspected offer's is kept so CrowdCode can verify a new service.
+    expect(purchase.record).toMatchObject({ rail: "x402-solana", evidence: { reference: `x402:solana:${SIG}`, payer: SOLANA_PAYER, payTo: PAY_TO } });
     const review = await gateway.execute("review_paid_service", { purchase_id: (result.data as any).purchase_id, rating: 5, reason: "image delivered" });
     expect(review.ok).toBe(true);
-    expect(crowdcode.reviews[0]).toMatchObject({ paymentReference: `x402:solana:${SIG}`, paymentProvider: "x402", payer: SOLANA_PAYER, apiEndpoint: "https://svc.example/img" });
+    expect(crowdcode.reviews[0]).toMatchObject({ paymentReference: `x402:solana:${SIG}`, paymentProvider: "x402", payer: SOLANA_PAYER, paymentTargetRef: PAY_TO, apiEndpoint: "https://svc.example/img" });
     expect(crowdcode.reviews[0].payerSignature).toBeUndefined();
   });
 

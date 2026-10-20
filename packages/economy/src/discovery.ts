@@ -48,6 +48,8 @@ export class BaseServiceDiscovery {
     const read = ["siwx", "unprotected"].includes(advisory.authMode ?? "");
     const data = { endpoint: input.url, method: advisory.method, rail: offer ? offer.rail : read ? "x402-base" : "unsupported",
       payable: !!offer, authMode: advisory.authMode, network: offer?.network_name ? NETWORK_CAIP2[offer.network_name] : undefined,
+      // The payee of the selected offer: receipts on some rails (x402 Solana) omit it, and reviews need it.
+      ...(offer?.pay_to ? { pay_to: offer.pay_to } : {}),
       price_usd: offer ? ceiling ?? 0 : read ? 0 : undefined,
       ...(offers.length ? { offers: offers.map((candidate) => ({ network: candidate.network_name ?? candidate.network, protocol: candidate.protocol,
         price_usd: candidate.price_usd, payable: payable.includes(candidate) })) } : {}),
