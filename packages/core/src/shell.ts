@@ -43,7 +43,7 @@ export function maxShellTimeoutMs(env: NodeJS.ProcessEnv = process.env): number 
 export async function runShell(
   state: SessionState,
   command: string,
-  cwd = state.workspaceRoot,
+  cwd = state.sessionDir,
   timeoutMs = 10_000,
   options: ShellOptions = {}
 ): Promise<ShellResult> {
@@ -170,14 +170,15 @@ function cleanupProcessGroup(child: ReturnType<typeof spawn>, detached: boolean)
   signalProcessGroup(child, detached, "SIGTERM");
 }
 
+/**
+ * A relative cwd resolves inside the session directory, so `artifacts/<name>`
+ * means the same file to the shell as it does to save_file, read_file and
+ * list_files. Resolving it against the workspace root instead created a decoy
+ * `<workspace>/artifacts` that no publisher ever looked at, and everything an
+ * agent wrote there was lost without an error.
+ */
 function resolveShellCwd(state: SessionState, cwd: string): string {
-  if (isAbsolute(cwd)) {
-    return resolve(cwd);
-  }
-  if (cwd === "artifacts" || cwd.startsWith("artifacts/")) {
-    return resolve(join(state.sessionDir, cwd));
-  }
-  return resolve(state.workspaceRoot, cwd);
+  return isAbsolute(cwd) ? resolve(cwd) : resolve(join(state.sessionDir, cwd));
 }
 
 function minimalEnv(): NodeJS.ProcessEnv {

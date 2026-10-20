@@ -33,7 +33,7 @@ it("triggers at 80%, targets 40%, archives exact input, and leaves room for futu
   expect(messages[0]).toEqual(original[0]);
   expect(messages).toContainEqual(original[1]);
   expect(messages.at(-1)).toEqual(original.at(-1));
-  const raw = await readFile(join(s.workspaceRoot, result.archivePath!), "utf8");
+  const raw = await readFile(join(s.sessionDir, result.archivePath!), "utf8");
   expect(raw.trim().split("\n").map(line => JSON.parse(line))).toEqual(original);
   expect(messages.find(m => m.contextArchive)?.content).toContain("rg/grep");
   for (let i = 0; i < messages.length; i++) {
@@ -60,7 +60,7 @@ it("externalizes an oversized Unicode user message verbatim and preserves the sh
   const result = await compactContext(s, messages, options());
   expect(result.tokensAfter).toBeLessThanOrEqual(6400);
   const file = messages.at(-1)!.content.match(/saved verbatim to (.*?)\. Use/s)![1];
-  expect(await readFile(join(s.workspaceRoot, file), "utf8")).toBe(text);
+  expect(await readFile(join(s.sessionDir, file), "utf8")).toBe(text);
   expect(messages).toContainEqual({ role: "user", content: "Audit invoices." });
   expect(estimateContextTokens("漢".repeat(100))).toBeGreaterThan(estimateContextTokens("a".repeat(100)));
 });
@@ -72,7 +72,7 @@ it("rechecks on a large-to-small model switch and preserves older archive refere
   messages.push({ role: "user", content: "New document " + "x".repeat(100000) });
   const second = await compactContext(s, messages, options(8000));
   expect(second.tokensAfter).toBeLessThanOrEqual(3200);
-  expect(await readFile(join(s.workspaceRoot, second.archivePath!), "utf8")).toContain(first.archivePath);
+  expect(await readFile(join(s.sessionDir, second.archivePath!), "utf8")).toContain(first.archivePath);
 });
 
 it("fails finitely without changing context when protected instructions and tools cannot fit", async () => {

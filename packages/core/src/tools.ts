@@ -29,7 +29,7 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         const result = await runShell(
           context.session,
           requiredString(args.command, "command"),
-          optionalString(args.cwd, "cwd") ?? context.session.workspaceRoot,
+          optionalString(args.cwd, "cwd") ?? context.session.sessionDir,
           shellTimeoutMs(args.timeout_ms),
           { signal: context.signal }
         );
