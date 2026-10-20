@@ -270,8 +270,8 @@ describe("Monad preference in discovery", () => {
     expect(resolvePaymentNetwork({ paymentNetwork: "base" })).toBe("base");
     process.env.OPENCROWD_PAYMENT_NETWORK = "monad";
     expect(resolvePaymentNetwork({ paymentNetwork: "base" })).toBe("monad");
-    process.env.OPENCROWD_PAYMENT_NETWORK = "solana";
-    expect(() => resolvePaymentNetwork()).toThrow(/base or monad/);
+    process.env.OPENCROWD_PAYMENT_NETWORK = "polygon";
+    expect(() => resolvePaymentNetwork()).toThrow(/base, solana, monad/);
     expect(parsePaymentNetwork("eip155:143")).toBe("monad");
   });
 });

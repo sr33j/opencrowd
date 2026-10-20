@@ -37,6 +37,15 @@ export interface ReviewSubmission {
   paymentProvider?: "x402" | "mppx";
   paymentProof?: string;
   paymentTargetRef?: string;
+  /** Paying address when it differs from the reviewer wallet (the Solana address for x402:solana). */
+  payer?: string;
+  /**
+   * Signature by `payer` over the canonical review payload hash. Forwarded
+   * when present; the gateway leaves it unset because AgentCash 0.17 exposes
+   * no message signing for its Solana key and the canonical payload is built
+   * inside crowdcode-mcp.
+   */
+  payerSignature?: string;
   taskContext?: string;
 }
 
@@ -82,6 +91,8 @@ export class McpCrowdCodeAdapter implements CrowdCodeAdapter {
       ...(review.paymentProvider ? { payment_provider: review.paymentProvider } : {}),
       ...(review.paymentProof ? { payment_proof: review.paymentProof } : {}),
       ...(review.paymentTargetRef ? { payment_target_ref: review.paymentTargetRef } : {}),
+      ...(review.payer ? { payer: review.payer } : {}),
+      ...(review.payerSignature ? { payer_signature: review.payerSignature } : {}),
       ...(review.taskContext ? { task_context: review.taskContext } : {})
     });
     const payload = result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : {};

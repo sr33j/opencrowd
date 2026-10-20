@@ -1,7 +1,8 @@
 import { it, expect, vi } from "vitest";
 const check = vi.hoisted(() => vi.fn());
 vi.mock("@agentcash/discovery", () => ({ checkEndpointSchema: check, discoverOriginSchema: vi.fn() }));
-import { BaseServiceDiscovery, BASE_USDC } from "../src/discovery.js";
+import { BaseServiceDiscovery } from "../src/discovery.js";
+import { BASE_USDC } from "../src/offers.js";
 it("keeps only real Base USDC offers, including multi-rail and unreviewed endpoints", async () => {
   const options = [
     [{ protocol: "mpp", network: "tempo", asset: "USDC", amount: "10" }],

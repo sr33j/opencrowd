@@ -1,5 +1,5 @@
-import { readAgentCashWallet } from "@opencrowd/core";
-import { sharedEconomyRuntime } from "@opencrowd/economy";
+import { readAgentCashSolanaAddress, readAgentCashWallet } from "@opencrowd/core";
+import { parseWalletAccounts, sharedEconomyRuntime, type WalletAccount } from "@opencrowd/economy";
 
 /**
  * Public wallet info for display: address from the local AgentCash wallet
@@ -11,6 +11,12 @@ export interface WalletSummary {
   totalCents?: number;
   /** USDC on Monad (eip155:143) for the same address; AgentCash's total excludes it. */
   monadCents?: number;
+  /** AgentCash's Solana address, which differs from the EVM address. */
+  solanaAddress?: string;
+  /** USDC on Solana for that address. */
+  solanaCents?: number;
+  /** Per-network AgentCash accounts (Base, Solana, Tempo) with their addresses. */
+  accounts?: WalletAccount[];
   raw?: unknown;
   error?: string;
 }
@@ -42,27 +48,42 @@ export async function walletSummary(options: { refresh?: boolean } = {}): Promis
 }
 
 async function fetchWalletSummary(): Promise<WalletSummary> {
-  const wallet = await readAgentCashWallet();
+  const [wallet, solanaFile] = await Promise.all([readAgentCashWallet(), readAgentCashSolanaAddress()]);
   try {
     const runtime = await sharedEconomyRuntime();
     const balance = await runtime.agentcash.getBalance();
     if (balance.ok) {
-      const { monad, ...agentcash } = (balance.data && typeof balance.data === "object" && !Array.isArray(balance.data)
+      const { monad, accounts: rawAccounts, ...agentcash } = (balance.data && typeof balance.data === "object" && !Array.isArray(balance.data)
         ? balance.data : { agentcash: balance.data }) as Record<string, unknown>;
       const monadUsdc = (monad as { usdc?: unknown } | undefined)?.usdc;
       const agentcashTotal = parseUsdCents("agentcash" in agentcash && Object.keys(agentcash).length === 1 ? agentcash.agentcash : agentcash);
       const monadCents = typeof monadUsdc === "number" ? Math.round(monadUsdc * 100) : undefined;
+      const accounts = rawAccounts === undefined ? undefined : parseWalletAccounts(rawAccounts);
+      const solana = accounts?.find((account) => account.network === "solana");
       return {
         address: wallet?.address,
         totalCents: agentcashTotal === undefined && monadCents === undefined ? undefined : (agentcashTotal ?? 0) + (monadCents ?? 0),
         monadCents,
+        solanaAddress: solana?.address ?? solanaFile,
+        solanaCents: solana?.usdc === undefined ? undefined : Math.round(solana.usdc * 100),
+        accounts,
         raw: balance.data
       };
     }
-    return { address: wallet?.address, error: balance.error };
+    return { address: wallet?.address, solanaAddress: solanaFile, error: balance.error };
   } catch (error) {
-    return { address: wallet?.address, error: (error as Error).message };
+    return { address: wallet?.address, solanaAddress: solanaFile, error: (error as Error).message };
   }
+}
+
+/** One row per network for display: AgentCash's accounts plus native Monad. */
+export function walletNetworkRows(summary: WalletSummary): Record<string, string> {
+  const rows: Record<string, string> = {};
+  for (const account of summary.accounts ?? []) {
+    rows[account.network] = `${account.usdc === undefined ? "unknown" : `${account.usdc.toFixed(6)} USDC`}${account.address ? ` · ${account.address}` : ""}`;
+  }
+  if (summary.monadCents !== undefined) rows.monad = `${(summary.monadCents / 100).toFixed(2)} USDC · ${summary.address ?? "unknown"}`;
+  return rows;
 }
 
 /** Best-effort total USD (in cents) from an AgentCash balance payload. */

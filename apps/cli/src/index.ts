@@ -8,6 +8,8 @@ import {
   loadConfig,
   loadSession,
   parsePaymentNetwork,
+  PAYMENT_NETWORKS,
+  readAgentCashSolanaAddress,
   readAgentCashWallet,
   resolvePaymentNetwork,
   readLedger,
@@ -31,6 +33,7 @@ import {
   isConsumedOption,
   latestSessionId,
   parseUsd,
+  formatCents,
   readOption,
   renderKeyValues,
   renderTable,
@@ -39,14 +42,14 @@ import {
 } from "./shared.js";
 import { runPersistentAgentTask, runPersistentAgentTaskDetailed, warmStartEconomy } from "./agent-task.js";
 import { renderCommandHelp } from "./registry.js";
-import { walletSummary } from "./wallet.js";
+import { walletNetworkRows, walletSummary } from "./wallet.js";
 import { startTui } from "./tui/app.js";
 
 async function main(argv: string[]): Promise<void> {
   // Global: prefer this x402 settlement network for every command in this process.
   const paymentNetwork = readOption(argv, "--payment-network");
   if (argv.includes("--payment-network")) {
-    if (!parsePaymentNetwork(paymentNetwork)) throw new Error("--payment-network must be base or monad");
+    if (!parsePaymentNetwork(paymentNetwork)) throw new Error(`--payment-network must be ${PAYMENT_NETWORKS.join(", ")}`);
     process.env.OPENCROWD_PAYMENT_NETWORK = paymentNetwork;
     argv = argv.filter((_arg, index) => !isConsumedOption(argv, index, ["--payment-network"]));
   }
@@ -333,7 +336,7 @@ async function configCommand(args: string[]): Promise<void> {
     case "payment-network": {
       const paymentNetwork = parsePaymentNetwork(value);
       if (!paymentNetwork) {
-        throw new Error("payment-network must be base or monad");
+        throw new Error(`payment-network must be ${PAYMENT_NETWORKS.join(", ")}`);
       }
       await updateConfig({ paymentNetwork });
       savedValue = paymentNetwork;
@@ -420,19 +423,26 @@ async function walletCommand(args: string[]): Promise<void> {
     if (!wallet) {
       throw new Error("No AgentCash wallet found. Install agentcash (its wallet is created automatically on first use) and retry.");
     }
-    const result = { address: wallet.address, networks: "base, tempo, solana, monad (eip155:143)", asset: "USDC", preferred_payment_network: resolvePaymentNetwork(await loadConfig()) };
+    const solana = await readAgentCashSolanaAddress();
+    const result = { address: wallet.address, networks: "base, tempo, monad (eip155:143)", ...(solana ? { solana_address: solana } : {}),
+      asset: "USDC", preferred_payment_network: resolvePaymentNetwork(await loadConfig()) };
     printValue("Wallet", result, { json, pretty: renderKeyValues(asRecord(result)) });
     return;
   }
-  if (action === "balance") {
+  if (action === "balance" || action === "accounts") {
     const summary = await walletSummary();
     if (summary.error) {
       throw new Error(`wallet balance unavailable: ${summary.error}`);
     }
-    printValue("Wallet", summary.raw ?? summary, { json, pretty: renderKeyValues(asRecord(summary.raw ?? summary)) });
+    const rows = walletNetworkRows(summary);
+    const pretty = Object.keys(rows).length
+      ? renderKeyValues({ ...(summary.totalCents !== undefined ? { total: formatCents(summary.totalCents) } : {}), ...rows })
+      : renderKeyValues(asRecord(summary.raw ?? summary));
+    printValue("Wallet", action === "accounts" ? { accounts: summary.accounts ?? [], ...(summary.solanaAddress ? { solana_address: summary.solanaAddress } : {}) } : summary.raw ?? summary,
+      { json, pretty });
     return;
   }
-  throw new Error("wallet supports address, balance, limits [--per-call USD] [--per-query USD]");
+  throw new Error("wallet supports address, balance, accounts, limits [--per-call USD] [--per-query USD]");
 }
 
 async function modelsCommand(args: string[]): Promise<void> {
@@ -573,14 +583,16 @@ function printHelp(): void {
   opencrowd config set provider|model|submodel|budget|approval|payment-network <value>
   opencrowd ledger [--json] show [--session <id>]
   opencrowd resume <session-id> [--approve-once | --query-budget <usd> | --decline] [--workspace <dir>]
-  opencrowd wallet [--json] address|balance
+  opencrowd wallet [--json] address|balance|accounts
   opencrowd wallet limits [--per-call <usd>] [--per-query <usd>]
   opencrowd models [--json] list
   opencrowd doctor
   opencrowd --version
 
 Global options:
-  --payment-network base|monad    prefer this x402 network when a service offers several
+  --payment-network base|solana|monad
+                                  prefer this network when a service offers several; otherwise the first of
+                                  Base, Solana, Tempo (MPP) your balance covers
                                   (also OPENCROWD_PAYMENT_NETWORK or config payment-network; default base)
   opencrowd evals gaia [--tier smoke|level1|full] [--harness opencrowd,claude,codex] [--parallel <n>] [--hf-token <token>] [--auto] [--model <model>] [--subagent-model <model|off>] [--yes]
   opencrowd evals evolve [--out <dir>] [--generations <n>] [--candidates <n>] [--model <agent model>] [--proposer <model,model>] [--seed-trees <dir,dir>] [--baseline-report <report.json>] [--parallel <n>]
