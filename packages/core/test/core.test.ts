@@ -283,9 +283,24 @@ describe("shell policy", () => {
       exit_code: 0
     });
     await expect(runShell(session, "pwd", "missing-dir", 1000)).resolves.toMatchObject({
-      cwd: join(root, "missing-dir"),
+      cwd: join(session.sessionDir, "missing-dir"),
       exit_code: null
     });
+  });
+
+  it("writes a relative artifacts/ path from the default cwd into the published artifacts directory", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+
+    // A shell command that writes artifacts/<name> must land on the one file
+    // save_file would write. Resolving the default cwd against the workspace
+    // root instead created <workspace>/artifacts, which no publisher reads.
+    const result = await executeTool("run_shell", { command: "printf hello > artifacts/shell-output.txt" }, { session });
+    expect(result.ok).toBe(true);
+    expect((result.data as { cwd: string }).cwd).toBe(session.sessionDir);
+    expect(await readFile(join(session.artifactsDir, "shell-output.txt"), "utf8")).toBe("hello");
+    await expect(readFile(join(root, "artifacts/shell-output.txt"), "utf8")).rejects.toThrow();
+    await expect(listArtifacts(session)).resolves.toContain("shell-output.txt");
   });
 
   it("returns when a background child keeps stdio open after the shell exits", async () => {

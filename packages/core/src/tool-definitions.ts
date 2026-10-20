@@ -125,7 +125,7 @@ function toolParameters(name: ToolName): JsonSchema {
     case "run_shell":
       return objectSchema({
         command: stringSchema("Shell command."),
-        cwd: stringSchema("Working directory inside the workspace. Use artifacts/<dir> to run where save_file writes (cd inside the command does not reach it)."),
+        cwd: stringSchema("Working directory, relative to the session directory (the default). Relative paths in the command resolve from here, so artifacts/<name> is the same file save_file writes and the user receives."),
         timeout_ms: integerSchema(`Timeout in milliseconds (default 10000, maximum ${maxShellTimeoutMs()}). Pass the real time a long build or download needs; the command is killed at the timeout.`)
       }, ["command"]);
     case "spawn_subagent":

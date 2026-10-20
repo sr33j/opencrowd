@@ -87,8 +87,10 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   const dir = await containedPath(session.sessionDir, join("context", digest));
   const path = join(dir, "transcript.jsonl");
   await atomicWrite(path, raw);
-  const archivePath = relative(session.workspaceRoot, path).split("\\").join("/");
-  const ref = (index: number) => `${relative(session.workspaceRoot, dir).split("\\").join("/")}/message-${index + 1}.txt`;
+  // Archive pointers are relative to the session directory, which is where
+  // run_shell starts, so the agent can grep them with the path it was handed.
+  const archivePath = relative(session.sessionDir, path).split("\\").join("/");
+  const ref = (index: number) => `${relative(session.sessionDir, dir).split("\\").join("/")}/message-${index + 1}.txt`;
   const externalize = async (message: LlmMessage, index: number) => {
     await atomicWrite(join(dir, `message-${index + 1}.txt`), messages[index].content);
     return `[Full ${message.role} message saved verbatim to ${ref(index)}. Use rg/grep and sed/head/tail to read relevant portions before proceeding; do not load the entire file.]`;
