@@ -19,6 +19,27 @@ export interface ShellOptions {
   env?: NodeJS.ProcessEnv;
 }
 
+/** Long enough for a video render or a large download. */
+export const DEFAULT_MAX_SHELL_TIMEOUT_MS = 300_000;
+/** No single command may hold the agent loop longer than this, whatever the host asks for. */
+export const SHELL_TIMEOUT_CEILING_MS = 2_700_000;
+
+/**
+ * The longest a single shell command may run. Heavy toolchains (a Lean +
+ * Mathlib build, a large compile) need far more than five minutes, and the
+ * host that provisioned the machine knows how much time its CPU and memory
+ * justify, so it raises this with OPENCROWD_MAX_SHELL_TIMEOUT_MS. The runtime
+ * keeps heartbeating while a command runs; the ceiling keeps a hung command
+ * from owning the run.
+ */
+export function maxShellTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const requested = Number(env.OPENCROWD_MAX_SHELL_TIMEOUT_MS);
+  if (!Number.isInteger(requested) || requested <= DEFAULT_MAX_SHELL_TIMEOUT_MS) {
+    return DEFAULT_MAX_SHELL_TIMEOUT_MS;
+  }
+  return Math.min(SHELL_TIMEOUT_CEILING_MS, requested);
+}
+
 export async function runShell(
   state: SessionState,
   command: string,
@@ -30,7 +51,7 @@ export async function runShell(
     throw new Error("shell tool is disabled for this session");
   }
   options.signal?.throwIfAborted();
-  const maxTimeout = options.maxTimeoutMs ?? 300_000;
+  const maxTimeout = options.maxTimeoutMs ?? maxShellTimeoutMs();
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > maxTimeout) {
     throw new Error(`timeout_ms must be between 1 and ${maxTimeout}`);
   }

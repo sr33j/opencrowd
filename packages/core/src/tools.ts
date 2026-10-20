@@ -1,7 +1,7 @@
 import { budgetStatus, createSession } from "./session.js";
 import { listArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
 import { readLedger, appendLedgerEntry } from "./ledger.js";
-import { runShell } from "./shell.js";
+import { maxShellTimeoutMs, runShell } from "./shell.js";
 import type { ToolName } from "./tool-definitions.js";
 import type { ProgressEvent, SessionState, ToolResult } from "./types.js";
 
@@ -122,15 +122,12 @@ function optionalString(value: unknown, label: string): string | undefined {
 }
 
 const DEFAULT_SHELL_TIMEOUT_MS = 10_000;
-// Long enough for a video render or a large download; the runtime keeps heartbeating meanwhile.
-const MAX_SHELL_TIMEOUT_MS = 300_000;
-
 /** Models routinely ask for longer timeouts than the shell allows; clamp instead of failing the call. */
 function shellTimeoutMs(value: unknown): number {
   if (typeof value !== "number" || !Number.isInteger(value)) {
     return DEFAULT_SHELL_TIMEOUT_MS;
   }
-  return Math.min(MAX_SHELL_TIMEOUT_MS, Math.max(1, value));
+  return Math.min(maxShellTimeoutMs(), Math.max(1, value));
 }
 
 function objectValue(value: unknown): Record<string, unknown> | undefined {
