@@ -1,11 +1,24 @@
 import { checkEndpointSchema, discoverOriginSchema } from "@agentcash/discovery";
 import type { PaymentNetwork } from "@opencrowd/core";
 import type { PaymentRail } from "./agentcash.js";
+import type { ServiceSearch } from "./crowdcode.js";
 import type { McpCallResult } from "./mcp.js";
 import {
-  BASE_NETWORK, classifyOffer, describeRails, localRails, NETWORK_CAIP2, networkLabel, payableNetworks, selectOffer,
+  BASE_NETWORK, classifyOffer, describeRails, localRails, NETWORK_CAIP2, networkLabel, payableNetworks, RAIL_NETWORK, selectOffer,
   type OfferNetwork, type ServiceOffer
 } from "./offers.js";
+
+/** CrowdCode's cross-chain ranking of a search (`find_service`), supplied by the gateway when CrowdCode is on. */
+export type ServiceRanker = (search: ServiceSearch) => Promise<McpCallResult>;
+
+export interface SearchOptions {
+  limit?: number;
+  broad?: boolean;
+  /** Rank across chains with CrowdCode; without it AgentCash's order stands. */
+  rank?: ServiceRanker;
+}
+
+export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality first, then effective price on best_network (including about $0.03 to move USDC between your own networks when that network's balance is short), then your balance there. Prefer the highest-ranked service that fits the task, whatever its network. transfer_needed means your balance on best_network is short: move USDC between your own networks first if you have a tool for that; otherwise say which network needs funds. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.";
 
 export interface DiscoveryOptions {
   /** Preferred settlement network when a service offers several (default base). */
@@ -14,7 +27,7 @@ export interface DiscoveryOptions {
   rails?: readonly PaymentRail[];
   /** The payer picks the network at payment time (the hosted gateway), so the quote is the ceiling across payable offers. */
   negotiated?: boolean;
-  /** Spendable USDC per network, read only when the preferred network is not offered. */
+  /** Spendable USDC per network: chooses among a service's offers and informs search ranking. */
   balances?: () => Promise<Partial<Record<OfferNetwork, number>>>;
 }
 
@@ -59,12 +72,11 @@ export class BaseServiceDiscovery {
     return { ok: true, data };
   }
 
-  /** Balances are read only when they can change the choice: the preferred network is absent and several are payable. */
+  /** Balances are read only when they can change the choice: several networks are payable. */
   private async select(offers: ServiceOffer[]): Promise<ServiceOffer | undefined> {
     const selection = { preferred: this.options.paymentNetwork, rails: this.rails };
     const networks = payableNetworks(offers, this.rails);
-    const needsBalances = !this.options.negotiated && this.options.balances && networks.length > 1
-      && !networks.includes(this.options.paymentNetwork ?? "base");
+    const needsBalances = !this.options.negotiated && this.options.balances && networks.length > 1;
     const balances = needsBalances ? await this.options.balances!().catch(() => undefined) : undefined;
     return selectOffer(offers, { ...selection, balances });
   }
@@ -80,9 +92,11 @@ export class BaseServiceDiscovery {
       return `The hosted gateway pays the cheapest of ${networks.join(", ")} that your balance on that network covers; price_usd is the ceiling across them. ${quote}`;
     }
     const preferred = this.options.paymentNetwork ?? "base";
-    return `Pays ${networkLabel(offer)}${offer.network_name === preferred ? "" : ` (${preferred} is not offered)`}. ${quote}`;
+    const reason = payableNetworks(offers, this.rails).includes(preferred) ? `your ${preferred} balance does not cover it` : `${preferred} is not offered`;
+    return `Pays ${networkLabel(offer)}${offer.network_name === preferred ? "" : ` (${reason})`}. ${quote}`;
   }
 
+  /** Probe candidates in order and keep the first `limit` this payer can settle. */
   private async verified(candidates: any[], limit: number) {
     const services: any[] = [];
     // Small batches bound probes without serializing a whole provider catalog.
@@ -90,10 +104,15 @@ export class BaseServiceDiscovery {
       const batch = await Promise.all(candidates.slice(i, i + 4).map(async c => {
         try {
           const endpoint = c.endpoint ?? new URL(c.path, typeof c.origin === "string" ? c.origin : c.origin?.url).href;
-          const inspection = await this.inspect({ url: endpoint, method: c.method });
+          // Catalogs do not always name the method: try POST, then GET.
+          let method = c.method ?? "POST";
+          let inspection = await this.inspect({ url: endpoint, method });
+          if (!inspection.ok && !c.method) inspection = await this.inspect({ url: endpoint, method: method = "GET" });
           const schema = inspection.data as any;
-          return inspection.ok && schema?.payable ? { endpoint, method: c.method ?? "POST", name: c.summary ?? c.name,
-            price_usd: schema.price_usd, payment_provider: schema.rail === "mppx" ? "mppx" : "x402", network: schema.network ?? BASE_NETWORK, payable: true } : undefined;
+          if (!inspection.ok || !schema?.payable) return undefined;
+          const service: Record<string, unknown> = { endpoint, method, name: c.summary ?? c.name,
+            price_usd: schema.price_usd, payment_provider: schema.rail === "mppx" ? "mppx" : "x402", network: schema.network ?? BASE_NETWORK, payable: true };
+          return c.ranking ? { ...service, ...ranked(c.ranking, schema) } : service;
         } catch { return undefined; }
       }));
       services.push(...batch.filter(Boolean));
@@ -101,15 +120,40 @@ export class BaseServiceDiscovery {
     return services.slice(0, limit);
   }
 
-  async search(query: string, options: { limit?: number; broad?: boolean } = {}): Promise<McpCallResult> {
+  /** The networks this payer settles, as CrowdCode names them. */
+  private networks(): string[] {
+    return [...new Set(this.rails.filter((rail) => rail !== "unsupported").map((rail) => RAIL_NETWORK[rail as Exclude<PaymentRail, "unsupported">]))];
+  }
+
+  /**
+   * AgentCash search, ranked across chains by CrowdCode when a ranker is
+   * supplied: CrowdCode adds Coinbase's x402 catalog, the MPP catalog and its
+   * reviewed services, then orders everything by quality, effective price and
+   * balance. Without a ranker, or if ranking fails, AgentCash's order stands.
+   */
+  async search(query: string, options: SearchOptions = {}): Promise<McpCallResult> {
     const limit = Math.min(20, Math.max(1, options.limit ?? 8));
-    const result = await this.searchApi(query, { ...options, limit: Math.min(50, limit * 3) });
+    const { rank, ...searchOptions } = options;
+    const [result, balances] = await Promise.all([
+      this.searchApi(query, { ...searchOptions, limit: Math.min(50, limit * 3) })
+        .catch((error: Error): McpCallResult => ({ ok: false, error: error.message })),
+      rank && this.options.balances ? this.options.balances().catch(() => undefined) : Promise.resolve(undefined)
+    ]);
+    const candidates = result.ok ? searchResults(result.data) : [];
+    if (rank) {
+      const ranking = await rank({ query, networks: this.networks(), ...(balances ? { balances } : {}),
+        candidates: candidates.map(agentCashCandidate).filter((candidate): candidate is Record<string, unknown> => candidate !== undefined),
+        limit: Math.min(25, limit * 2) }).catch((error: Error): McpCallResult => ({ ok: false, error: error.message }));
+      const services = (ranking.data as { services?: unknown } | undefined)?.services;
+      if (ranking.ok && Array.isArray(services)) {
+        const ordered = services.filter((service: any) => typeof service?.endpoint === "string")
+          .map((service: any) => ({ endpoint: service.endpoint, method: service.method ?? undefined, name: service.name, ranking: service }));
+        return { ok: true, data: { services: await this.verified(ordered, limit), note: RANKED_NOTE } };
+      }
+    }
     if (!result.ok) return result;
-    const raw: any = result.data;
-    const body = raw?.results?.results ? raw.results : raw?.data?.results ? raw.data : raw;
-    const candidates = Array.isArray(body?.results) ? body.results : Array.isArray(body?.services) ? body.services : [];
     return { ok: true, data: { services: await this.verified(candidates, limit),
-      note: `AgentCash discovery, verified ${describeRails(this.rails)}. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.` } };
+      note: `AgentCash discovery${rank ? " (CrowdCode ranking unavailable)" : ""}, verified ${describeRails(this.rails)}. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.` } };
   }
 
   async discoverEndpoints(origin: string): Promise<McpCallResult> {
@@ -120,4 +164,43 @@ export class BaseServiceDiscovery {
       reads: result.endpoints.filter(e => ["siwx", "unprotected"].includes(e.authMode ?? "")),
       note: "Use read_service to poll job URLs. Do not buy the same generation twice." } };
   }
+}
+
+function searchResults(raw: any): any[] {
+  const body = raw?.results?.results ? raw.results : raw?.data?.results ? raw.data : raw;
+  return Array.isArray(body?.results) ? body.results : Array.isArray(body?.services) ? body.services : [];
+}
+
+/** An AgentCash search result as a CrowdCode ranking candidate. */
+function agentCashCandidate(result: any): Record<string, unknown> | undefined {
+  try {
+    const endpoint = result.endpoint ?? new URL(result.path, typeof result.origin === "string" ? result.origin : result.origin?.url).href;
+    const usage = result.signals?.originUsage?.uniqueUserCount;
+    return { endpoint, method: result.method, name: result.summary ?? result.name, source: "agentcash",
+      ...(result.price !== undefined ? { price_usd: Number.parseFloat(String(result.price)) || undefined } : {}),
+      ...(Array.isArray(result.origin?.protocols) ? { protocols: result.origin.protocols } : {}),
+      ...(typeof usage === "number" ? { unique_payers: usage } : {}) };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * CrowdCode's ranking fields for a verified service. `network` stays what this
+ * payer would pay on; `best_network` is CrowdCode's choice when the endpoint offers it.
+ */
+function ranked(ranking: any, schema: any): Record<string, unknown> {
+  const best = ranking.best ?? {};
+  const offered = Array.isArray(schema.offers) && schema.offers.some((offer: any) => offer.payable && offer.network === best.network);
+  const quality = ranking.quality ?? {};
+  return {
+    rank: ranking.rank,
+    ...(offered ? { best_network: best.network } : {}),
+    ...(typeof best.effective_price_usd === "number" ? { effective_price_usd: best.effective_price_usd } : {}),
+    ...(best.transfer_needed ? { transfer_needed: true } : {}),
+    quality: { score: quality.score, n_eff: quality.n_eff, reviews: quality.num_reviews, verified_reviews: quality.num_verified_reviews,
+      ...(quality.unique_payers_30d != null ? { payers_30d: quality.unique_payers_30d } : {}),
+      ...(quality.below_floor ? { below_floor: true } : {}) },
+    sources: ranking.sources
+  };
 }

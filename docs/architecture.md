@@ -270,7 +270,7 @@ surface is:
 | Tool | Meaning |
 | --- | --- |
 | `get_wallet_status` | Public AgentCash balances, deposit addresses, and funding links. |
-| `find_paid_service` | Discover a known origin directly or search an unknown capability. |
+| `find_paid_service` | Discover a known origin directly, or search an unknown capability across Base, Solana and Tempo, ranked by CrowdCode's `find_service` (quality, then effective price including a cross-network transfer, then balance) when CrowdCode is on. |
 | `inspect_paid_service` | Exact endpoint, input schema, price ceiling, supported rail, and CrowdCode evidence. |
 | `call_paid_service` | Revalidate and execute one inspected call through the enforced lifecycle. |
 | `review_paid_service` | Review one immutable stored purchase using its receipt evidence. |

@@ -44,11 +44,14 @@ describe("offer classification", () => {
     expect(classifyOffer({ ...BASE, network: "eip155:1" }).rail).toBe("unsupported");
   });
 
-  it("keeps the preferred network whenever offered and otherwise falls back by balance in Base, Solana, Tempo order", () => {
+  it("keeps the preferred network when its balance covers the price and otherwise falls back by balance in Base, Solana, Tempo order", () => {
     const offers = [BASE, SOLANA, TEMPO].map(classifyOffer);
     const rails = localRails();
     expect(selectOffer(offers, { rails })?.rail).toBe("x402-base");
-    expect(selectOffer(offers, { rails, balances: { base: 0, solana: 5 } })?.rail).toBe("x402-base");
+    expect(selectOffer(offers, { rails, balances: { base: 1, solana: 5 } })?.rail).toBe("x402-base");
+    // Base is offered but short: pay where the balance covers it instead of failing.
+    expect(selectOffer(offers, { rails, balances: { base: 0, solana: 5 } })?.rail).toBe("x402-solana");
+    expect(selectOffer(offers, { rails, balances: { base: 0, solana: 0 } })?.rail).toBe("x402-base");
     expect(selectOffer(offers, { preferred: "solana", rails })?.rail).toBe("x402-solana");
     const noBase = [SOLANA, TEMPO].map(classifyOffer);
     expect(selectOffer(noBase, { rails, balances: { solana: 0.001, tempo: 1 } })?.rail).toBe("mppx");
@@ -82,11 +85,15 @@ describe("discovery across networks", () => {
     expect(solana).toMatchObject({ rail: "x402-solana", network: SOLANA_NETWORK, price_usd: 0.01, note: expect.stringContaining("x402 USDC on Solana") });
   });
 
-  it("reads balances only when the preferred network is missing and several networks are payable", async () => {
+  it("reads balances only when several networks are payable", async () => {
     const balances = vi.fn(async () => ({ solana: 0, tempo: 2 }));
-    advertise([BASE, SOLANA]);
-    await new BaseServiceDiscovery(vi.fn(), { balances }).inspect({ url: "https://svc.example/c" });
+    advertise([BASE]);
+    await new BaseServiceDiscovery(vi.fn(), { balances }).inspect({ url: "https://svc.example/c0" });
     expect(balances).not.toHaveBeenCalled();
+    advertise([BASE, TEMPO]);
+    const short = (await new BaseServiceDiscovery(vi.fn(), { balances }).inspect({ url: "https://svc.example/c" })).data;
+    expect(short).toMatchObject({ rail: "mppx", note: expect.stringContaining("your base balance does not cover it") });
+    balances.mockClear();
     advertise([SOLANA, TEMPO]);
     const fallback = (await new BaseServiceDiscovery(vi.fn(), { balances }).inspect({ url: "https://svc.example/d" })).data;
     expect(fallback).toMatchObject({ rail: "mppx", network: "eip155:4217", price_usd: 0.015, note: expect.stringContaining("base is not offered") });

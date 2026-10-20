@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0 — 2026-10-20
+
+- Find the best service across Base, Solana and Tempo. `find_paid_service` with a query now sends AgentCash's results, the payer's networks and its per-network balances to CrowdCode's new `find_service`, which adds Coinbase's x402 catalog, the mpp.dev MPP catalog and CrowdCode's reviewed services, then ranks by CrowdCode quality, the effective price on each service's best network (including about $0.03 to move USDC between your own networks when that network's balance is short), then the balance there. AgentCash's default search found 2 of 29 Solana-only and 49 of 127 MPP catalog services; these are now found. Results keep that order after the usual payability probe and show `rank`, `quality`, `best_network`, `effective_price_usd`, `transfer_needed` and `sources`. With CrowdCode off, or when its ranking is unavailable, AgentCash's order is used. Both CLI and hosted agents use it; the system prompt tells agents to prefer the top service that fits, whatever its network, and to move funds between their networks when needed if they have a tool for it.
+- Pay on the network whose balance covers the price. The preferred network still wins when its balance covers the price; when it does not, the first of Base, Solana and Tempo whose balance does is used instead of failing.
+- Probe catalog results that omit the HTTP method with POST, then GET.
+- Send `call_paid_service` inputs for GET endpoints as query parameters. A body on GET failed before payment ("Request with GET/HEAD method cannot have body"), which made many catalog services unusable.
+- `find_paid_service` asks for the capability in a few words ("web search", "object storage"), not the task's subject, which matched irrelevant services.
+- Upgrade the default CrowdCode MCP client to `crowdcode-mcp@0.9.1` (adds `find_service`). Configs pinned to a previously shipped default (through 0.9.0) upgrade automatically.
+
 ## 0.9.0 — 2026-10-20
 
 - Hosted agents can move their own USDC between Base, Solana and Tempo from chat with `bridge_usdc`. `quote_only` shows the fee and expected amount. Executing applies the owner's spending policy to the fee: ask mode, the per-call limit or the query budget pause the run for approval, and the approved resume repeats the same move. It then waits for the funds to arrive and reports both transactions. Funds always go to the agent's own address, and a replayed tool call never moves twice. The fee counts as the run's spending; the hosted financial snapshot reports it as `transfer_fees_usdc`.

@@ -219,7 +219,10 @@ export class EconomyGateway {
       return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
     }
     if (query) {
-      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit) });
+      // CrowdCode ranks across chains when it is on; off, or on an older adapter, AgentCash's order stands.
+      const findServices = this.options.crowdcode.findServices?.bind(this.options.crowdcode);
+      const rank = findServices && await this.crowdcodeEnabled().catch(() => false) ? findServices : undefined;
+      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit), ...(rank ? { rank } : {}) });
       return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
     }
     return { ok: false, error: "find_paid_service requires `origin` (known origin) or `query` (capability search)" };
@@ -295,6 +298,8 @@ export class EconomyGateway {
       return { ok: false, error: "call_paid_service requires `url`" };
     }
     const method = (stringArg(args.method) ?? "POST").toUpperCase();
+    // GET carries its inputs in the query string: a body on GET fails before payment.
+    const { url: target, body } = requestFor(endpoint, method, args.body);
     const inspection = (await this.loadInspections()).get(inspectionKey(endpoint, method));
     if (!inspection) {
       return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
@@ -311,7 +316,7 @@ export class EconomyGateway {
     let quotedCostCents = requestedCostCents;
     let quoteIdentity: unknown;
     if (session.query && !this.options.hostedSpending) {
-      const fresh = await this.options.agentcash.checkEndpointSchema({ url: endpoint, method, body: args.body });
+      const fresh = await this.options.agentcash.checkEndpointSchema({ url: target, method, body });
       if (!fresh.ok) return { ok: false, error: fresh.error };
       if (railFromSchema(fresh.data) !== inspection.rail) return { ok: false, error: "The payment rail changed; inspect this service again." };
       const current = priceCeilingFromSchema(fresh.data);
@@ -345,16 +350,16 @@ export class EconomyGateway {
 
     this.options.onProgress?.({ type: "reserving_spend", message: `Reserving ${quotedCostCents} cents` });
     const reservation = this.options.hostedSpending ? { id: "hosted", amountCents: 0 } : await reserveBudget(session, quotedCostCents,
-      { description: `Paid tool · ${endpoint}`, identity: JSON.stringify({ operationId, endpoint, method, body: args.body, quoteIdentity }), forceApproval: requestedCostCents !== undefined && quotedCostCents > requestedCostCents });
+      { description: `Paid tool · ${endpoint}`, identity: JSON.stringify({ operationId, endpoint: target, method, body, quoteIdentity }), forceApproval: requestedCostCents !== undefined && quotedCostCents > requestedCostCents });
 
     let result: PaidFetchResult;
     try {
       this.options.onProgress?.({ type: "calling_service", message: `Calling ${endpoint}` });
       result = await this.options.agentcash.fetch({
-        url: endpoint,
+        url: target,
         operationId,
         method,
-        body: args.body,
+        body,
         maxAmountUsd: quotedCostCents / 100,
         rail: inspection.rail
       });
@@ -674,6 +679,27 @@ export class EconomyGateway {
   }
 }
 
+/** GET and HEAD send a flat object's fields as query parameters instead of a body. */
+function requestFor(endpoint: string, method: string, body: unknown): { url: string; body: unknown } {
+  if (method !== "GET" && method !== "HEAD") return { url: endpoint, body };
+  let fields = body;
+  if (typeof fields === "string") {
+    try { fields = JSON.parse(fields); } catch { return { url: endpoint, body }; }
+  }
+  if (fields === undefined || fields === null) return { url: endpoint, body: undefined };
+  if (typeof fields !== "object" || Array.isArray(fields)) return { url: endpoint, body };
+  let url: URL;
+  try { url = new URL(endpoint); } catch { return { url: endpoint, body }; }
+  for (const [key, value] of Object.entries(fields as Record<string, unknown>)) {
+    for (const item of Array.isArray(value) ? value : [value]) {
+      if (item === undefined || item === null) continue;
+      if (typeof item === "object") return { url: endpoint, body };
+      url.searchParams.append(key, String(item));
+    }
+  }
+  return { url: url.href, body: undefined };
+}
+
 function inspectionKey(endpoint: string, method: string): string {
   return `${method} ${endpoint}`;
 }
@@ -758,12 +784,12 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "find_paid_service",
-    description: "Discover paid capability: pass `origin` to list a known origin's endpoints, or `query` to search for an unknown capability.",
+    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, ranked best first by CrowdCode: quality, then effective price on your best network (including a transfer between your own networks when its balance is short), then your balance there. `origin` lists a known origin's endpoints.",
     parameters: {
       type: "object",
       properties: {
         origin: { type: "string", description: "Known API origin, e.g. https://stableenrich.dev" },
-        query: { type: "string", description: "Natural-language capability search when no origin is known" },
+        query: { type: "string", description: "The capability in a few words, for example \"web search\", \"object storage\" or \"solana token risk\"; not the task's subject" },
         limit: { type: "integer", minimum: 1, description: "Maximum search results" }
       },
       additionalProperties: false
@@ -791,7 +817,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
       properties: {
         url: { type: "string", description: "Exact endpoint URL from inspect_paid_service" },
         method: { type: "string", description: "HTTP method (default POST)" },
-        body: { description: "Request body matching the inspected schema" },
+        body: { description: "Request inputs matching the inspected schema; for GET they are sent as query parameters" },
         max_cost_cents: { type: "integer", minimum: 1, description: "Price ceiling in cents; defaults to the inspected price" }
       },
       required: ["url"],

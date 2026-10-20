@@ -56,12 +56,13 @@ function mppChallenge(amount = "15000", currency = TEMPO_USDC) {
 }
 
 /** A fetch double serving the CrowdCode API plus one x402/MPP endpoint; records every call. */
-function fakeFetch(options: { endpointStatus?: number; header?: string | null; wwwAuthenticate?: string; detailStatus?: number } = {}) {
+function fakeFetch(options: { endpointStatus?: number; header?: string | null; wwwAuthenticate?: string; detailStatus?: number; find?: (body: any) => unknown } = {}) {
   const calls: { url: string; method: string; body?: string }[] = [];
   const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input); const method = init?.method ?? "GET";
     calls.push({ url, method, body: typeof init?.body === "string" ? init.body : undefined });
     if (url === `${CROWDCODE}/api/services`) return json(LISTING);
+    if (url === `${CROWDCODE}/api/services/find` && options.find) return json(options.find(JSON.parse(String(init?.body))));
     if (url === `${CROWDCODE}/api/services/svc_search`) return options.detailStatus === 404 ? json({ ok: false }, { status: 404 }) : json(DETAIL);
     if (url.startsWith(`${CROWDCODE}/api/services/`)) return json({ ok: false, error: "not found" }, { status: 404 });
     if (url === SEARCH || url === SOCIAL || url === WEATHER) {
@@ -121,6 +122,46 @@ describe("hosted economy: discovery and inspection", () => {
     const result = await gateway.execute("find_paid_service", { query: "web search", limit: 2 });
     expect(result.ok).toBe(true);
     expect((result.data as any).services).toEqual([expect.objectContaining({ endpoint: SEARCH, network: "eip155:8453", payable: true })]);
+  });
+
+  it("ranks search results across chains with CrowdCode, using the agent's per-network balances", async () => {
+    const ranked = (rank: number, endpoint: string, network: string, extra: Record<string, unknown> = {}) => ({ rank, endpoint, method: null, name: endpoint,
+      quality: { score: 4.5 - rank / 10, n_eff: 3, num_reviews: 4, num_verified_reviews: 3, unique_payers_30d: 12 },
+      best: { network, protocol: network === "tempo" ? "mpp" : "x402", price_usd: 0.01, effective_price_usd: 0.01, transfer_needed: false, fundable: true, balance_usd: 1 },
+      sources: ["cdp-bazaar"], ...extra });
+    const find = vi.fn(() => ({ ok: true, services: [ranked(1, "https://gone.example/x", "solana"), ranked(2, SEARCH, "solana", { best: { network: "solana", price_usd: 0.01,
+      effective_price_usd: 0.04, transfer_needed: true, fundable: true, balance_usd: 0 }, sources: ["agentcash", "cdp-bazaar"] }), ranked(3, WEATHER, "tempo")] }));
+    const { fetcher } = fakeFetch({ header: offer(["eip155:8453", SOLANA_NETWORK]), wwwAuthenticate: mppChallenge(), find });
+    const { socketPath } = await bridge((name) => name === "economy.balance"
+      ? { ok: true, data: { networks: [{ network: "base", available_usd: "2.5" }, { network: "solana", available_usd: "0" }, { network: "tempo", available_usd: "1.25" }] } }
+      : { ok: true, data: { status: 200, body: JSON.stringify({ results: [{ origin: { url: "https://stableenrich.dev", protocols: ["x402"] }, path: "/api/search", method: "POST",
+        summary: "Web search", price: "0.01 USD", signals: { originUsage: { uniqueUserCount: 40 } } }] }) } });
+    const { gateway } = await economy(fetcher, socketPath);
+    const result = await gateway.execute("find_paid_service", { query: "web search", limit: 3 });
+    expect(find).toHaveBeenCalledWith({ query: "web search", networks: ["base", "solana", "tempo"], balances: { base: 2.5, solana: 0, tempo: 1.25 },
+      candidates: [{ endpoint: SEARCH, method: "POST", name: "Web search", source: "agentcash", price_usd: 0.01, protocols: ["x402"], unique_payers: 40 }], limit: 6 });
+    const data = result.data as any;
+    // The unreachable top result is dropped; the rest keep CrowdCode's order and best network.
+    expect(data.services.map((s: any) => [s.rank, s.endpoint, s.best_network])).toEqual([[2, SEARCH, "solana"], [3, WEATHER, "tempo"]]);
+    expect(data.services[0]).toMatchObject({ network: "eip155:8453", best_network: "solana", transfer_needed: true, effective_price_usd: 0.04, sources: ["agentcash", "cdp-bazaar"],
+      quality: { score: 4.3, reviews: 4, verified_reviews: 3, payers_30d: 12 } });
+    expect(data.services[1]).toMatchObject({ method: "GET", best_network: "tempo" });
+    expect(data.note).toContain("Ranked by CrowdCode across Base, Solana and Tempo");
+  });
+
+  it("keeps AgentCash's order when CrowdCode is off or its ranking fails", async () => {
+    const find = vi.fn(() => ({ ok: false, error: "down" }));
+    const { fetcher } = fakeFetch({ find });
+    const { socketPath } = await bridge(() => ({ ok: true, data: { status: 200, body: JSON.stringify({ results: [{ origin: { url: "https://stableenrich.dev" }, path: "/api/search", method: "POST", summary: "Web search" }] }) } }));
+    const { gateway } = await economy(fetcher, socketPath);
+    const failed = await gateway.execute("find_paid_service", { query: "web search" });
+    expect((failed.data as any).note).toContain("CrowdCode ranking unavailable");
+    expect((failed.data as any).services).toEqual([expect.objectContaining({ endpoint: SEARCH })]);
+    await gateway.execute("set_crowdcode_enabled", { enabled: false });
+    find.mockClear();
+    const off = await gateway.execute("find_paid_service", { query: "web search" });
+    expect(find).not.toHaveBeenCalled();
+    expect((off.data as any).note).toMatch(/^AgentCash discovery, verified/);
   });
 
   it("decodes x402 headers and MPP challenges into every offered network, price, payee and schema", () => {

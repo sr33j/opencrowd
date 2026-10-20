@@ -4,7 +4,8 @@ import { randomUUID, createHash } from "node:crypto";
 import { join } from "node:path";
 import { SpendingDeclined, type SessionState } from "@opencrowd/core";
 import {
-  EconomyGateway, BaseServiceDiscovery, summarizeEvidence, classifyOffer, describeRails, HOSTED_RAILS, railForNetwork, selectOffer,
+  EconomyGateway, BaseServiceDiscovery, summarizeEvidence, classifyOffer, describeRails, HOSTED_RAILS, networkName, railForNetwork, selectOffer,
+  type OfferNetwork,
   type ServiceOffer,
   type AgentCashAdapter,
   type CrowdCodeAdapter,
@@ -17,6 +18,8 @@ import {
   type ReviewSubmission,
   type ServiceEvidence,
   type ServiceQuery,
+  type ServiceSearch,
+  type SearchOptions,
   type WalletStatusResult
 } from "@opencrowd/economy";
 import { SERVICE_GATEWAY_TIMEOUT_MS } from "@opencrowd/protocol";
@@ -32,6 +35,8 @@ import { HostedToolTimeout, postHostedTool, type HostedBridgeOptions } from "./h
 
 export const DEFAULT_CROWDCODE_BASE = "https://crowdcode-backend.onrender.com";
 const LIST_CACHE_MS = 60_000;
+/** CrowdCode's search waits on public catalogs (about 8s each, in parallel). */
+const FIND_TIMEOUT_MS = 20_000;
 /**
  * The supervisor waits SERVICE_GATEWAY_TIMEOUT_MS on the gateway, which waits
  * SERVICE_PROVIDER_TIMEOUT_MS on the provider. The runtime must never be the
@@ -79,7 +84,7 @@ class ServiceDirectory {
   private cache?: { fetchedAt: number; services: ListedService[] };
   private readonly idsByEndpoint = new Map<string, string>();
 
-  constructor(private readonly fetcher: typeof fetch, readonly base: string) {}
+  constructor(readonly fetcher: typeof fetch, readonly base: string) {}
 
   async list(force = false): Promise<ListedService[]> {
     if (!force && this.cache && Date.now() - this.cache.fetchedAt < LIST_CACHE_MS) {
@@ -133,7 +138,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       if (!reply.ok || result?.status !== 200) return { ok: false, error: reply.error ?? "AgentCash search unavailable" };
       return { ok: true, data: JSON.parse(result.body) };
     // The hosted gateway negotiates Base, Solana or Tempo per call from the agent's per-network balances.
-    }, { rails: HOSTED_RAILS, negotiated: true });
+    }, { rails: HOSTED_RAILS, negotiated: true, balances: () => this.networkBalances() });
   }
   private readonly discovery: BaseServiceDiscovery;
   async read(url: string): Promise<McpCallResult> {
@@ -153,8 +158,22 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }
   }
 
+  /** Available USDC per network (balance minus open holds), for ranking search results. */
+  private async networkBalances(): Promise<Partial<Record<OfferNetwork, number>>> {
+    const reply = await postHostedTool(this.socket, "economy.balance", {});
+    const networks = (reply.ok ? objectValue(reply.data)?.networks : undefined);
+    const balances: Partial<Record<OfferNetwork, number>> = {};
+    for (const entry of Array.isArray(networks) ? networks : []) {
+      const row = objectValue(entry);
+      const name = networkName(row?.network) ?? networkName(row?.caip2);
+      const available = Number(row?.available_usd ?? row?.balance_usd);
+      if (name && row?.available_usd != null && Number.isFinite(available)) balances[name] = available;
+    }
+    return balances;
+  }
+
   discoverEndpoints(origin: string): Promise<McpCallResult> { return this.discovery.discoverEndpoints(origin); }
-  search(query: string, options: { limit?: number; broad?: boolean } = {}): Promise<McpCallResult> { return this.discovery.search(query, options); }
+  search(query: string, options: SearchOptions = {}): Promise<McpCallResult> { return this.discovery.search(query, options); }
   checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult> { return this.discovery.inspect(input); }
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
@@ -395,6 +414,20 @@ export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
     return postHostedTool(this.socket, "economy.crowdcode", { name, ...args });
   }
   constructor(private readonly directory: ServiceDirectory, private readonly socket: HostedBridgeOptions) {}
+
+  /** CrowdCode's cross-chain search and ranking over its public API. */
+  async findServices(search: ServiceSearch): Promise<McpCallResult> {
+    try {
+      const response = await this.directory.fetcher(`${this.directory.base}/api/services/find`, {
+        method: "POST", signal: AbortSignal.timeout(FIND_TIMEOUT_MS),
+        headers: { accept: "application/json", "content-type": "application/json" }, body: JSON.stringify(search)
+      });
+      const body = objectValue(await response.json().catch(() => undefined));
+      return response.ok && body?.ok !== false ? { ok: true, data: body } : { ok: false, error: `CrowdCode search failed (HTTP ${response.status})` };
+    } catch (error) {
+      return { ok: false, error: `CrowdCode search unavailable: ${(error as Error).message}` };
+    }
+  }
 
   async getServiceScore(query: ServiceQuery): Promise<ServiceEvidence> {
     const unreviewed: ServiceEvidence = { ok: true, unproven: true, summary: "not yet reviewed on CrowdCode" };

@@ -84,6 +84,17 @@ describe("gateway surface", () => {
 });
 
 describe("purchase lifecycle", () => {
+  it("sends GET inputs as query parameters instead of a body", async () => {
+    const { gateway, agentcash } = await setup();
+    expect((await gateway.execute("inspect_paid_service", { url: ENDPOINT, method: "GET" })).ok).toBe(true);
+    const result = await gateway.execute("call_paid_service", { url: ENDPOINT, method: "GET", body: { topic: "tempo news", max_results: 5, tags: ["a", "b"] }, max_cost_cents: 10 });
+    expect(result.ok).toBe(true);
+    expect(agentcash.fetchCalls[0]).toMatchObject({ url: `${ENDPOINT}?topic=tempo+news&max_results=5&tags=a&tags=b`, method: "GET" });
+    expect(agentcash.fetchCalls[0]!.body).toBeUndefined();
+    // Purchases keep the inspected endpoint for reviews.
+    expect(JSON.stringify(await gateway.listPurchasesRedacted())).toContain(`"endpoint":"${ENDPOINT}"`);
+  });
+
   it("runs CrowdCode pre-check before payment and records a paid receipt with adapter evidence", async () => {
     const { session, gateway, agentcash, crowdcode } = await setup();
     await inspect(gateway);
