@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.0 — 2026-10-20
+
+- Hosted agents can move their own USDC between Base, Solana and Tempo from chat with `bridge_usdc`. `quote_only` shows the fee and expected amount. Executing applies the owner's spending policy to the fee: ask mode, the per-call limit or the query budget pause the run for approval, and the approved resume repeats the same move. It then waits for the funds to arrive and reports both transactions. Funds always go to the agent's own address, and a replayed tool call never moves twice. The fee counts as the run's spending; the hosted financial snapshot reports it as `transfer_fees_usdc`.
+- When a hosted purchase fails with `funding_required`, the error now lists the agent's available USDC per network and, when another network holds enough, the `bridge_usdc` call that would make the purchase payable. The hosted system prompt tells the agent to move funds and retry instead of switching services, and to report the wallet as one total.
+
 ## 0.8.1 — 2026-10-20
 
 - Send the seller's payee with Solana purchase reviews. x402 Solana receipts omit it, so CrowdCode rejected reviews of services it had not seen before ("payment recipient is not registered"); the payee now comes from the inspected offer when the payment settled on that rail.

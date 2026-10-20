@@ -163,7 +163,7 @@ export class EconomyGateway {
         case "read_service":
           return this.options.agentcash.read ? await this.options.agentcash.read(String(args.url ?? "")) : { ok: false, error: "Authenticated reads are unavailable" };
         case "bridge_usdc":
-          return await this.bridgeUsdc(args);
+          return await this.bridgeUsdc(args, operationId);
         default:
           return { ok: false, error: `unknown gateway tool: ${name}` };
       }
@@ -597,7 +597,8 @@ export class EconomyGateway {
     return { ok: true, data: { purchase_id: purchaseId, review: "submitted", rating } };
   }
 
-  private async bridgeUsdc(args: Record<string, unknown>): Promise<ToolResult> {
+  private async bridgeUsdc(args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
+    if (this.options.hostedSpending) return this.hostedBridge(args, operationId);
     if (this.options.approvalMode === "off") {
       return { ok: false, error: "financial actions are disabled (approval mode `off`)" };
     }
@@ -633,6 +634,37 @@ export class EconomyGateway {
       approval_mode: this.options.session.approvalMode,
       notes: result.ok ? "USDC bridge between own networks (not budget spend)" : result.error
     });
+    return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
+  }
+
+  /**
+   * Hosted moves between the agent's own networks. The hosted gateway owns the
+   * quote, the owner's approval policy for the fee and the signing; an
+   * approval pause propagates as a RuntimePause from the adapter.
+   */
+  private async hostedBridge(args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
+    const transferId = stringArg(args.transfer_id);
+    if (transferId) return this.options.agentcash.bridge({ from: "", to: "", amountUsd: 0, transferId });
+    const from = stringArg(args.from)?.toLowerCase(), to = stringArg(args.to)?.toLowerCase(), amountUsd = numberArg(args.amount_usd);
+    const networks = ["base", "solana", "tempo"];
+    if (!from || !to || !networks.includes(from) || !networks.includes(to) || from === to || amountUsd === undefined || amountUsd <= 0)
+      return { ok: false, error: "bridge_usdc requires two different networks (base, solana, tempo) and a positive amount_usd, or a transfer_id to check" };
+    const quoteOnly = args.quote_only === true;
+    const result = await this.options.agentcash.bridge({ from, to, amountUsd, quoteOnly, operationId });
+    if (!quoteOnly) {
+      const fee = numberArg((result.data as { fee_usd?: unknown } | undefined)?.fee_usd);
+      await appendLedgerEntry(this.options.session.ledgerPath, {
+        session_id: this.options.session.sessionId,
+        type: "service_call",
+        resource_url: `hosted:transfer:${from}->${to}`,
+        method: "BRIDGE",
+        quoted_cost_cents: fee === undefined ? 0 : Math.ceil(fee * 100),
+        charged_cost_cents: 0,
+        status: result.ok ? "ok" : "failed",
+        approval_mode: this.options.session.approvalMode,
+        notes: result.ok ? "USDC moved between own networks; the fee counts in the hosted run's spending" : result.error
+      });
+    }
     return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
   }
 

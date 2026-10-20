@@ -33,6 +33,8 @@ export const FinancialStateSchema = z.discriminatedUnion("status", [
     current_run: z.object({
       inference_spent_usdc: usdc,
       service_spent_usdc: usdc,
+      /** Fees of moves between the agent's own networks started by this run (included in total_spent_usdc). */
+      transfer_fees_usdc: usdc.optional(),
       total_spent_usdc: usdc,
       reserved_usdc: usdc,
       budget_limit_usdc: usdc,

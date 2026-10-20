@@ -106,7 +106,8 @@ async function bridge(handler: (name: string, args: Record<string, unknown>) => 
 
 async function economy(fetcher: typeof fetch, socketPath: string) {
   const session = await createSession({ workspaceRoot: await root(), sessionId: "session-1", budgetCents: 100, approvalMode: "auto" });
-  const gateway = createHostedEconomy({ socketPath, runId: "run-1", sessionId: "session-1", session, fetcher, crowdcodeBase: CROWDCODE, reconcileDelayMs: 20 });
+  const gateway = createHostedEconomy({ socketPath, runId: "run-1", sessionId: "session-1", session, fetcher, crowdcodeBase: CROWDCODE, reconcileDelayMs: 20,
+    transferWait: { totalMs: 2000, pollMs: 10 } });
   return { session, gateway };
 }
 const SETTLED = { ok: true, data: { outcome: "paid_success", status: 200, body: JSON.stringify({ image: "generated" }), content_type: "application/json",
@@ -325,7 +326,6 @@ describe("hosted economy: payment over the bridge", () => {
     expect(unlisted).toMatchObject({ ok: false, ambiguous: false, error: expect.stringContaining("per_call_cap") });
     expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(3);
     expect(requests.at(-1)?.arguments.service_id).toMatch(/^url:/);
-    expect(await directory.bridge()).toMatchObject({ ok: false, error: expect.stringContaining("not available for hosted agents") });
   });
 
   it.each([
@@ -396,7 +396,7 @@ describe("hosted economy: worker wiring", () => {
       provider: (_run, _session, extraTools) => { advertised = extraTools.map(t => t.name); return provider; },
       economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
-    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service"]);
+    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service", "bridge_usdc"]);
     expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallets on Base, Solana and Tempo");
     expect(systemPrompt).toContain("Payable: x402 USDC on Base or Solana and MPP USDC.e on Tempo");
     expect(systemPrompt).toContain("Other networks, including Monad, are not payable here");
@@ -448,7 +448,8 @@ describe("hosted economy: worker wiring", () => {
     expect(events.filter(e => e.type === "tool.started").map(e => e.payload.input)).toEqual([
       { url: SEARCH, method: "POST" }, { url: SEARCH, method: "POST" }, { purchase_id: purchaseId, rating: "4" }, { summary: "reviewed" }]);
     const dynamic = hostedDynamicTools(createHostedEconomy({ socketPath, runId: "r", sessionId: "s", session: await createSession({ workspaceRoot: await root() }), fetcher }));
-    expect(dynamic.definitions.map(d => d.name)).not.toContain("bridge_usdc");
+    // Hosted agents move their own funds between networks; the hosted description replaces AgentCash's.
+    expect(dynamic.definitions.find(d => d.name === "bridge_usdc")?.description).toContain("always arrives at your own address");
   });
 });
 
@@ -532,6 +533,37 @@ it("resumes an approved paid tool after worker restart with the same purchase ID
 });
 
 
+it("resumes an approved move between networks after worker restart with the same transfer operation", async () => {
+  const home = await root(); const events: Event[] = []; let approved = false; let turn = 0;
+  const { fetcher } = fakeFetch();
+  const done = { id: "t1", state: "confirmed", from: "base", to: "tempo", amount_atomic: "2000000", fee_atomic: "26808", received_atomic: "1973192", origin_transaction: "0xa", destination_transaction: "0xb" };
+  const { socketPath, requests } = await bridge(() => approved ? { ok: true, data: { kind: "transfer", transfer: done } }
+    : { ok: false, code: "approval_required", error: "This transfer needs the owner's approval" });
+  const provider = { complete: vi.fn(async () => turn++ === 0
+    ? { content: "", toolCalls: [{ id: "m", name: "bridge_usdc", arguments: { from: "base", to: "tempo", amount_usd: 2 } }] }
+    : { content: "moved", toolCalls: [] }) };
+  const options = { agentHome: home, output: (line: string) => { events.push(JSON.parse(line)); }, provider: () => provider,
+    economy: (run: any, session: any) => {
+      const gateway = createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE });
+      gateway.hasPendingRequiredReviews = async () => false;
+      return gateway;
+    } };
+  const worker = new MachineWorker(options); await worker.initialize();
+  await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "start", runId: "run-1", seq: 1, emittedAt: "2026-10-20T00:00:00Z", type: "run.start",
+    payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "Move $2 to Tempo", modelPolicy: {}, budget: { limit: "10000000" }, approvalMode: "auto" } }));
+  await worker.drain();
+  const waiting = events.filter(e => e.type === "run.finished").at(-1)!;
+  expect(waiting.payload).toMatchObject({ outcome: "waiting_for_approval", pendingOperationId: requests[0].arguments.operation_id });
+  approved = true;
+  const restarted = new MachineWorker(options); await restarted.initialize();
+  await restarted.handleLine(JSON.stringify({ protocolVersion: 1, id: "resume", runId: "run-1", seq: 2, emittedAt: "2026-10-20T00:01:00Z", type: "run.resume",
+    payload: { sessionId: "session-1", cause: "approval_granted", operationId: waiting.payload.pendingOperationId } }));
+  await restarted.drain();
+  expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
+  expect(requests.map(r => r.arguments.operation_id)).toEqual([requests[0].arguments.operation_id, requests[0].arguments.operation_id]);
+  expect(events.filter(e => e.type === "tool.started").map(e => e.payload.input)).toEqual([{ from: "base", to: "tempo", amount_usd: "2" }, { from: "base", to: "tempo", amount_usd: "2" }]);
+});
+
 it("persists CrowdCode controls, skips remote activity while off, and still manages owned reviews", async () => {
   const { fetcher, calls } = fakeFetch();
   const { socketPath, requests } = await bridge(() => ({ ok: true, data: { reviews: [], deleted: true } }));
@@ -559,4 +591,67 @@ it("persists CrowdCode controls, skips remote activity while off, and still mana
   const completion = hostedDynamicTools(restarted);
   expect(await completion.completionGate()).toMatch(/request_service.*exact inputs/);
   expect(await completion.completionGate()).toBeUndefined();
+});
+
+describe("hosted economy: moving funds between the agent's networks", () => {
+  const transfer = (state: string, extra: Record<string, unknown> = {}) => ({ id: "7b0c6f7e-1111-4111-8111-111111111111", state, from: "base", to: "solana",
+    amount_atomic: "1000000", fee_atomic: "22300", expected_received_atomic: "977700", received_atomic: null, origin_transaction: null, destination_transaction: null, failure: null, ...extra });
+
+  it("quotes without moving, then executes keyed by the tool call and waits for the funds to arrive", async () => {
+    const { fetcher } = fakeFetch();
+    let checks = 0;
+    const { socketPath, requests } = await bridge((name, args) => {
+      if (name !== "economy.transfer") return { ok: false, error: "unexpected" };
+      if (args.action === "quote") return { ok: true, data: { quote: { recipient: "So1agent", feeAtomic: "22300", expectedReceivedAtomic: "977700", minimumReceivedAtomic: "970000", timeEstimateSeconds: 4 }, approval: { required: false, reasons: [] } } };
+      if (args.action === "execute") return { ok: true, data: { kind: "transfer", transfer: transfer("submitted", { origin_transaction: "0xorigin" }) } };
+      checks++;
+      return { ok: true, data: { transfer: checks < 2 ? transfer("submitted") : transfer("confirmed", { received_atomic: "977650", fee_atomic: "22350", origin_transaction: "0xorigin", destination_transaction: "5solanaTx" }) } };
+    });
+    const { session, gateway } = await economy(fetcher, socketPath);
+    const quote = await gateway.execute("bridge_usdc", { from: "base", to: "solana", amount_usd: 1, quote_only: true }, "0:call-q");
+    expect(quote).toMatchObject({ ok: true, data: { quote: true, fee_usd: 0.0223, expected_received_usd: 0.9777, needs_owner_approval: false, recipient: "So1agent" } });
+    expect(requests[0].arguments).toEqual({ action: "quote", from: "base", to: "solana", amount_atomic: "1000000" });
+    const moved = await gateway.execute("bridge_usdc", { from: "base", to: "solana", amount_usd: 1 }, "0:call-m");
+    expect(moved).toMatchObject({ ok: true, data: { state: "confirmed", received_usd: 0.97765, fee_usd: 0.02235, origin_transaction: "0xorigin", destination_transaction: "5solanaTx" } });
+    const execute = requests.find(r => r.arguments.action === "execute")!;
+    expect(execute.arguments).toMatchObject({ from: "base", to: "solana", amount_atomic: "1000000", operation_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$/) });
+    expect(requests.filter(r => r.arguments.action === "status").map(r => r.arguments.transfer_id)).toEqual([transfer("x").id, transfer("x").id]);
+    // The same tool call maps to the same transfer operation, so a replayed call cannot move twice.
+    await gateway.execute("bridge_usdc", { from: "base", to: "solana", amount_usd: 1 }, "0:call-m");
+    expect(requests.filter(r => r.arguments.action === "execute").map(r => r.arguments.operation_id)).toEqual([execute.arguments.operation_id, execute.arguments.operation_id]);
+    const ledger = (await import("node:fs/promises")).readFile(session.ledgerPath, "utf8");
+    expect(await ledger).toContain("hosted:transfer:base->solana");
+  });
+
+  it("pauses for the owner's approval with the operation control recorded, and reports refusals with their code", async () => {
+    const { fetcher } = fakeFetch();
+    const replies: unknown[] = [
+      { ok: false, code: "approval_required", error: "This transfer needs the owner's approval; it will run once approved" },
+      { ok: false, code: "insufficient_funds", error: "The amount exceeds the available USDC on Base" },
+    ];
+    const { socketPath, requests } = await bridge(() => replies.shift());
+    const { gateway } = await economy(fetcher, socketPath);
+    const paused = await gateway.execute("bridge_usdc", { from: "base", to: "tempo", amount_usd: 2 }, "1:call-a").catch(e => e);
+    expect(paused).toMatchObject({ name: "RuntimePause", outcome: "waiting_for_approval", operationId: requests[0].arguments.operation_id });
+    const refused = await gateway.execute("bridge_usdc", { from: "base", to: "tempo", amount_usd: 2 }, "1:call-b");
+    expect(refused).toMatchObject({ ok: false, error: expect.stringContaining("(insufficient_funds)") });
+    // Invalid moves never reach the supervisor.
+    for (const args of [{ from: "base", to: "base", amount_usd: 1 }, { from: "base", to: "monad", amount_usd: 1 }, { from: "solana", to: "base", amount_usd: 0 }])
+      expect(await gateway.execute("bridge_usdc", args, "1:call-c")).toMatchObject({ ok: false, error: expect.stringContaining("two different networks") });
+    expect(requests).toHaveLength(2);
+  });
+
+  it("explains a funding_required purchase with the wallet split and the move that would pay it", async () => {
+    const { fetcher } = fakeFetch({ header: offer(SOLANA_NETWORK, "5000") });
+    const { socketPath } = await bridge((name) => name === "economy.pay"
+      ? { ok: false, code: "funding_required", error: "Not enough USDC on the networks this service accepts: solana needs 0.005000 USDC (holds 0.000000)." }
+      : { ok: true, data: { networks: [{ network: "base", available_usd: "13.470000" }, { network: "solana", available_usd: "0.000000" }, { network: "tempo", available_usd: "1.490000" }] } });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "q" } });
+    expect(call.ok).toBe(false);
+    expect(call.error).toContain("solana needs 0.005000");
+    expect(call.error).toContain("base 13.47, solana 0.00, tempo 1.49 (total 14.96)");
+    expect(call.error).toContain('bridge_usdc {"from":"base","to":"solana","amount_usd":1}');
+  });
 });

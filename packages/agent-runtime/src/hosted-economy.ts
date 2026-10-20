@@ -9,6 +9,7 @@ import {
   type AgentCashAdapter,
   type CrowdCodeAdapter,
   type McpCallResult,
+  type BridgeRequest,
   type PaidFetchRequest,
   type PaidFetchResult,
   type PaymentRail,
@@ -44,8 +45,12 @@ const RECONCILE_DELAY_MS = 2_000;
 const NOT_SENT_CODES = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ENOTDIR"]);
 const FREE_FETCH_TIMEOUT_MS = 30_000;
 const USDC_ATOMIC_PER_USD = 1_000_000;
-/** Gateway tools that have no hosted counterpart worth advertising. */
-const HIDDEN_HOSTED_TOOLS = new Set(["bridge_usdc"]);
+/** A move usually lands in seconds; past this the tool reports it pending with its id. */
+const TRANSFER_WAIT_MS = 150_000;
+const TRANSFER_POLL_MS = 3_000;
+/** Below this, Relay's ~$0.02 fee exceeds the 3% cap and the quote is refused. */
+const MIN_PRACTICAL_MOVE_USD = 1;
+const RAIL_NETWORK: Partial<Record<PaymentRail, string>> = { "x402-base": "base", "x402-solana": "solana", mppx: "tempo" };
 
 export interface HostedEconomyOptions extends HostedBridgeOptions {
   session: SessionState;
@@ -53,6 +58,8 @@ export interface HostedEconomyOptions extends HostedBridgeOptions {
   crowdcodeBase?: string;
   /** Test hook: delay before the single purchase reconcile after a lost socket. */
   reconcileDelayMs?: number;
+  /** Test hook: how long and how often an executed transfer is followed. */
+  transferWait?: { totalMs: number; pollMs: number };
 }
 
 interface ListedService {
@@ -115,7 +122,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     private readonly directory: ServiceDirectory,
     private readonly socket: HostedBridgeOptions,
     private readonly fetcher: typeof fetch,
-    private readonly reconcileDelayMs = RECONCILE_DELAY_MS
+    private readonly reconcileDelayMs = RECONCILE_DELAY_MS,
+    private readonly transferWait: { totalMs: number; pollMs: number } = { totalMs: TRANSFER_WAIT_MS, pollMs: TRANSFER_POLL_MS }
   ) {
     this.discovery = new BaseServiceDiscovery(async (query, options) => {
       const reply = await postHostedTool(this.socket, "economy.read", {
@@ -222,6 +230,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     if (reply.code === "expected_payment_required") {
       return this.fetchUnpaid(request.url, method, body, request.headers);
     }
+    if (reply.code === "funding_required") {
+      return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`);
+    }
     if (reply.code === "payment_unknown") {
       return {
         ok: false,
@@ -275,9 +286,108 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }
   }
 
-  async bridge(): Promise<McpCallResult> {
-    return { ok: false, error: "USDC bridging is not available for hosted agents" };
+  /**
+   * After funding_required: where the agent's money is, and the move that
+   * would make this purchase payable when another network holds enough.
+   */
+  private async fundingHint(request: PaidFetchRequest): Promise<string> {
+    const wallet = await this.getBalance().catch(() => undefined);
+    const networks = Array.isArray((wallet?.data as any)?.networks) ? (wallet!.data as any).networks as Record<string, unknown>[] : [];
+    const available = networks.map((n) => ({ network: stringValue(n.network) ?? "?", usd: numberValue(n.available_usd ?? n.balance_usd) }))
+      .filter((n): n is { network: string; usd: number } => n.usd !== undefined);
+    if (!available.length) return " Check get_wallet_status for where your USDC is.";
+    const total = available.reduce((sum, n) => sum + n.usd, 0);
+    const line = ` Your available USDC: ${available.map((n) => `${n.network} ${n.usd.toFixed(2)}`).join(", ")} (total ${total.toFixed(2)}).`;
+    const target = RAIL_NETWORK[request.rail];
+    const amount = Math.max(MIN_PRACTICAL_MOVE_USD, Math.ceil((request.maxAmountUsd + 0.05) * 100) / 100);
+    const source = available.filter((n) => n.network !== target).sort((a, b) => b.usd - a.usd)[0];
+    if (!target || !source || source.usd < amount + 0.05) return `${line} No single network holds enough to move; ask the owner to add funds.`;
+    return `${line} To pay, move funds first: bridge_usdc {"from":"${source.network}","to":"${target}","amount_usd":${amount}} (fee about $0.02-0.03, counted as spending; follows the owner's approval mode), then retry this call.`;
   }
+
+  /**
+   * Moves this agent's own USDC between its networks through the supervisor:
+   * a quote, or an executed move keyed by the tool call that waits for the
+   * funds to arrive. Control picks the destination (the agent's own address),
+   * applies the owner's policy to the fee and signs.
+   */
+  async bridge(input: BridgeRequest): Promise<McpCallResult> {
+    if (input.transferId) return this.transferStatus(input.transferId);
+    const amountAtomic = Math.round(input.amountUsd * USDC_ATOMIC_PER_USD);
+    if (!Number.isSafeInteger(amountAtomic) || amountAtomic < 1) return { ok: false, error: "amount_usd is too small or too large" };
+    const move = { from: input.from, to: input.to, amount_atomic: String(amountAtomic) };
+    if (input.quoteOnly) {
+      const reply = await postHostedTool(this.socket, "economy.transfer", { action: "quote", ...move }, { timeoutMs: 60_000 });
+      if (!reply.ok) return { ok: false, error: describeTransferError(reply) };
+      const data = objectValue(reply.data) ?? {}, quote = objectValue(data.quote) ?? {}, approval = objectValue(data.approval) ?? {};
+      return { ok: true, data: {
+        quote: true, from: input.from, to: input.to, amount_usd: input.amountUsd, recipient: stringValue(quote.recipient),
+        fee_usd: usd(quote.feeAtomic), expected_received_usd: usd(quote.expectedReceivedAtomic), minimum_received_usd: usd(quote.minimumReceivedAtomic),
+        time_estimate_seconds: numberValue(quote.timeEstimateSeconds),
+        needs_owner_approval: approval.required === true,
+        note: approval.required === true
+          ? "Executing will pause for the owner's approval of this move and its fee."
+          : "Within the owner's limits: executing runs immediately. Nothing has moved yet."
+      } };
+    }
+    const hash = createHash("sha256").update(`${this.socket.runId}:${input.operationId ?? randomUUID()}:transfer`).digest("hex");
+    const operationId = `${hash.slice(0,8)}-${hash.slice(8,12)}-4${hash.slice(13,16)}-8${hash.slice(17,20)}-${hash.slice(20,32)}`;
+    const args = { action: "execute", ...move, operation_id: operationId };
+    let reply;
+    try {
+      reply = await postHostedTool(this.socket, "economy.transfer", args, { timeoutMs: 100_000 });
+    } catch {
+      // Keyed by operation: re-posting returns the transfer the first request created instead of moving twice.
+      await new Promise(resolve => setTimeout(resolve, this.reconcileDelayMs));
+      try {
+        reply = await postHostedTool(this.socket, "economy.transfer", args, { timeoutMs: 100_000 });
+      } catch (error) {
+        return { ok: false, error: `the transfer request was interrupted (${(error as Error).message}); its state is unknown. Check get_wallet_status before moving funds again.` };
+      }
+    }
+    if (!reply.ok && reply.code === "approval_required") {
+      throw new RuntimePause("waiting_for_approval", operationId, "Transfer approval required. Review the move and its fee to continue.");
+    }
+    if (!reply.ok) return { ok: false, error: describeTransferError(reply) };
+    let transfer = objectValue(objectValue(reply.data)?.transfer) ?? {};
+    const deadline = Date.now() + this.transferWait.totalMs;
+    while (isPending(transfer) && stringValue(transfer.id) && Date.now() < deadline) {
+      await new Promise(resolve => setTimeout(resolve, this.transferWait.pollMs));
+      const next = await postHostedTool(this.socket, "economy.transfer", { action: "status", transfer_id: transfer.id }, { timeoutMs: 60_000 }).catch(() => undefined);
+      if (next?.ok) transfer = objectValue(objectValue(next.data)?.transfer) ?? transfer;
+    }
+    return describeTransfer(transfer);
+  }
+
+  private async transferStatus(transferId: string): Promise<McpCallResult> {
+    const reply = await postHostedTool(this.socket, "economy.transfer", { action: "status", transfer_id: transferId }, { timeoutMs: 60_000 });
+    return reply.ok ? describeTransfer(objectValue(objectValue(reply.data)?.transfer) ?? {}) : { ok: false, error: describeTransferError(reply) };
+  }
+}
+
+const usd = (atomic: unknown) => {
+  const value = numberValue(atomic);
+  return value === undefined ? undefined : value / USDC_ATOMIC_PER_USD;
+};
+const isPending = (transfer: Record<string, unknown>) => transfer.state === "quoted" || transfer.state === "submitted";
+function describeTransferError(reply: { error?: string; code?: string }): string {
+  return reply.code ? `${reply.error ?? "transfer refused"} (${reply.code})` : reply.error ?? "transfer refused";
+}
+/** The model-facing summary of a move: amounts in USD and both transactions. */
+function describeTransfer(transfer: Record<string, unknown>): McpCallResult {
+  const state = stringValue(transfer.state) ?? "unknown";
+  const data = {
+    transfer_id: stringValue(transfer.id), state, from: stringValue(transfer.from), to: stringValue(transfer.to),
+    amount_usd: usd(transfer.amount_atomic), fee_usd: usd(transfer.fee_atomic),
+    received_usd: usd(transfer.received_atomic), expected_received_usd: usd(transfer.expected_received_atomic),
+    origin_transaction: stringValue(transfer.origin_transaction), destination_transaction: stringValue(transfer.destination_transaction),
+    failure: stringValue(transfer.failure),
+    note: state === "confirmed" ? "The funds arrived on the destination network and can be spent there now."
+      : isPending(transfer) ? "Still moving. Check again later with bridge_usdc {transfer_id}; do not start another move meanwhile."
+      : state === "refunded" ? "Relay refunded the move to the origin network."
+      : "The move did not complete."
+  };
+  return state === "failed" ? { ok: false, data, error: `the transfer failed: ${data.failure ?? "no funds moved"}` } : { ok: true, data };
 }
 
 export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
@@ -348,7 +458,7 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
   const directory = new ServiceDirectory(fetcher, (options.crowdcodeBase ?? DEFAULT_CROWDCODE_BASE).replace(/\/+$/, ""));
   return new EconomyGateway({
     session: options.session,
-    agentcash: new HostedAgentCashAdapter(directory, socket, fetcher, options.reconcileDelayMs),
+    agentcash: new HostedAgentCashAdapter(directory, socket, fetcher, options.reconcileDelayMs, options.transferWait),
     crowdcode: new HostedCrowdCodeAdapter(directory, socket),
     approvalMode: "auto",
     hostedSpending: true,
@@ -361,12 +471,30 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
 
 export { MAX_REVIEW_ATTEMPTS } from "./economy-tools.js";
 export type { EconomyTools as HostedDynamicTools } from "./economy-tools.js";
-/** Cloud exposes the same completion policy, excluding local wallet actions. */
+/** Cloud exposes the same tools and completion policy; wallet status and bridging get their hosted descriptions. */
 export function hostedDynamicTools(economy: EconomyGateway) {
-  const tools = economyTools(economy, { hidden: HIDDEN_HOSTED_TOOLS });
+  const tools = economyTools(economy);
   return { ...tools, definitions: tools.definitions.map(tool => tool.name === "get_wallet_status"
-    ? { ...tool, description: "Read this hosted agent's USDC wallet balances (per network when reported: Base, Solana, Tempo) and authoritative current-run inference spending, service spending, payment holds and authorized budget. A payment on a network needs that network's balance. Read-only." } : tool) };
+    ? { ...tool, description: "Read this hosted agent's USDC wallet: the total across networks, each network's balance (Base, Solana, Tempo), and authoritative current-run inference spending, service spending, transfer fees, payment holds and authorized budget. A payment on a network needs that network's balance. Read-only." }
+    : tool.name === "bridge_usdc" ? HOSTED_BRIDGE_TOOL : tool) };
 }
+
+/** The hosted counterpart of bridge_usdc: moves between the agent's own networks through the hosted gateway. */
+const HOSTED_BRIDGE_TOOL = {
+  name: "bridge_usdc",
+  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, or when a paid call failed with funding_required and another network holds enough. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending; move at least $1. Pass transfer_id alone to check a pending move.",
+  parameters: {
+    type: "object",
+    properties: {
+      from: { type: "string", enum: ["base", "solana", "tempo"] },
+      to: { type: "string", enum: ["base", "solana", "tempo"] },
+      amount_usd: { type: "number", description: "USDC sent; the fee comes out of it" },
+      quote_only: { type: "boolean" },
+      transfer_id: { type: "string" }
+    },
+    additionalProperties: false
+  }
+};
 
 
 interface PaymentOffer {
