@@ -25,7 +25,7 @@ export function economyTools(economy: Pick<EconomyGateway, "definitions" | "exec
       reflected = true;
       const status = await economy.execute("crowdcode_status", {});
       if (!status.ok || !(status.data as { enabled?: boolean })?.enabled) return review || undefined;
-      return [review, "Before your final answer, reflect once: What concrete services would have been worth paying for to solve this task? For each observed failure, poor result, excessive cost or avoidable detour with a reusable paid remedy, call request_service. Specify exact inputs, the paid deliverable, acceptance criteria, the actual use case and why paying would help. A prior purchase or spending permission is not required. Do not invent budgets. Skip generic local computation, ordinary agent mistakes without a sellable remedy, and services such as web search that already worked well. If everything worked well and cheaply, submit nothing. Then finish the user's task."].filter(Boolean).join(" ");
+      return [review, "Before this run ends, reflect once: What concrete services would have been worth paying for to solve this task? For each observed failure, poor result, excessive cost or avoidable detour with a reusable paid remedy, call request_service. Specify exact inputs, the paid deliverable, acceptance criteria, the actual use case and why paying would help. A prior purchase or spending permission is not required. Do not invent budgets. Skip generic local computation, ordinary agent mistakes without a sellable remedy, and services such as web search that already worked well. If everything worked well and cheaply, submit nothing. Then call complete_session again to finish."].filter(Boolean).join(" ");
     }
   };
 }
