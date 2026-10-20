@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   appendLedgerEntry,
   clearConversation,
@@ -24,7 +24,10 @@ import {
   finalizeReservation,
   saveArtifact,
   updateConfig,
-  runShell
+  runShell,
+  maxShellTimeoutMs,
+  DEFAULT_MAX_SHELL_TIMEOUT_MS,
+  SHELL_TIMEOUT_CEILING_MS
 } from "../src/index.js";
 
 const tmpRoots: string[] = [];
@@ -229,6 +232,38 @@ describe("shell policy", () => {
       const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms }, { session });
       expect(tiny.ok).toBe(false);
       expect(tiny.data).toMatchObject({ timed_out: true });
+    }
+  });
+
+  it("lets the host raise the shell ceiling for heavy toolchains, within its own hard limit", () => {
+    expect(maxShellTimeoutMs({})).toBe(DEFAULT_MAX_SHELL_TIMEOUT_MS);
+    // A host may only raise the cap, never lower it, and never past the ceiling.
+    expect(maxShellTimeoutMs({ OPENCROWD_MAX_SHELL_TIMEOUT_MS: "1800000" })).toBe(1_800_000);
+    expect(maxShellTimeoutMs({ OPENCROWD_MAX_SHELL_TIMEOUT_MS: "60000" })).toBe(DEFAULT_MAX_SHELL_TIMEOUT_MS);
+    expect(maxShellTimeoutMs({ OPENCROWD_MAX_SHELL_TIMEOUT_MS: "99999999" })).toBe(SHELL_TIMEOUT_CEILING_MS);
+    for (const bogus of ["", "abc", "300000.5", "-1"])
+      expect(maxShellTimeoutMs({ OPENCROWD_MAX_SHELL_TIMEOUT_MS: bogus })).toBe(DEFAULT_MAX_SHELL_TIMEOUT_MS);
+  });
+
+  it("advertises the machine's real shell ceiling to the model and honours it", async () => {
+    const standard = openCrowdToolDefinition("run_shell").parameters as { properties: { timeout_ms: { description: string } } };
+    expect(standard.properties.timeout_ms.description).toContain(String(DEFAULT_MAX_SHELL_TIMEOUT_MS));
+    const previous = process.env.OPENCROWD_MAX_SHELL_TIMEOUT_MS;
+    process.env.OPENCROWD_MAX_SHELL_TIMEOUT_MS = "1800000";
+    try {
+      // The tool surface is built when the worker process starts, so a heavy
+      // machine must advertise its own cap rather than the default five minutes.
+      vi.resetModules();
+      const fresh = await import("../src/tool-definitions.js");
+      const schema = fresh.openCrowdToolDefinition("run_shell").parameters as { properties: { timeout_ms: { description: string } } };
+      expect(schema.properties.timeout_ms.description).toContain("1800000");
+      const root = await tempRoot();
+      const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+      await expect(runShell(session, "echo long", root, 600_000)).resolves.toMatchObject({ exit_code: 0 });
+    } finally {
+      if (previous === undefined) delete process.env.OPENCROWD_MAX_SHELL_TIMEOUT_MS;
+      else process.env.OPENCROWD_MAX_SHELL_TIMEOUT_MS = previous;
+      vi.resetModules();
     }
   });
 

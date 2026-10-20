@@ -1,3 +1,5 @@
+import { maxShellTimeoutMs } from "./shell.js";
+
 /**
  * Built-in local tool registry. Paid capability is NOT here: it comes from
  * the economy gateway's stable tool surface, injected by the runtime.
@@ -124,7 +126,7 @@ function toolParameters(name: ToolName): JsonSchema {
       return objectSchema({
         command: stringSchema("Shell command."),
         cwd: stringSchema("Working directory inside the workspace. Use artifacts/<dir> to run where save_file writes (cd inside the command does not reach it)."),
-        timeout_ms: integerSchema("Timeout in milliseconds (default 10000, maximum 300000).")
+        timeout_ms: integerSchema(`Timeout in milliseconds (default 10000, maximum ${maxShellTimeoutMs()}). Pass the real time a long build or download needs; the command is killed at the timeout.`)
       }, ["command"]);
     case "spawn_subagent":
       return objectSchema({
