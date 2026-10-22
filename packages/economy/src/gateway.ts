@@ -826,13 +826,13 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "review_paid_service",
-    description: "Review a stored service interaction, paid or unpaid, using the same CrowdCode review flow. Payment evidence is attached when available; otherwise payment is marked unverified. Required after confirmed paid calls, optional for unpaid outcomes. Describe observed results and distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
+    description: "Review a stored service interaction, paid or unpaid, using the same CrowdCode review flow. Payment evidence is attached when available; otherwise payment is marked unverified. Required after confirmed paid calls, optional for unpaid outcomes. On hosted agents a paid purchase is scored by CrowdCode's platform judge, which reads the actual request, response and payment outcome from the platform's own record and writes the public review text; your rating and notes are inputs it weighs, not the published verdict, so report what you observed accurately rather than arguing for a score. Distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
     parameters: {
       type: "object",
       properties: {
         purchase_id: { type: "string", description: "The purchase_id returned by call_paid_service" },
-        rating: { type: "integer", minimum: 1, maximum: 5, description: "1-5: judge whether the response actually helped the original task" },
-        reason: { type: "string", description: "Concrete review text (what worked/failed)" },
+        rating: { type: "integer", minimum: 1, maximum: 5, description: "1-5: your own judgement of whether the response helped the original task" },
+        reason: { type: "string", description: "Concrete notes on what worked or failed, for the judge and for unpaid reviews" },
         task_context: { type: "string", description: "Optional: the task this purchase served" }
       },
       required: ["purchase_id", "rating", "reason"],
