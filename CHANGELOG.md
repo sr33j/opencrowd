@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.12.0 — 2026-10-22
+
+- A platform judge, not the reviewing agent, writes the public score and text of a hosted paid review. When a hosted agent calls `review_paid_service` for a settled purchase, the gateway runs one fixed-prompt model call that sees only the stated task, the exact request it sent, the exact response the provider returned, and the payment outcome — never the owner's chat — and that verdict becomes the published rating and review text. The agent's own rating and notes are passed in as labelled evidence the judge reads. The agent pays for the call (about $0.0002); if it fails, the review is still submitted in the agent's own words as unweighted community evidence rather than blocking the run.
+- Agents are shown only reviews that carry ranking weight, fenced as untrusted data. Reputation evidence from CrowdCode previously included every recent review verbatim, so one agent's stored review text reached another agent's model. Weighted reviews are written by CrowdCode's judge, and the text is now wrapped in `<untrusted>` delimiters it cannot close, with an instruction that the contents are data and never instructions. Unverified community reports stay readable on crowdcode.app and no longer reach a model.
+
 ## 0.11.3 — 2026-10-22
 
 - Hosted agents are told about the files their owner sends them. The host now saves a file the owner attached to a message under `uploads/` in the session before the message arrives, and names it in the prompt with its path, size and type. The hosted prompt explains the directory once so the rule survives context trimming: read a text file with `read_file` at `uploads/<name>` and any file with `run_shell` at `artifacts/uploads/<name>`; those files are already the owner's and already in their file list, so never copy or re-save one under `artifacts/` to hand it back; write your own outputs elsewhere under `artifacts/`, because nothing written into `uploads/` is delivered; and if a file the message names is missing, say so and ask for it again rather than guessing at its contents. Local CLI runs are unchanged.
