@@ -1090,11 +1090,17 @@ describe("agent loop transcript", () => {
     expect(systemPrompt).toContain("only the artifacts/ directory of this session reaches the owner");
     expect(systemPrompt).toContain("artifacts/generated/report.pdf is generated/report.pdf to them");
     expect(systemPrompt).toContain("Never invent a download URL, a sandbox: link, a /mnt/data path");
+    // Files arriving the other way: the owner's uploads are readable, already
+    // theirs, and must not be handed back as the agent's own output.
+    expect(systemPrompt).toContain("Read a text file with read_file at uploads/<name>");
+    expect(systemPrompt).toContain("never copy or re-save one under artifacts/ to hand it back");
+    expect(systemPrompt).toContain("uploads/ is the owner's directory and nothing you write there is delivered");
 
     const local = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     await runAgentTask(local, "email the summary", { provider: capture, knowledge: false,
       dynamicTools: { definitions: [], execute: async () => ({ ok: true, data: {} }) } });
     expect(systemPrompt).not.toContain("Buy the capability before asking for the owner's credentials");
+    expect(systemPrompt).not.toContain("Files the owner sends you");
   });
 
   it("includes budget snapshots on every tool result message", async () => {

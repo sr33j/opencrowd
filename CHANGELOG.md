@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.11.3 — 2026-10-22
+
+- Hosted agents are told about the files their owner sends them. The host now saves a file the owner attached to a message under `uploads/` in the session before the message arrives, and names it in the prompt with its path, size and type. The hosted prompt explains the directory once so the rule survives context trimming: read a text file with `read_file` at `uploads/<name>` and any file with `run_shell` at `artifacts/uploads/<name>`; those files are already the owner's and already in their file list, so never copy or re-save one under `artifacts/` to hand it back; write your own outputs elsewhere under `artifacts/`, because nothing written into `uploads/` is delivered; and if a file the message names is missing, say so and ask for it again rather than guessing at its contents. Local CLI runs are unchanged.
+
 ## 0.11.2 — 2026-10-20
 
 - Correct what the hosted prompt says about delivering files. 0.11.1 told agents every file in the session workspace reaches the owner; only `artifacts/` does, so an agent asked to "save it under generated/" wrote outside the published tree and the owner received nothing. The prompt now states that `artifacts/` is the delivered directory, that the owner sees each file without that prefix, and that the final message should name a file at exactly the path the owner sees.
