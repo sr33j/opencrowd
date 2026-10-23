@@ -245,6 +245,26 @@ describe("shell policy", () => {
       expect(maxShellTimeoutMs({ OPENCROWD_MAX_SHELL_TIMEOUT_MS: bogus })).toBe(DEFAULT_MAX_SHELL_TIMEOUT_MS);
   });
 
+  it("tells a command whether this machine has a scratch disk, and nothing else about the host", async () => {
+    const session = await createSession({ workspaceRoot: await tempRoot(), shellEnabled: true });
+    const secret = process.env.OPENCROWD_SCRATCH_DIR;
+    const leak = "scratch-env-probe";
+    process.env.AWS_SECRET_ACCESS_KEY = leak;
+    try {
+      delete process.env.OPENCROWD_SCRATCH_DIR;
+      const without = await executeTool("run_shell", { command: "echo \"[$OPENCROWD_SCRATCH_DIR]\"; echo \"[$AWS_SECRET_ACCESS_KEY]\"" }, { session });
+      expect(String((without.data as { stdout: string }).stdout)).toContain("[]");
+      expect(String((without.data as { stdout: string }).stdout)).not.toContain(leak);
+      process.env.OPENCROWD_SCRATCH_DIR = "/scratch";
+      const withScratch = await executeTool("run_shell", { command: "echo \"[$OPENCROWD_SCRATCH_DIR]\"" }, { session });
+      expect(String((withScratch.data as { stdout: string }).stdout)).toContain("[/scratch]");
+    } finally {
+      delete process.env.AWS_SECRET_ACCESS_KEY;
+      if (secret === undefined) delete process.env.OPENCROWD_SCRATCH_DIR;
+      else process.env.OPENCROWD_SCRATCH_DIR = secret;
+    }
+  });
+
   it("advertises the machine's real shell ceiling to the model and honours it", async () => {
     const standard = openCrowdToolDefinition("run_shell").parameters as { properties: { timeout_ms: { description: string } } };
     expect(standard.properties.timeout_ms.description).toContain(String(DEFAULT_MAX_SHELL_TIMEOUT_MS));

@@ -181,12 +181,22 @@ function resolveShellCwd(state: SessionState, cwd: string): string {
   return isAbsolute(cwd) ? resolve(cwd) : resolve(join(state.sessionDir, cwd));
 }
 
+/**
+ * The shell gets a deliberately small environment, so nothing the host holds
+ * leaks into a command the model wrote. `OPENCROWD_SCRATCH_DIR` is here
+ * because the hosted heavy tier puts `$HOME` and `$TMPDIR` on a temporary
+ * disk, and an agent has to be able to tell whether it has one: its absence is
+ * the difference between a 1 GB volume and room for a toolchain.
+ */
 function minimalEnv(): NodeJS.ProcessEnv {
   return {
     HOME: process.env.HOME,
     PATH: process.env.PATH,
     USER: process.env.USER,
-    TMPDIR: process.env.TMPDIR
+    TMPDIR: process.env.TMPDIR,
+    ...(process.env.OPENCROWD_SCRATCH_DIR
+      ? { OPENCROWD_SCRATCH_DIR: process.env.OPENCROWD_SCRATCH_DIR }
+      : {})
   };
 }
 
