@@ -957,10 +957,13 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     try {
       if (options.financialState && !restored?.response && !contextState.prepared) {
         await refreshFinancialState();
-        const snapshot: LlmMessage = { role: "system", content: financialPrefix + JSON.stringify(financial) };
+        // Remove legacy snapshots only when preparing a new request, never
+        // while replaying a checkpointed payment. Keep the prompt prefix stable.
         const index = messages.findIndex(m => m.role === "system" && m.content.startsWith(financialPrefix));
-        if (index === -1) messages.splice(1, 0, snapshot);
-        else messages[index] = snapshot;
+        if (index !== -1) messages.splice(index, 1);
+        // A trailing system message can be hoisted into Claude's system prefix.
+        // The stable system instructions establish this snapshot's authority.
+        contextState.trailingMessage = { role: "user", content: financialPrefix + JSON.stringify(financial) };
       }
       response = restored?.response ?? await completeWithContext(session, messages, {
           provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
