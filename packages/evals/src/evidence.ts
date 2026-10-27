@@ -3,10 +3,11 @@ import { dirname } from "node:path";
 
 /**
  * CrowdCode evidence export. Pulls every service's score, effective review
- * count, nightly digest, and raw recent reviews (reason + task context) from
- * the public CrowdCode API and flattens them into itemized evidence entries
- * with stable IDs. The knowledge-tree proposer cites these IDs, which lets
- * the validator reject claims that reference no evidence.
+ * count and nightly summary (pros, cons, things to watch out for) from the
+ * CrowdCode API and flattens the summary into itemized points with stable
+ * IDs. The knowledge-tree proposer cites these IDs, which lets the validator
+ * reject claims that reference no evidence. Individual reviews are private:
+ * CrowdCode never returns their text.
  */
 
 export interface ServiceEvidence {
@@ -21,18 +22,15 @@ export interface ServiceEvidence {
   num_reviews: number;
   num_verified_reviews: number;
   histogram?: Record<string, number>;
-  summary?: { strengths?: string[]; failure_modes?: string[]; caveats?: string[] };
-  reviews: ReviewEvidence[];
+  summary?: { pros?: string[]; cons?: string[]; watch_out?: string[] };
+  points: SummaryPoint[];
 }
 
-export interface ReviewEvidence {
-  /** Stable id: <service_id>#r<n> */
+export interface SummaryPoint {
+  /** Stable id: <service_id>#p<n> */
   id: string;
-  rating: number;
-  reason: string;
-  task_context?: string;
-  verified: boolean;
-  created_at?: string;
+  kind: "pro" | "con" | "watch_out";
+  text: string;
 }
 
 export interface EvidenceBundle {
@@ -45,9 +43,9 @@ export interface EvidenceBundle {
 export interface FetchEvidenceOptions {
   baseUrl?: string;
   /**
-   * Bearer token for the gated full export (GET /api/knowledge/evidence,
-   * every review per service). Defaults to CROWDCODE_KNOWLEDGE_EXPORT_TOKEN;
-   * without it the public per-service view (5 most recent reviews) is used.
+   * Bearer token for the gated export (GET /api/knowledge/evidence, every
+   * service in one call). Defaults to CROWDCODE_KNOWLEDGE_EXPORT_TOKEN;
+   * without it the public per-service view is used.
    */
   exportToken?: string;
   cachePath?: string;
@@ -119,7 +117,7 @@ async function fetchGatedExport(
   token: string,
   log: (message: string) => void
 ): Promise<EvidenceBundle | undefined> {
-  const url = `${baseUrl}/api/knowledge/evidence?max_reviews=100`;
+  const url = `${baseUrl}/api/knowledge/evidence`;
   log(`fetching ${url}`);
   try {
     const response = await fetchImpl(url, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(120_000) });
@@ -135,8 +133,7 @@ async function fetchGatedExport(
       unproven: raw.unproven,
       num_reviews: raw.num_reviews,
       num_verified_reviews: raw.num_verified_reviews,
-      summary: raw.summary,
-      recent_reviews: raw.reviews
+      summary: raw.summary
     }));
     services.sort((left, right) => right.n_eff * right.score - left.n_eff * left.score || right.num_reviews - left.num_reviews);
     return {
@@ -160,17 +157,13 @@ export function flattenService(detail: Record<string, unknown>): ServiceEvidence
   const endpoint = String(service.canonical_endpoint ?? "");
   const summary = asRecord(detail.summary);
   const serviceId = String(service.service_id ?? "");
-  const reviews = (Array.isArray(detail.recent_reviews) ? detail.recent_reviews : []).map((raw, index) => {
-    const review = asRecord(raw);
-    return {
-      id: `${serviceId}#r${index + 1}`,
-      rating: Number(review.rating ?? 0),
-      reason: String(review.reason ?? ""),
-      task_context: typeof review.task_context === "string" && review.task_context.length > 0 ? review.task_context : undefined,
-      verified: review.payment_verified === true,
-      created_at: typeof review.created_at === "string" ? review.created_at : undefined
-    };
-  });
+  const digest = Object.keys(summary).length > 0
+    ? { pros: stringList(summary.pros), cons: stringList(summary.cons), watch_out: stringList(summary.watch_out) }
+    : undefined;
+  const points: SummaryPoint[] = [];
+  for (const [kind, items] of [["pro", digest?.pros], ["con", digest?.cons], ["watch_out", digest?.watch_out]] as const) {
+    for (const text of items ?? []) points.push({ id: `${serviceId}#p${points.length + 1}`, kind, text });
+  }
   return {
     service_id: serviceId,
     name: String(service.name ?? ""),
@@ -183,29 +176,23 @@ export function flattenService(detail: Record<string, unknown>): ServiceEvidence
     num_reviews: Number(detail.num_reviews ?? 0),
     num_verified_reviews: Number(detail.num_verified_reviews ?? 0),
     histogram: detail.histogram as Record<string, number> | undefined,
-    summary: Object.keys(summary).length > 0
-      ? {
-        strengths: stringList(summary.strengths),
-        failure_modes: stringList(summary.failure_modes),
-        caveats: stringList(summary.caveats)
-      }
-      : undefined,
-    reviews
+    summary: digest,
+    points
   };
 }
 
 /**
  * Compact, deterministic text rendering of the evidence for the proposer.
- * Services are ordered by evidence weight (score x n_eff); the proposer
- * sees raw review reasons, not just the aggregate.
+ * Services are ordered by evidence weight (score x n_eff); the proposer sees
+ * each summary point with its citable id.
  */
 export function renderEvidenceDigest(
   bundle: EvidenceBundle,
-  options: { maxServices?: number; maxReviewsPerService?: number; detailTop?: number } = {}
+  options: { maxServices?: number; maxPointsPerService?: number; detailTop?: number } = {}
 ): string {
   const maxServices = options.maxServices ?? bundle.services.length;
-  const maxReviews = options.maxReviewsPerService ?? 5;
-  /** Only the top-N services (by evidence weight) get digests and raw reviews; the rest are one-liners. */
+  const maxPoints = options.maxPointsPerService ?? 9;
+  /** Only the top-N services (by evidence weight) get their summary points; the rest are one-liners. */
   const detailTop = options.detailTop ?? bundle.services.length;
   const lines: string[] = [
     `CrowdCode evidence snapshot ${bundle.fetched_at}: ${bundle.stats.services} services, ${bundle.stats.reviews} reviews.`,
@@ -218,19 +205,8 @@ export function renderEvidenceDigest(
     if (!detailed) {
       continue;
     }
-    if (service.summary) {
-      if (service.summary.strengths?.length) {
-        lines.push(`  strengths: ${service.summary.strengths.join(" / ")}`);
-      }
-      if (service.summary.failure_modes?.length) {
-        lines.push(`  failure modes: ${service.summary.failure_modes.join(" / ")}`);
-      }
-      if (service.summary.caveats?.length) {
-        lines.push(`  caveats: ${service.summary.caveats.join(" / ")}`);
-      }
-    }
-    for (const review of service.reviews.slice(0, maxReviews)) {
-      lines.push(`  ${review.id} ${review.rating}/5${review.verified ? " verified" : ""}: ${compact(review.reason, 260)}${review.task_context ? ` [task: ${compact(review.task_context, 120)}]` : ""}`);
+    for (const point of (service.points ?? []).slice(0, maxPoints)) {
+      lines.push(`  ${point.id} ${point.kind === "watch_out" ? "watch out" : point.kind}: ${compact(point.text, 260)}`);
     }
   }
   return lines.join("\n");

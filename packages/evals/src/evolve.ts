@@ -103,7 +103,7 @@ export async function runEvolution(options: EvolveOptions): Promise<{ archive: A
 
   const evidencePath = options.evidencePath ?? join(root, "evidence", "crowdcode-evidence.json");
   const evidence = await fetchCrowdCodeEvidence({ cachePath: evidencePath, useCache: !options.refreshEvidence, log });
-  const digest = renderEvidenceDigest(evidence, { detailTop: 90, maxReviewsPerService: 4 });
+  const digest = renderEvidenceDigest(evidence, { detailTop: 90, maxPointsPerService: 9 });
   const evidenceHash = hashContent(digest);
   log(`evidence: ${evidence.stats.services} services, ${evidence.stats.reviews} reviews, digest ~${Math.round(digest.length / 4)} tokens`);
 

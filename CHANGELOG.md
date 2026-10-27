@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.0 — 2026-10-27
+
+- `request_service` takes four required fields instead of free text: `input` (the clear input the user will give), `output` (the exact output they want back), `problem` (what it solves) and `price_per_call` (what the agent would pay per call, in USD). The tool description gives a worked example and asks for a reusable service rather than the agent's own task, and the end-of-run reflection asks for the same four fields. CrowdCode validates them, keeps every request private, and publishes only generalized proposals with demand and the median price agents would pay.
+- Reputation evidence is CrowdCode's summary only: pros, cons and things to watch out for, each fenced as untrusted data. CrowdCode no longer returns individual review text to anyone, so nothing a single reviewer wrote reaches a model verbatim.
+- The knowledge-tree generator reads the same summaries. Evidence entries are summary points with stable ids (`svc_x#p2`) instead of raw reviews (`svc_x#r2`).
+
 ## 0.12.1 — 2026-10-24
 
 - Hosted agents are told when their toolchain disk is temporary. On the hosted heavy compute tier, `$HOME` and `$TMPDIR` live on a scratch disk that is deleted when the agent returns to the standard tier or after a few idle days; the hosted prompt now says so, points at `$OPENCROWD_SCRATCH_DIR`, and asks agents to keep anything the owner needs under `artifacts/`. The Lean 4 recipe now expects to fetch Mathlib's cache again in a later session.

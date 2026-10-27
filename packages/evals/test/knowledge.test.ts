@@ -9,8 +9,8 @@ const EVIDENCE: EvidenceBundle = {
   source: "test",
   stats: { services: 2, reviews: 3, services_with_reviews: 2 },
   services: [
-    { service_id: "svc_a", name: "Exa", endpoint: "https://stableenrich.dev/api/exa/search", origin: "https://stableenrich.dev", payment_provider: "x402", score: 4.2, n_eff: 12, unproven: false, num_reviews: 7, num_verified_reviews: 6, reviews: [] },
-    { service_id: "svc_b", name: "Sketchy", endpoint: "https://sketchy.example/api", origin: "https://sketchy.example", payment_provider: "x402", score: 3.9, n_eff: 0.2, unproven: true, num_reviews: 1, num_verified_reviews: 0, reviews: [] }
+    { service_id: "svc_a", name: "Exa", endpoint: "https://stableenrich.dev/api/exa/search", origin: "https://stableenrich.dev", payment_provider: "x402", score: 4.2, n_eff: 12, unproven: false, num_reviews: 7, num_verified_reviews: 6, points: [] },
+    { service_id: "svc_b", name: "Sketchy", endpoint: "https://sketchy.example/api", origin: "https://sketchy.example", payment_provider: "x402", score: 3.9, n_eff: 0.2, unproven: true, num_reviews: 1, num_verified_reviews: 0, points: [] }
   ]
 };
 
@@ -19,7 +19,7 @@ describe("knowledge tree validation", () => {
     const result = validateTree({
       "L0.md": "- web search -> POST https://stableenrich.dev/api/exa/search (score 4.2)",
       "INDEX.md": "- search -> categories/search.md",
-      "categories/search.md": "# search\n- https://stableenrich.dev/api/exa/search svc_a#r1"
+      "categories/search.md": "# search\n- https://stableenrich.dev/api/exa/search svc_a#p1"
     }, EVIDENCE);
     expect(result.ok).toBe(true);
     expect(result.stats.referenced_services).toBe(2);

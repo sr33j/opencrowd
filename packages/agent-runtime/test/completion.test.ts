@@ -28,7 +28,7 @@ function reflection(pendingReview = false) {
 it("finishes immediately when a service request already satisfied reflection", async () => {
   const tools = reflection();
   const provider = { complete: vi.fn()
-    .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "request", name: "request_service", arguments: { service_description: "Authoritative career matching" } }] })
+    .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "request", name: "request_service", arguments: { input: "a target role and a public profile", output: "ranked current openings", problem: "stale listings", price_per_call: 0.5 } }] })
     .mockResolvedValueOnce(complete())
     .mockResolvedValue(empty) };
   const result = await runAgentTaskDetailed(await session(), "Find a role and project", { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
