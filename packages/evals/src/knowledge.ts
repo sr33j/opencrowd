@@ -220,11 +220,11 @@ export interface Proposal {
 const PROPOSER_SYSTEM = [
   "You write and maintain a compact service knowledge base for a budget-conscious tool-using agent (OpenCrowd).",
   "The agent has: local files, shell (curl/python), and paid x402/MPP services it can buy through find_paid_service -> inspect_paid_service -> call_paid_service -> review_paid_service. Each LLM turn costs money, so the knowledge base exists to let the agent pick the right path in ONE turn instead of searching.",
-  "Ground every claim in the CrowdCode evidence you are given (scores, effective review counts, raw review reasons). Cite review ids like svc_x#r2 in category pages. Never invent services, endpoints, or prices. Only endpoints present in the evidence may appear in L0.md; free public alternatives may be mentioned in category pages when you are confident they exist.",
+  "Ground every claim in the CrowdCode evidence you are given (scores, effective review counts, and each service's summary points: pros, cons, things to watch out for). Cite point ids like svc_x#p2 in category pages. Never invent services, endpoints, or prices. Only endpoints present in the evidence may appear in L0.md; free public alternatives may be mentioned in category pages when you are confident they exist.",
   "Structure (return ONLY a JSON object mapping file name -> markdown content):",
   "- L0.md (<= 800 tokens): the defaults block that goes into the system prompt. Ordered by how often agents actually need the capability. For each: capability -> exact endpoint -> one-line how-to (method, key body fields) -> typical price -> score/evidence strength -> when NOT to buy (local/free path). Start with a 2-3 line policy: prefer local/free when sufficient; buy when it saves turns; inspect exact schema before paying.",
   "- INDEX.md: one line per category: `- <capability keywords> -> categories/<slug>.md`.",
-  "- categories/<slug>.md (<= 1500 tokens each): ranked services for that capability with endpoint, rail (x402 base / mppx tempo), observed price, score & n_eff, what reviewers said worked and failed (cite ids), request-shape gotchas, and the cheapest correct path including free alternatives.",
+  "- categories/<slug>.md (<= 1500 tokens each): ranked services for that capability with endpoint, rail (x402 base / mppx tempo), observed price, score & n_eff, what reviewers found worked and failed (cite point ids), request-shape gotchas, and the cheapest correct path including free alternatives.",
   "Be specific and terse. Markdown lists, no prose paragraphs. Do not include wallet addresses, keys, or payment proofs.",
   "Output budget: at most 12 category pages, each under 900 tokens; the whole JSON response must stay under 9000 tokens. Escape newlines inside JSON strings."
 ].join("\n");
@@ -257,7 +257,7 @@ export async function proposeTree(options: ProposeOptions): Promise<Proposal> {
       "Remember: the evaluation tasks above are examples of the kind of work agents do; generalize (cover the capability class), do not hard-code answers to those specific tasks."
     ].filter(Boolean).join("\n")
     : [
-      "Write the initial knowledge base from the evidence. Prioritize by real demand: what tasks reviewers were doing (task contexts), which capabilities have the most verified successful reviews, and the obvious defaults (best LLM gateway for agent inference, best web search, best page extraction, best image generation, weather/geocoding, file hosting, social data, finance/crypto data). Include one category page per capability class you can support with evidence, plus a page for free-first capabilities (things curl/python can do without paying).",
+      "Write the initial knowledge base from the evidence. Prioritize by real demand: which capabilities have the most verified reviews and the strongest scores, and the obvious defaults (best LLM gateway for agent inference, best web search, best page extraction, best image generation, weather/geocoding, file hosting, social data, finance/crypto data). Include one category page per capability class you can support with evidence, plus a page for free-first capabilities (things curl/python can do without paying).",
       options.directive ? `Directive for this proposal: ${options.directive}` : ""
     ].filter(Boolean).join("\n");
   sections.push(`## Task\n${instruction}\nReturn only the JSON object.`);
