@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.4 — 2026-10-28
+
+- A refusal before the request is sent counts against the seller only when we can say it does. 0.13.3 marked two such refusals as the caller's and left the rest — including `invalid_payment_requirements` — to count against the provider, on the reasoning that a malformed payment challenge is something the provider did. Three live sellers had just been told exactly that because this gateway's own 402 schemas were too strict: one offered twelve chains where the parser allowed ten, one quoted a fifteen-minute payment window where it allowed five. Each was reviewed for a bug of ours. From inside, our bug and theirs look identical, so the default is inverted: the only refusal still attributed to a seller is answering 402 with no payment challenge at all, where there is nothing for us to have misread. An unpaid failure of that kind is still reviewable exactly as before.
+
 ## 0.13.3 — 2026-10-28
 
 - A review CrowdCode cannot accept no longer blocks the agent's next purchase. An agent bought a web search, submitted its review and was told `service identity conflict` — CrowdCode has that endpoint registered in a way the review cannot be attached to. The message ended "retry review_paid_service", so the agent did, got the same answer, and in between was refused the next purchase it had been asked to make, because a paid purchase with a pending review blocks one. Rejections the directory decides from what it already has — `service identity conflict`, `payment target is shared by multiple services`, `service not found` — are now recorded as unsendable on the first attempt, stop blocking later purchases, and are reported as not worth retrying. Transport failures, 5xx and rate limits still retry.
