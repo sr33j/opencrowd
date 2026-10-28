@@ -789,7 +789,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "find_paid_service",
-    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, ranked best first by CrowdCode: quality, then effective price on your best network (including a transfer between your own networks when its balance is short), then your balance there. `origin` lists a known origin's endpoints.",
+    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, ranked best first by CrowdCode: quality, then effective price on your best network (including a transfer between your own networks when its balance is short), then your balance there. Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
     parameters: {
       type: "object",
       properties: {
@@ -846,7 +846,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "bridge_usdc",
-    description: "Explicitly bridge USDC between this wallet's own networks (base, tempo, solana) through AgentCash. A financial action, not a purchase; subject to bridge fees.",
+    description: "Explicitly bridge USDC between this wallet's own networks (base, tempo, solana) through AgentCash. A financial action, not a purchase; subject to bridge fees, which are a flat ~$0.02-0.03 whatever the size: aim for about $1 so one fee funds many calls, and when the wallet holds less, keep the fee under about a fifth of what moves.",
     parameters: {
       type: "object",
       properties: {

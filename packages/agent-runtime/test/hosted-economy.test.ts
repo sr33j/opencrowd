@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSession, loadSession } from "@opencrowd/core";
 import type { Command, Event } from "@opencrowd/protocol";
-import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired } from "../src/hosted-economy.js";
+import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired, planFundingMove } from "../src/hosted-economy.js";
 import { readHostedFinancialState } from "../src/hosted-provider.js";
 import { BASE_USDC, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
@@ -696,5 +696,67 @@ describe("hosted economy: moving funds between the agent's networks", () => {
     expect(call.error).toContain("solana needs 0.005000");
     expect(call.error).toContain("base 13.47, solana 0.00, tempo 1.49 (total 14.96)");
     expect(call.error).toContain('bridge_usdc {"from":"base","to":"solana","amount_usd":1}');
+  });
+
+  /**
+   * The dead end this policy exists for: on 2026-10-28 an agent holding $0.88
+   * on Base was asked for a TSLA price, found a quote sold only on Tempo for
+   * $0.021, read "ask the owner to add funds" because $0.88 was under the flat
+   * $1 move minimum, and told its owner the service was unsuitable.
+   */
+  it("proposes a move it can actually afford when the wallet holds less than a dollar, and points at funded networks first", async () => {
+    const { fetcher } = fakeFetch({ header: null, wwwAuthenticate: mppChallenge("21000") });
+    const { socketPath } = await bridge((name) => name === "economy.pay"
+      ? { ok: false, code: "funding_required", error: "Not enough USDC on the networks this service accepts: tempo needs 0.021000 USDC.e (holds 0.000000)." }
+      : { ok: true, data: { networks: [{ network: "base", available_usd: "0.880000" }, { network: "solana", available_usd: "0.100000" }, { network: "tempo", available_usd: "0.000000" }] } });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SOCIAL, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SOCIAL, method: "POST", body: { q: "TSLA" } });
+    expect(call.ok).toBe(false);
+    // Base can spare $0.63 behind its $0.25 inference reserve; the old rule asked for $1.05 and gave up.
+    expect(call.error).toContain('bridge_usdc {"from":"base","to":"tempo","amount_usd":0.63}');
+    expect(call.error).not.toContain("ask the owner to add funds");
+    // An equivalent service it can already pay comes first, since that costs no fee at all.
+    expect(call.error).toContain("find_paid_service lists every result's networks");
+    expect(call.error).toContain("base or solana");
+  });
+
+  it("asks the owner instead of spending most of a tiny move on its fee", async () => {
+    const { fetcher } = fakeFetch({ header: null, wwwAuthenticate: mppChallenge("21000") });
+    const { socketPath } = await bridge((name) => name === "economy.pay"
+      ? { ok: false, code: "funding_required", error: "Not enough USDC on the networks this service accepts: tempo needs 0.021000 USDC.e (holds 0.000000)." }
+      : { ok: true, data: { networks: [{ network: "base", available_usd: "0.120000" }, { network: "tempo", available_usd: "0.000000" }] } });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SOCIAL, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SOCIAL, method: "POST", body: { q: "TSLA" } });
+    expect(call.ok).toBe(false);
+    expect(call.error).not.toContain("bridge_usdc {");
+    expect(call.error).toContain("sold only on tempo");
+    expect(call.error).toContain("would cost about $0.03 in fees");
+  });
+});
+
+describe("sizing the move that unblocks a purchase", () => {
+  const wallet = (base: number, solana = 0, tempo = 0) =>
+    [{ network: "base", usd: base }, { network: "solana", usd: solana }, { network: "tempo", usd: tempo }];
+
+  it("aims at a dollar once the wallet can spare one", () => {
+    expect(planFundingMove("tempo", 0.021, wallet(13.47))).toMatchObject({ from: "base", amount: 1, worthwhile: true });
+    // The fee allowance is included, so a large purchase raises the move above the $1 target.
+    expect(planFundingMove("tempo", 2, wallet(13.47))).toMatchObject({ amount: 2.05, worthwhile: true });
+  });
+
+  it("moves what the wallet can spare when that is under a dollar", () => {
+    expect(planFundingMove("tempo", 0.021, wallet(0.88, 0.1))).toMatchObject({ from: "base", amount: 0.63, worthwhile: true });
+    // Base's working reserve is held back, but never so far that the purchase becomes unpayable.
+    expect(planFundingMove("tempo", 0.021, wallet(0.3))).toMatchObject({ amount: 0.08, worthwhile: false });
+    expect(planFundingMove("tempo", 0.021, wallet(0, 0.4))).toMatchObject({ from: "solana", amount: 0.4, worthwhile: true });
+  });
+
+  it("refuses to propose a move the fee would eat, or one no network can cover", () => {
+    expect(planFundingMove("tempo", 0.021, wallet(0.4))).toMatchObject({ amount: 0.15, feeShare: 0.2, worthwhile: true });
+    expect(planFundingMove("tempo", 0.021, wallet(0.39))).toMatchObject({ worthwhile: false });
+    expect(planFundingMove("tempo", 0.021, wallet(0.05))).toBeUndefined();
+    expect(planFundingMove("tempo", 0.021, [{ network: "tempo", usd: 5 }])).toBeUndefined();
   });
 });

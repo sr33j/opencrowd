@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.13.1 — 2026-10-28
+
+- A hosted agent whose USDC is on the wrong network finishes the job instead of giving up. Asked for a stock price, an agent holding $0.88 on Base and $0.10 on Solana found a quote sold only on Tempo for $0.021, was told to move at least $1, and reported to its owner that the service "required funds on a single supported network" — with a funded wallet and a two-cent purchase in front of it.
+  - `funding_required` now offers the cheaper way out first: look for an equivalent service on a network the wallet already funds. Every `find_paid_service` result lists its `networks`, the networks it can be paid on, so that choice is visible in the search result rather than only after a 402.
+  - When no such service fits, the move is sized to what the wallet actually holds. It still aims at $1, so one fee funds many later calls, but under a dollar it moves what the richest other network can spare, never less than the price plus the bridge's cut, and holds a $0.25 working reserve on Base (where inference is paid from) except as far as the purchase needs it. The policy is explicit: a move is made on the agent's own judgement only while its fee stays under a fifth of what moves — about $0.15 at Relay's flat $0.02-0.03 fee — which keeps the intent of the old $1 minimum without turning it into a dead end.
+  - Below that the agent asks instead of spending most of the move on its fee, and says what it costs: "this service is sold only on tempo, moving $0.08 there would cost about $0.03 in fees". The hosted prompt now also states that a funding problem must be reported as exactly that — which network the service is sold on, what the wallet holds where, and the one thing needed — and never as the service being unsuitable, nor with a recorded `request_service` offered as the answer the owner asked for.
+
 ## 0.13.0 — 2026-10-27
 
 - `request_service` takes four required fields instead of free text: `input` (the clear input the user will give), `output` (the exact output they want back), `problem` (what it solves) and `price_per_call` (what the agent would pay per call, in USD). The tool description gives a worked example and asks for a reusable service rather than the agent's own task, and the end-of-run reflection asks for the same four fields. CrowdCode validates them, keeps every request private, and publishes only generalized proposals with demand and the median price agents would pay.
