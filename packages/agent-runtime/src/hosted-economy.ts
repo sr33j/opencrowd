@@ -191,10 +191,21 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
   checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult> { return this.discovery.inspect(input); }
 
   async fetch(request: PaidFetchRequest): Promise<PaidFetchResult> {
-    const refuse = (error: string): PaidFetchResult => ({ ok: false, ambiguous: false, data: undefined, error });
+    /**
+     * The supervisor would not pay, so the service was never asked.
+     *
+     * `ours` marks the refusals that are a fact about us rather than about the
+     * seller — no USDC on a network they accept, a rail hosted agents cannot
+     * pay — and it is what keeps those out of the seller's reputation; see
+     * `PaidFetchResult.callerError`. It is deliberately not the default: a
+     * seller whose 402 challenge is malformed, say, has genuinely done
+     * something wrong, and an agent should be able to say so.
+     */
+    const refuse = (error: string, ours = false): PaidFetchResult =>
+      ({ ok: false, ambiguous: false, data: undefined, error, ...(ours ? { callerError: true } : {}) });
     // Refused before the bridge: the hosted gateway cannot settle these rails (Monad, other chains or tokens).
     if (!HOSTED_RAILS.includes(request.rail)) {
-      return refuse(`this service settles on a payment network hosted agents cannot pay; hosted agents pay ${describeRails(HOSTED_RAILS)}`);
+      return refuse(`this service settles on a payment network hosted agents cannot pay; hosted agents pay ${describeRails(HOSTED_RAILS)}`, true);
     }
     const serviceId = await this.directory.resolveServiceId(request.url)
       ?? `url:${createHash("sha256").update(request.url).digest("hex")}`;
@@ -264,7 +275,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       return this.fetchUnpaid(request.url, method, body, request.headers);
     }
     if (reply.code === "funding_required") {
-      return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`);
+      return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`, true);
     }
     if (reply.code === "payment_unknown") {
       return {

@@ -558,6 +558,44 @@ describe("required reviews", () => {
   });
 
   /**
+   * 2026-10-28: a paid call was refused before it was sent — the agent's USDC
+   * was on a network this service does not accept — and the agent went on to
+   * give the provider **one star** for it. The seller never saw the request.
+   * A caller's own problem must not end up in somebody else's reputation.
+   */
+  it("refuses to review a call that was never sent to the service", async () => {
+    const { session, gateway, crowdcode } = await setup({
+      agentcash: new MockAgentCashAdapter({
+        schemas: { [ENDPOINT]: { url: ENDPOINT, auth: "paid x402 base", price: 0.05 } },
+        fetchResults: {
+          [ENDPOINT]: {
+            ok: false,
+            ambiguous: false,
+            data: undefined,
+            callerError: true,
+            error: "Not enough USDC on the networks this service accepts: solana needs 0.005000 USDC (holds 0.000000). (funding_required)",
+          },
+        },
+      }),
+    });
+    await inspect(gateway);
+    const call = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    const purchaseId = (call.data as Record<string, unknown>).purchase_id as string;
+    const [purchase] = await listPurchases(session);
+    // Recorded so the agent can see what it tried, and not reviewable.
+    expect(purchase.record).toMatchObject({ caller_error: true, review_required: false });
+
+    const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 1, reason: "it would not take my money" });
+    expect(review.ok).toBe(false);
+    expect(review.error).toContain("never reached");
+    expect(review.error).toContain("nothing to review");
+    // Nothing reached CrowdCode, so the provider's score is untouched.
+    expect(crowdcode.reviews).toHaveLength(0);
+    // And it never blocked the agent's next purchase either.
+    await expect(gateway.hasPendingRequiredReviews()).resolves.toBe(false);
+  });
+
+  /**
    * 2026-10-27: an agent bought a web search, submitted its review, and was
    * told `service identity conflict` — CrowdCode had the endpoint registered
    * in a way the review could not be attached to. The message ended "retry

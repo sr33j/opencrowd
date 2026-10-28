@@ -427,6 +427,8 @@ export class EconomyGateway {
       // Confirmed paid successes AND paid failures require reviews; free,
       // SIWX, and unknown outcomes create no paid receipt to review.
       review_required: paid && supportedRail && await this.crowdcodeEnabled(),
+      // Our own failure, not the seller's: recorded, never reviewable.
+      ...(result.callerError ? { caller_error: true } : {}),
       // x402 Solana receipts carry no payee; CrowdCode needs it to verify a new
       // service, so use the inspected offer's when the payment settled on that rail.
       evidence: result.payment && !result.payment.payTo && inspection.payTo && railUsed === inspection.rail
@@ -591,6 +593,16 @@ export class EconomyGateway {
     }
     if (state.reviewStatus === "submitted") {
       return { ok: false, error: `purchase ${purchaseId} is already reviewed` };
+    }
+    // A call that never reached the seller says nothing about the seller. On
+    // 2026-10-28 an agent that could not pay — its USDC was on a network this
+    // service does not accept — gave the provider one star for it, which is a
+    // caller's own problem written into somebody else's reputation.
+    if (state.record.caller_error) {
+      return {
+        ok: false,
+        error: `purchase ${purchaseId} never reached ${state.record.endpoint}: it was refused before the request was sent (${state.record.notes ?? "no payment was made"}). That is not something the service did, so there is nothing to review. Fix the cause and call the service again.`
+      };
     }
     const evidence = state.record.evidence;
     // Review evidence comes from the immutable stored receipt, never the model.

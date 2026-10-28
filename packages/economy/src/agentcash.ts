@@ -39,6 +39,16 @@ export interface PaidFetchResult {
   /** Model-visible response body. */
   data: unknown;
   error?: string;
+  /**
+   * The call was refused on our side and never reached the service: no USDC on
+   * a network it accepts, a spending cap, a rail hosted agents cannot pay.
+   *
+   * Nothing about such a failure is evidence about the provider, and on
+   * 2026-10-28 an agent that hit `funding_required` went on to give the
+   * provider one star for it. A review of a call the seller never saw is a
+   * caller's own problem written into somebody else's reputation.
+   */
+  callerError?: boolean;
   authMode?: "free" | "siwx" | "paid";
   payment?: PaymentEvidence;
 }
