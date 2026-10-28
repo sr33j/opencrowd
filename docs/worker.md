@@ -54,6 +54,22 @@ control always sends to the agent's own address on the target network.
   model can pass later to check it.
 
 When a paid call fails with `funding_required`, the hosted adapter appends the
-agent's available balance per network and, when another network holds enough,
-the `bridge_usdc` call that would make the purchase payable. The hosted system
-prompt tells the model to move funds and retry the same call in that case.
+agent's available balance per network and the two ways forward, cheaper first:
+an equivalent service on a network the agent already funds (every
+`find_paid_service` result lists its `networks`), or the `bridge_usdc` call
+that would make this purchase payable.
+
+That move is sized by `planFundingMove`: as much as the richest other network
+can spare, aiming at $1 so one fee funds many later calls, never less than the
+price plus the bridge's cut, and holding a $0.25 working reserve on Base
+(where inference is paid from) except as far as the purchase needs it. A move
+is only proposed outright while its fee stays under a fifth of what moves —
+about $0.15 at Relay's flat $0.02-0.03 fee. Below that the hint says what the
+move would cost and tells the model to ask the owner instead of spending most
+of the money on the transfer. Control allows the small move: its quote
+validation caps a fee at 3% of the amount or a flat $0.05, whichever is more.
+
+The hosted system prompt tells the model that `funding_required` is about
+where the USDC sits rather than how much there is, and that a funding dead end
+must be reported as exactly that — which network the service is sold on, what
+the wallet holds where, and the one thing needed.

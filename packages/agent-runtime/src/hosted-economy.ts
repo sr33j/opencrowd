@@ -53,8 +53,22 @@ const USDC_ATOMIC_PER_USD = 1_000_000;
 /** A move usually lands in seconds; past this the tool reports it pending with its id. */
 const TRANSFER_WAIT_MS = 150_000;
 const TRANSFER_POLL_MS = 3_000;
-/** Below this, Relay's ~$0.02 fee exceeds the 3% cap and the quote is refused. */
-const MIN_PRACTICAL_MOVE_USD = 1;
+/** One move should fund many calls rather than one, so a move aims at a dollar. */
+const PREFERRED_MOVE_USD = 1;
+/** Relay keeps about $0.02-0.03; send this much over the price so it still lands. */
+const MOVE_FEE_ALLOWANCE_USD = 0.05;
+/** What a move costs, for judging whether a small one is worth starting. */
+const MOVE_FEE_ESTIMATE_USD = 0.03;
+/**
+ * Under a dollar a move is still worth making while its fee stays a small
+ * share of what moves: at a $0.03 fee that puts the floor near $0.15. The
+ * point of the old flat $1 minimum was never the dollar, it was not handing a
+ * third of the money to the bridge — and read as a hard floor it stranded a
+ * wallet holding $0.90 in front of a $0.02 service on another network.
+ */
+const MAX_MOVE_FEE_SHARE = 0.2;
+/** Held back on Base, which is where this agent's inference is paid from. */
+const BASE_WORKING_RESERVE_USD = 0.25;
 const RAIL_NETWORK: Partial<Record<PaymentRail, string>> = { "x402-base": "base", "x402-solana": "solana", mppx: "tempo" };
 
 export interface HostedEconomyOptions extends HostedBridgeOptions {
@@ -306,8 +320,11 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
   }
 
   /**
-   * After funding_required: where the agent's money is, and the move that
-   * would make this purchase payable when another network holds enough.
+   * After funding_required: where the agent's money is, and the two ways
+   * forward, cheaper first. An equivalent service on a network the agent
+   * already funds costs nothing extra; a move costs a bridge fee. A funded
+   * wallet must never be told to go and ask the owner for money, and a move
+   * that would spend most of itself on the fee must never be made quietly.
    */
   private async fundingHint(request: PaidFetchRequest): Promise<string> {
     const wallet = await this.getBalance().catch(() => undefined);
@@ -318,10 +335,17 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     const total = available.reduce((sum, n) => sum + n.usd, 0);
     const line = ` Your available USDC: ${available.map((n) => `${n.network} ${n.usd.toFixed(2)}`).join(", ")} (total ${total.toFixed(2)}).`;
     const target = RAIL_NETWORK[request.rail];
-    const amount = Math.max(MIN_PRACTICAL_MOVE_USD, Math.ceil((request.maxAmountUsd + 0.05) * 100) / 100);
-    const source = available.filter((n) => n.network !== target).sort((a, b) => b.usd - a.usd)[0];
-    if (!target || !source || source.usd < amount + 0.05) return `${line} No single network holds enough to move; ask the owner to add funds.`;
-    return `${line} To pay, move funds first: bridge_usdc {"from":"${source.network}","to":"${target}","amount_usd":${amount}} (fee about $0.02-0.03, counted as spending; follows the owner's approval mode), then retry this call.`;
+    const funded = available.filter((n) => n.network !== target && n.usd >= request.maxAmountUsd).map((n) => n.network);
+    const elsewhere = funded.length
+      ? ` First look for an equivalent service you can already pay: find_paid_service lists every result's networks, and one on ${funded.join(" or ")} costs you no transfer fee.`
+      : "";
+    const move = target ? planFundingMove(target, request.maxAmountUsd, available) : undefined;
+    if (!target || !move)
+      return `${line}${elsewhere} No network of yours can cover a move to ${target ?? "a network this service accepts"} either, so if no equivalent service fits, tell the owner plainly that this service is sold only on ${target ?? "networks you do not hold"} and ask them to add USDC there.`;
+    const cost = `about $${MOVE_FEE_ESTIMATE_USD.toFixed(2)}`, size = `$${move.amount.toFixed(2)}`;
+    if (!move.worthwhile)
+      return `${line}${elsewhere} Moving funds is the other way, but the most ${move.from} can spare is ${size}, and a fee of ${cost} is ${Math.round(move.feeShare * 100)}% of that — too much to spend without asking. If no equivalent service fits, say exactly that to the owner: this service is sold only on ${target}, moving ${size} there would cost ${cost} in fees, and ask whether to do it.`;
+    return `${line}${elsewhere} Otherwise move funds first: bridge_usdc {"from":"${move.from}","to":"${target}","amount_usd":${move.amount}} (fee ${cost}, counted as spending; follows the owner's approval mode), then retry this call.`;
   }
 
   /**
@@ -512,10 +536,39 @@ export function hostedDynamicTools(economy: EconomyGateway) {
     : tool.name === "bridge_usdc" ? HOSTED_BRIDGE_TOOL : tool) };
 }
 
+/**
+ * The move that would make a purchase payable: as much as the richest other
+ * network can spare, aiming at PREFERRED_MOVE_USD so one fee funds many later
+ * calls, and never less than the price plus the bridge's cut.
+ *
+ * Base keeps a working reserve, because inference is paid from it and draining
+ * it only buys a move back at another fee — but the reserve is dipped into as
+ * far as the purchase needs rather than blocking it. `worthwhile` is false when
+ * the fee would be a large share of the move; the agent asks the owner then
+ * instead of spending most of the money on the transfer.
+ */
+export function planFundingMove(
+  target: string,
+  priceUsd: number,
+  available: readonly { network: string; usd: number }[]
+): { from: string; amount: number; feeShare: number; worthwhile: boolean } | undefined {
+  const cents = (usd: number) => Math.floor(usd * 100) / 100;
+  const needed = Math.ceil((priceUsd + MOVE_FEE_ALLOWANCE_USD) * 100) / 100;
+  const source = available.filter((n) => n.network !== target).sort((a, b) => b.usd - a.usd)[0];
+  if (!source) return undefined;
+  const reserve = source.network === "base" ? BASE_WORKING_RESERVE_USD : 0;
+  const spare = cents(Math.max(0, source.usd - reserve));
+  const ceiling = Math.min(Math.max(needed, spare), cents(source.usd));
+  const amount = Math.min(Math.max(PREFERRED_MOVE_USD, needed), ceiling);
+  if (amount < needed) return undefined;
+  const feeShare = MOVE_FEE_ESTIMATE_USD / amount;
+  return { from: source.network, amount, feeShare, worthwhile: feeShare <= MAX_MOVE_FEE_SHARE };
+}
+
 /** The hosted counterpart of bridge_usdc: moves between the agent's own networks through the hosted gateway. */
 const HOSTED_BRIDGE_TOOL = {
   name: "bridge_usdc",
-  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, or when a paid call failed with funding_required and another network holds enough. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending; move at least $1. Pass transfer_id alone to check a pending move.",
+  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, or when a paid call failed with funding_required and no equivalent service is sold on a network you already fund. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending, so aim for about $1 and one fee funds many calls; when the wallet holds less, move what the call needs plus the fee, as long as the fee stays under about a fifth of what moves (roughly $0.15 and up). Below that, quote_only first and ask the owner rather than spending most of the move on its fee. Pass transfer_id alone to check a pending move.",
   parameters: {
     type: "object",
     properties: {

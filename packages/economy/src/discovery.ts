@@ -18,7 +18,7 @@ export interface SearchOptions {
   rank?: ServiceRanker;
 }
 
-export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality first, then effective price on best_network (including about $0.03 to move USDC between your own networks when that network's balance is short), then your balance there. Prefer the highest-ranked service that fits the task, whatever its network. transfer_needed means your balance on best_network is short: move USDC between your own networks first if you have a tool for that; otherwise say which network needs funds. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.";
+export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality first, then effective price on best_network (including about $0.03 to move USDC between your own networks when that network's balance is short), then your balance there. Prefer the highest-ranked service that fits the task, whatever its network. Each result's `networks` are the networks it can be paid on; between results that fit the task equally well, one you can pay from a balance you already hold beats one that needs a transfer first. transfer_needed means your balance on best_network is short: move USDC between your own networks first if you have a tool for that; otherwise say which network needs funds. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.";
 
 export interface DiscoveryOptions {
   /** Preferred settlement network when a service offers several (default base). */
@@ -110,8 +110,14 @@ export class BaseServiceDiscovery {
           if (!inspection.ok && !c.method) inspection = await this.inspect({ url: endpoint, method: method = "GET" });
           const schema = inspection.data as any;
           if (!inspection.ok || !schema?.payable) return undefined;
+          // Every network this service can be paid on, so a caller short on
+          // one can prefer an equal service it already funds over a transfer.
+          const networks = Array.isArray(schema.offers)
+            ? [...new Set(schema.offers.filter((offer: any) => offer.payable).map((offer: any) => String(offer.network)))]
+            : [];
           const service: Record<string, unknown> = { endpoint, method, name: c.summary ?? c.name,
-            price_usd: schema.price_usd, payment_provider: schema.rail === "mppx" ? "mppx" : "x402", network: schema.network ?? BASE_NETWORK, payable: true };
+            price_usd: schema.price_usd, payment_provider: schema.rail === "mppx" ? "mppx" : "x402", network: schema.network ?? BASE_NETWORK,
+            ...(networks.length ? { networks } : {}), payable: true };
           return c.ranking ? { ...service, ...ranked(c.ranking, schema) } : service;
         } catch { return undefined; }
       }));
