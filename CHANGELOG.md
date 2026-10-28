@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.13.3 — 2026-10-28
+
+- A review CrowdCode cannot accept no longer blocks the agent's next purchase. An agent bought a web search, submitted its review and was told `service identity conflict` — CrowdCode has that endpoint registered in a way the review cannot be attached to. The message ended "retry review_paid_service", so the agent did, got the same answer, and in between was refused the next purchase it had been asked to make, because a paid purchase with a pending review blocks one. Rejections the directory decides from what it already has — `service identity conflict`, `payment target is shared by multiple services`, `service not found` — are now recorded as unsendable on the first attempt, stop blocking later purchases, and are reported as not worth retrying. Transport failures, 5xx and rate limits still retry.
+- A seller is never reviewed for a call that never reached them. A paid call refused before it left the agent — its USDC on a network the service does not accept — was followed by the agent giving the provider one star for it. Refusals that are a fact about the caller rather than the seller are now marked on the purchase, and `review_paid_service` declines them with the cause and what to do instead. A seller whose payment challenge is genuinely malformed can still be reviewed, as before.
+
 ## 0.13.2 — 2026-10-28
 
 - Say plainly that a move the policy already allows is the agent's own to make. Verified on mainnet, 0.13.1 told an agent holding $0.81 on Base exactly which `bridge_usdc` call would pay a Tempo-only service, and the agent stopped and asked its owner to "authorize a quoted Base→Tempo transfer" — on an auto-approval wallet with a $1 per-call limit, where the three-cent fee needed no permission at all. The honest explanation was the point of 0.13.1 and it worked; stopping in front of an unlocked door was not. The funding hint, the `bridge_usdc` description and the hosted prompt now state that a move inside the rule is ordinary work, that the spending guard applies the owner's approval mode to the fee by itself, and that asking first is the dead end the rule exists to prevent.
