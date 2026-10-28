@@ -715,6 +715,8 @@ describe("hosted economy: moving funds between the agent's networks", () => {
     expect(call.ok).toBe(false);
     // Base can spare $0.63 behind its $0.25 inference reserve; the old rule asked for $1.05 and gave up.
     expect(call.error).toContain('bridge_usdc {"from":"base","to":"tempo","amount_usd":0.63}');
+    // A move this size is ordinary work: asking for permission to make it is the dead end itself.
+    expect(call.error).toContain("not something to ask the owner about");
     expect(call.error).not.toContain("ask the owner to add funds");
     // An equivalent service it can already pay comes first, since that costs no fee at all.
     expect(call.error).toContain("find_paid_service lists every result's networks");

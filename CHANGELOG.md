@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.2 — 2026-10-28
+
+- Say plainly that a move the policy already allows is the agent's own to make. Verified on mainnet, 0.13.1 told an agent holding $0.81 on Base exactly which `bridge_usdc` call would pay a Tempo-only service, and the agent stopped and asked its owner to "authorize a quoted Base→Tempo transfer" — on an auto-approval wallet with a $1 per-call limit, where the three-cent fee needed no permission at all. The honest explanation was the point of 0.13.1 and it worked; stopping in front of an unlocked door was not. The funding hint, the `bridge_usdc` description and the hosted prompt now state that a move inside the rule is ordinary work, that the spending guard applies the owner's approval mode to the fee by itself, and that asking first is the dead end the rule exists to prevent.
+
 ## 0.13.1 — 2026-10-28
 
 - A hosted agent whose USDC is on the wrong network finishes the job instead of giving up. Asked for a stock price, an agent holding $0.88 on Base and $0.10 on Solana found a quote sold only on Tempo for $0.021, was told to move at least $1, and reported to its owner that the service "required funds on a single supported network" — with a funded wallet and a two-cent purchase in front of it.
