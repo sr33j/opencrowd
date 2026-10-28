@@ -31,6 +31,13 @@ export interface PurchaseRecord {
   /** Confirmed paid outcomes require a CrowdCode review before further purchases. */
   review_required: boolean;
   /**
+   * The call was refused on our side and never reached the service — no USDC
+   * on a network it accepts, a spending cap, an unpayable rail. It is recorded
+   * so the agent can see what it tried, and it is not reviewable: the provider
+   * was never asked, so nothing here is evidence about them.
+   */
+  caller_error?: boolean;
+  /**
    * Receipt evidence captured by the adapter (settlement reference, raw
    * proof header, payee). Stored for reviews; never rendered to the model
    * or normal CLI output.

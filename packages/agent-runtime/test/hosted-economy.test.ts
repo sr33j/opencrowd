@@ -7,7 +7,7 @@ import { createSession, loadSession } from "@opencrowd/core";
 import type { Command, Event } from "@opencrowd/protocol";
 import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired, planFundingMove } from "../src/hosted-economy.js";
 import { readHostedFinancialState } from "../src/hosted-provider.js";
-import { BASE_USDC, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
+import { BASE_USDC, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
 
 const discovery = vi.hoisted(() => ({ check: vi.fn(), discover: vi.fn() }));
@@ -696,6 +696,16 @@ describe("hosted economy: moving funds between the agent's networks", () => {
     expect(call.error).toContain("solana needs 0.005000");
     expect(call.error).toContain("base 13.47, solana 0.00, tempo 1.49 (total 14.96)");
     expect(call.error).toContain('bridge_usdc {"from":"base","to":"solana","amount_usd":1}');
+    // The service was never asked, so it is not the service's failure. An
+    // agent in exactly this position gave the provider one star on
+    // 2026-10-28; the purchase is now marked so the review tool refuses it.
+    const [purchase] = await listPurchases((gateway as any).options.session);
+    expect(purchase.record).toMatchObject({ caller_error: true, review_required: false });
+    const review = await gateway.execute("review_paid_service", {
+      purchase_id: purchase.record.purchase_id, rating: 1, reason: "would not take my money",
+    });
+    expect(review.ok).toBe(false);
+    expect(review.error).toContain("never reached");
   });
 
   /**
