@@ -194,18 +194,29 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     /**
      * The supervisor would not pay, so the service was never asked.
      *
-     * `ours` marks the refusals that are a fact about us rather than about the
-     * seller — no USDC on a network they accept, a rail hosted agents cannot
-     * pay — and it is what keeps those out of the seller's reputation; see
-     * `PaidFetchResult.callerError`. It is deliberately not the default: a
-     * seller whose 402 challenge is malformed, say, has genuinely done
-     * something wrong, and an agent should be able to say so.
+     * Such a refusal is the seller's to answer for only in the cases below;
+     * everything else is ours or unknowable, and `callerError` keeps it out of
+     * their reputation (see `PaidFetchResult`). The default is that way round
+     * on evidence. `invalid_payment_requirements` looks like a seller sending
+     * a malformed challenge, and on 2026-10-28 three live sellers were told
+     * exactly that because this gateway's own schemas were too strict — one
+     * for offering twelve chains when the parser allowed ten, one for quoting
+     * a fifteen-minute payment window when the parser allowed five. Each was
+     * reviewed for it. From inside we cannot tell our bug from their bug, and
+     * a reputation is the wrong place to record the difference.
      */
-    const refuse = (error: string, ours = false): PaidFetchResult =>
-      ({ ok: false, ambiguous: false, data: undefined, error, ...(ours ? { callerError: true } : {}) });
+    const theirs = new Set([
+      // They answered 402 and sent no payment challenge at all. Nothing to
+      // misparse, and nothing we could have got wrong.
+      "payment_required_header_missing",
+    ]);
+    const refuse = (error: string, code?: string): PaidFetchResult => ({
+      ok: false, ambiguous: false, data: undefined, error,
+      ...(code && theirs.has(code) ? {} : { callerError: true }),
+    });
     // Refused before the bridge: the hosted gateway cannot settle these rails (Monad, other chains or tokens).
     if (!HOSTED_RAILS.includes(request.rail)) {
-      return refuse(`this service settles on a payment network hosted agents cannot pay; hosted agents pay ${describeRails(HOSTED_RAILS)}`, true);
+      return refuse(`this service settles on a payment network hosted agents cannot pay; hosted agents pay ${describeRails(HOSTED_RAILS)}`);
     }
     const serviceId = await this.directory.resolveServiceId(request.url)
       ?? `url:${createHash("sha256").update(request.url).digest("hex")}`;
@@ -275,7 +286,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       return this.fetchUnpaid(request.url, method, body, request.headers);
     }
     if (reply.code === "funding_required") {
-      return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`, true);
+      return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`);
     }
     if (reply.code === "payment_unknown") {
       return {
@@ -288,7 +299,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
           : reply.error ?? "the supervisor could not determine whether the payment settled"
       };
     }
-    return refuse(reply.code ? `${reply.error ?? "payment refused"} (${reply.code})` : reply.error ?? "payment refused");
+    return refuse(reply.code ? `${reply.error ?? "payment refused"} (${reply.code})` : reply.error ?? "payment refused", reply.code);
   }
 
   /**
