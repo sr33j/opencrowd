@@ -81,7 +81,8 @@ export class MockAgentCashAdapter implements AgentCashAdapter {
 export interface MockCrowdCodeOptions {
   evidence?: ServiceEvidence | ((query: ServiceQuery) => ServiceEvidence);
   outage?: boolean;
-  failReviews?: boolean;
+  /** `true` for a transient failure, or the directory's own verdict verbatim. */
+  failReviews?: boolean | string;
 }
 
 export class MockCrowdCodeAdapter implements CrowdCodeAdapter {
@@ -104,7 +105,10 @@ export class MockCrowdCodeAdapter implements CrowdCodeAdapter {
 
   async reviewService(review: ReviewSubmission): Promise<ReviewResult> {
     if (this.options.failReviews) {
-      return { ok: false, error: "mock review submission failure" };
+      return {
+        ok: false,
+        error: typeof this.options.failReviews === "string" ? this.options.failReviews : "mock review submission failure"
+      };
     }
     this.reviews.push(review);
     return { ok: true, raw: { accepted: true } };

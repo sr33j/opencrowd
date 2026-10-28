@@ -42,7 +42,15 @@ export interface PurchaseRecord {
 export type PurchaseEvent =
   | { type: "purchase"; record: PurchaseRecord }
   | { type: "review_skipped"; purchase_id: string }
-  | { type: "review_failed"; purchase_id: string; attempted_at: string }
+  /**
+   * `permanent` marks a rejection that is about the service's registration in
+   * the CrowdCode directory rather than about this attempt — "service identity
+   * conflict", for one — so the same review submitted again gets the same
+   * answer. It exhausts the attempts in one event, because what the agent must
+   * not do is spend a turn and a model call discovering that, with its next
+   * purchase blocked in the meantime.
+   */
+  | { type: "review_failed"; purchase_id: string; attempted_at: string; permanent?: boolean }
   | { type: "review_submitted"; purchase_id: string; rating: number; submitted_at: string };
 
 export interface PurchaseState {
@@ -73,8 +81,17 @@ export async function recordReviewSubmitted(session: SessionState, purchaseId: s
   });
 }
 
-export async function recordReviewFailed(session: SessionState, purchaseId: string): Promise<void> {
-  await appendPurchaseEvent(session, { type: "review_failed", purchase_id: purchaseId, attempted_at: new Date().toISOString() });
+export async function recordReviewFailed(
+  session: SessionState,
+  purchaseId: string,
+  options: { permanent?: boolean } = {}
+): Promise<void> {
+  await appendPurchaseEvent(session, {
+    type: "review_failed",
+    purchase_id: purchaseId,
+    attempted_at: new Date().toISOString(),
+    ...(options.permanent ? { permanent: true } : {})
+  });
 }
 
 export async function skipPendingReviews(session: SessionState): Promise<void> {
@@ -118,7 +135,10 @@ export async function listPurchases(session: SessionState): Promise<PurchaseStat
       if (state) state.reviewStatus = "not_required";
     } else if (event.type === "review_failed") {
       const state = states.get(event.purchase_id);
-      if (state) state.reviewAttempts = (state.reviewAttempts ?? 0) + 1;
+      if (state)
+        state.reviewAttempts = event.permanent
+          ? MAX_REVIEW_ATTEMPTS
+          : (state.reviewAttempts ?? 0) + 1;
     } else if (event.type === "review_submitted") {
       const state = states.get(event.purchase_id);
       if (state) {

@@ -95,6 +95,20 @@ export interface EconomyGatewayOptions {
 /** Rails CrowdCode verifies end to end: x402 on Base, Solana and Monad, and MPP on Tempo. */
 export const VERIFIED_RAILS: readonly PaymentRail[] = ["x402-base", "x402-solana", "x402-monad", "mppx"];
 
+/**
+ * Review rejections that are facts about the directory, not about the attempt.
+ *
+ * CrowdCode resolves a review against the services it already has registered.
+ * When the identity it is given matches more than one of them, or matches none,
+ * it says so — and will say the same thing to the identical submission a minute
+ * later. Everything else (a transport failure, a 5xx, a rate limit) is worth
+ * another go.
+ */
+const PERMANENT_REVIEW_REJECTION =
+  /service identity conflict|payment target is shared by multiple services|service not found|unknown purchase/i;
+export const isPermanentReviewRejection = (error: string | undefined) =>
+  !!error && PERMANENT_REVIEW_REJECTION.test(error);
+
 export class EconomyGateway {
   /**
    * Inspections are keyed by endpoint+method and persisted under the session so
@@ -594,7 +608,21 @@ export class EconomyGateway {
       taskContext: stringArg(args.task_context)
     });
     if (!result.ok) {
-      await recordReviewFailed(this.options.session, purchaseId);
+      // A rejection CrowdCode decided from what is already registered will be
+      // decided the same way next time. On 2026-10-27 an agent was told to
+      // "retry review_paid_service" after a `service identity conflict`, spent
+      // a turn and a model call doing exactly that, got the same answer — and
+      // in between was refused the next purchase it had been asked to make,
+      // because a paid purchase with a pending review blocks one. So a
+      // rejection that cannot change is never presented as retryable.
+      const permanent = isPermanentReviewRejection(result.error);
+      await recordReviewFailed(this.options.session, purchaseId, { permanent });
+      if (permanent) {
+        return {
+          ok: false,
+          error: `CrowdCode could not attach this review to a registered service (${result.error}). This will not change on a retry, so the review is recorded as unsendable; it no longer blocks later purchases. Do not call review_paid_service for ${purchaseId} again.`
+        };
+      }
       const deferred = (state.reviewAttempts ?? 0) + 1 >= MAX_REVIEW_ATTEMPTS;
       return { ok: false, error: `CrowdCode review failed (${result.error}); the review stays pending${deferred ? " for manual retry, without blocking completion or later purchases" : " — retry review_paid_service"}` };
     }

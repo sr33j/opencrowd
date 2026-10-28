@@ -556,6 +556,40 @@ describe("required reviews", () => {
     expect(review.error).toContain("stays pending");
     await expect(gateway.hasPendingRequiredReviews()).resolves.toBe(true);
   });
+
+  /**
+   * 2026-10-27: an agent bought a web search, submitted its review, and was
+   * told `service identity conflict` — CrowdCode had the endpoint registered
+   * in a way the review could not be attached to. The message ended "retry
+   * review_paid_service", so the agent did, got the same answer, and in
+   * between was refused the next purchase it had been asked to make, because
+   * a paid purchase with a pending review blocks one. Two turns and two model
+   * calls to learn nothing.
+   */
+  it("stops blocking purchases at once when CrowdCode's rejection cannot change", async () => {
+    const { session, gateway } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: "service identity conflict" }) });
+    await inspect(gateway);
+    const first = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    const purchaseId = (first.data as Record<string, unknown>).purchase_id as string;
+    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).error)
+      .toContain("requires its CrowdCode review");
+
+    const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "fast and accurate" });
+    expect(review.ok).toBe(false);
+    // Told plainly, so the model does not spend a turn finding out.
+    expect(review.error).toContain("will not change on a retry");
+    expect(review.error).toContain("service identity conflict");
+    expect(review.error).not.toContain("retry review_paid_service");
+
+    // One attempt was enough: the agent gets on with the work it was given.
+    await expect(gateway.hasPendingRequiredReviews()).resolves.toBe(false);
+    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
+    // The purchase is still on record as reviewable, for an operator who fixes
+    // the registration; it simply no longer holds the agent up.
+    const [purchase] = await listPurchases(session);
+    expect(purchase.record.review_required).toBe(true);
+    expect(purchase.reviewStatus).toBe("pending");
+  });
 });
 
 describe("secrecy", () => {
