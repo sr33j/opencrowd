@@ -329,9 +329,11 @@ describe("hosted economy: payment over the bridge", () => {
 
   it("submits an unpaid failure through the shared review tool and hosted signer", async () => {
     const { fetcher } = fakeFetch();
+    // A 402 with no payment challenge in it: there is nothing for this
+    // gateway to have misread, so it really is the seller's to answer for.
     const { socketPath, requests } = await bridge(name => name === "economy.review"
       ? { ok: true, data: { accepted: true, payment_verified: false } }
-      : { ok: false, error: "invalid payment requirements", code: "invalid_payment_requirements" });
+      : { ok: false, error: "payment required header missing", code: "payment_required_header_missing" });
     const { gateway } = await economy(fetcher, socketPath);
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
@@ -346,6 +348,33 @@ describe("hosted economy: payment over the bridge", () => {
     expect(args.payment_reference).toBeUndefined();
     expect(args.payment_provider).toBeUndefined();
     expect(requests.filter(request => request.name === "economy.pay")).toHaveLength(1);
+  });
+
+  /**
+   * The other way round, and the reason the default was inverted: on
+   * 2026-10-28 three live sellers were told `invalid_payment_requirements`
+   * because this gateway's own schemas were too strict — one offered twelve
+   * chains where the parser allowed ten, one quoted a fifteen-minute payment
+   * window where the parser allowed five — and each was reviewed for it.
+   * From inside, our bug and their bug look identical.
+   */
+  it("does not let a challenge this gateway could not read become the seller's fault", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath, requests } = await bridge(name => name === "economy.review"
+      ? { ok: true, data: { accepted: true, payment_verified: false } }
+      : { ok: false, error: "invalid payment requirements", code: "invalid_payment_requirements" });
+    const { gateway, session } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
+    expect(call.ok).toBe(false);
+    const [purchase] = await listPurchases(session);
+    expect(purchase.record).toMatchObject({ caller_error: true, review_required: false });
+    const review = await gateway.execute("review_paid_service", {
+      purchase_id: purchase.record.purchase_id, rating: 1, reason: "its 402 is broken",
+    });
+    expect(review.ok).toBe(false);
+    expect(review.error).toContain("never reached");
+    expect(requests.filter(request => request.name === "economy.review")).toHaveLength(0);
   });
 
   it("surfaces supervisor refusals with their code, refuses MPP rails and unlisted services without touching the bridge", async () => {
