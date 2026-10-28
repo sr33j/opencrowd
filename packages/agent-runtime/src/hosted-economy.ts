@@ -345,7 +345,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     const cost = `about $${MOVE_FEE_ESTIMATE_USD.toFixed(2)}`, size = `$${move.amount.toFixed(2)}`;
     if (!move.worthwhile)
       return `${line}${elsewhere} Moving funds is the other way, but the most ${move.from} can spare is ${size}, and a fee of ${cost} is ${Math.round(move.feeShare * 100)}% of that — too much to spend without asking. If no equivalent service fits, say exactly that to the owner: this service is sold only on ${target}, moving ${size} there would cost ${cost} in fees, and ask whether to do it.`;
-    return `${line}${elsewhere} Otherwise move funds first: bridge_usdc {"from":"${move.from}","to":"${target}","amount_usd":${move.amount}} (fee ${cost}, counted as spending; follows the owner's approval mode), then retry this call.`;
+    return `${line}${elsewhere} Otherwise move the funds yourself and retry — a move this size is within the policy and is not something to ask the owner about, any more than paying for the call is: bridge_usdc {"from":"${move.from}","to":"${target}","amount_usd":${move.amount}} (fee ${cost}, counted as spending; the spending guard pauses it for approval by itself if the owner's mode requires that), then retry this call.`;
   }
 
   /**
@@ -568,7 +568,7 @@ export function planFundingMove(
 /** The hosted counterpart of bridge_usdc: moves between the agent's own networks through the hosted gateway. */
 const HOSTED_BRIDGE_TOOL = {
   name: "bridge_usdc",
-  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, or when a paid call failed with funding_required and no equivalent service is sold on a network you already fund. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending, so aim for about $1 and one fee funds many calls; when the wallet holds less, move what the call needs plus the fee, as long as the fee stays under about a fifth of what moves (roughly $0.15 and up). Below that, quote_only first and ask the owner rather than spending most of the move on its fee. Pass transfer_id alone to check a pending move.",
+  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, or when a paid call failed with funding_required and no equivalent service is sold on a network you already fund. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending, so aim for about $1 and one fee funds many calls; when the wallet holds less, move what the call needs plus the fee, as long as the fee stays under about a fifth of what moves (roughly $0.15 and up). A move within that rule needs no permission from the owner: the spending guard applies their approval mode to the fee by itself. Below the rule, quote_only first and ask, rather than spending most of the move on its fee. Pass transfer_id alone to check a pending move.",
   parameters: {
     type: "object",
     properties: {
