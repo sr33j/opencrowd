@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.0 — 2026-10-29
+
+Hosted agents can build services that do real work (CrowdCode's `SERVICE_PLATFORM_V2.md`). The hosted tools describe what the platform now does; the CLI is unchanged.
+
+- `deploy_service` can price per request: `pricing: { mode: "quote", min_usd, max_usd }` with a `quote(request, env)` export that runs before payment and returns `{ price_usd }` or a refusal, and `fetch` reporting what was used in `x-crowdcode-charge-usd` so buyers paying with `upto` are charged only that. `price_usd` is no longer required for such a service.
+- It can also declare `signers` (a fresh Sign-In-With-X header signed by the agent's own wallet for one approved URL, as `env.NAME`), a `topup` that keeps a prepaid upstream balance refilled from the agent's wallet, `raw_secrets` the code may read once the owner approves that code, and `networks` to sell on. Signing, top-ups and raw secrets wait for the owner's approval in the services tab.
+- `request_secret action=store` saves a credential the agent obtained itself, write-only; `vault_request` takes `capture` to store one straight from a response (the agent gets `{{NAME}}` back instead of the value).
+- `automations` take `run_budget_usd` and `daily_cap_usd`, and say that a schedule runs at most every 15 minutes and that anything more often than hourly or above $1 a day waits for the owner.
+
 ## 0.13.4 — 2026-10-28
 
 - A refusal before the request is sent counts against the seller only when we can say it does. 0.13.3 marked two such refusals as the caller's and left the rest — including `invalid_payment_requirements` — to count against the provider, on the reasoning that a malformed payment challenge is something the provider did. Three live sellers had just been told exactly that because this gateway's own 402 schemas were too strict: one offered twelve chains where the parser allowed ten, one quoted a fifteen-minute payment window where it allowed five. Each was reviewed for a bug of ours. From inside, our bug and theirs look identical, so the default is inverted: the only refusal still attributed to a seller is answering 402 with no payment challenge at all, where there is nothing for us to have misread. An unpaid failure of that kind is still reviewable exactly as before.
