@@ -141,8 +141,11 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
 }
 
 function sumCents(rows: Record<string, string>[]): number {
-  return rows.reduce((total, row) => {
+  // Fractional cents kept: a per-call model charge is usually well under a
+  // cent, and rounding each row reported a run's model spend as zero.
+  const total = rows.reduce((sum, row) => {
     const value = Number(row.charged_cost_cents || 0);
-    return total + (Number.isFinite(value) ? Math.round(value) : 0);
+    return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
+  return Math.round(total * 10_000) / 10_000;
 }

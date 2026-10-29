@@ -66,11 +66,17 @@ rescues the primary is parked for the rest of the process. In `ask` mode the
 rescue requires confirmation, while `auto` mode proceeds within the session
 budget automatically.
 
-**Venice** is the wallet-native backup (`opencrowd config set provider
-venice` or `/provider venice`): SIWX authentication, prepaid Venice credit
-topped up with USDC, at most one bounded automatic top-up per exhausted
-call. **OpenRouter** direct is also available with `OPENROUTER_API_KEY`.
-The OpenRouter x402 proxy, Venice, and direct OpenRouter remain explicitly selectable.
+**Venice** (`opencrowd config set provider venice` or `/provider venice`)
+gives you Venice's uncensored and open-weight models paid per call: each
+request is quoted by CrowdCode's Venice service (an x402 402 for that exact
+request) and paid with `upto` USDC on Base from the AgentCash wallet, settled
+for the tokens actually used at Venice's price plus 20% (at least $0.001,
+at most the quote). There is no minimum and nothing to prepay. Prefer your
+own Venice credit? `venice-direct` talks to Venice itself with SIWX and
+prepaid credit topped up with USDC ($5 minimum; at most one bounded
+automatic top-up per exhausted call). **OpenRouter** direct is also
+available with `OPENROUTER_API_KEY`. The OpenRouter x402 proxy, Venice,
+Venice direct, and direct OpenRouter remain explicitly selectable.
 
 Model preferences are per provider (`auto` resolves from the live catalog at
 session start; resolved IDs are recorded on the session so `run --session`

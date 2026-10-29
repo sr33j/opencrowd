@@ -304,7 +304,7 @@ async function configCommand(args: string[]): Promise<void> {
     case "provider": {
       const provider = normalizeProviderId(value);
       if (!provider) {
-        throw new Error("provider must be blockrun, openrouter-x402-proxy, venice, or openrouter");
+        throw new Error("provider must be blockrun, openrouter-x402-proxy, venice, venice-direct, or openrouter");
       }
       await updateConfig({ provider });
       savedValue = provider;

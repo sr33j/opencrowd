@@ -2,15 +2,15 @@ import { VeniceClient, VeniceError } from "venice-x402-client";
 import { requireAgentCashWallet } from "@opencrowd/core";
 
 /**
- * Typed LLM provider contract. BlockRun and the x402 proxy pay per request
- * from the shared AgentCash wallet, Venice consumes prepaid wallet-funded
- * credit, and OpenRouter uses an API key.
+ * Typed LLM provider contract. BlockRun, the x402 proxy and Venice (through
+ * CrowdCode) pay per request from the shared AgentCash wallet, Venice direct
+ * consumes prepaid wallet-funded credit, and OpenRouter uses an API key.
  */
 
-export type ProviderId = "blockrun" | "openrouter-x402-proxy" | "venice" | "openrouter";
+export type ProviderId = "blockrun" | "openrouter-x402-proxy" | "venice" | "venice-direct" | "openrouter";
 export type ProviderIdInput = ProviderId | "x402";
 
-export const PROVIDER_IDS: ProviderId[] = ["blockrun", "openrouter-x402-proxy", "venice", "openrouter"];
+export const PROVIDER_IDS: ProviderId[] = ["blockrun", "openrouter-x402-proxy", "venice", "venice-direct", "openrouter"];
 
 export interface ProviderModel {
   id: string;
@@ -113,8 +113,13 @@ export interface VeniceLikeClient {
   topUp(amountUsd: number): Promise<void>;
 }
 
+/**
+ * `venice-direct`: Venice itself, with the AgentCash wallet's own prepaid
+ * credit ($5 minimum top-up). `venice` is the per-call CrowdCode service
+ * (crowdcode-venice.ts).
+ */
 export class VeniceProvider implements TypedLlmProvider {
-  readonly id = "venice" as const;
+  readonly id = "venice-direct" as const;
   private client?: VeniceLikeClient;
   private clientPromise?: Promise<VeniceLikeClient>;
   private modelsCache?: ProviderModel[];
@@ -460,7 +465,7 @@ export class OpenRouterProvider implements TypedLlmProvider {
 }
 
 export function isProviderId(value: unknown): value is ProviderId {
-  return value === "blockrun" || value === "openrouter-x402-proxy" || value === "venice" || value === "openrouter";
+  return value === "blockrun" || value === "openrouter-x402-proxy" || value === "venice" || value === "venice-direct" || value === "openrouter";
 }
 
 /** Accept the pre-0.3.1 `x402` route name without exposing it as canonical UI. */

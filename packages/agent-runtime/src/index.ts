@@ -37,6 +37,7 @@ import {
 
 export * from "./providers.js";
 export * from "./blockrun.js";
+export * from "./crowdcode-venice.js";
 export * from "./llm-runtime.js";
 export * from "./runtime.js";
 export * from "./worker.js";
