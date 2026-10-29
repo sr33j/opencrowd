@@ -7,6 +7,8 @@ import type { LlmMessage, LlmProvider, LlmResponse } from "./index.js";
 export interface ContextState {
   /** Once prepared, an interrupted/paused request must be replayed byte-for-byte. */
   prepared?: boolean;
+  /** Current-turn context, checkpointed for replay but never added to history. */
+  trailingMessage?: LlmMessage;
   retry?: number;
   scale?: number;
 }
@@ -21,19 +23,26 @@ export async function completeWithContext(session: SessionState, messages: LlmMe
   for (;;) {
     options.signal?.throwIfAborted();
     if (!options.state.prepared) {
-      const result = await compactContext(session, messages, options);
+      const request = options.state.trailingMessage ? [...messages, options.state.trailingMessage] : messages;
+      const result = await compactContext(session, request, options);
+      if (options.state.trailingMessage) {
+        options.state.trailingMessage = request.pop();
+        messages.splice(0, messages.length, ...request);
+      }
       if (result.archivePath) await options.onCompaction?.({ ...result, archivePath: result.archivePath });
       options.state.prepared = true;
     }
     await options.checkpoint?.(); // freeze the exact request BEFORE payment/network I/O
     try {
       const retry = options.state.retry ?? 0;
-      const response = await options.provider.complete(messages, { signal: options.signal,
+      const request = options.state.trailingMessage ? [...messages, options.state.trailingMessage] : messages;
+      const response = await options.provider.complete(request, { signal: options.signal,
         operationId: options.operationId && `${options.operationId}${retry ? `:context:${retry}` : ""}` });
       const used = response.usage?.inputTokens;
       if (used && Number.isFinite(used) && used > 0)
-        options.state.scale = Math.max(options.state.scale ?? 1, used / estimateModelInput(messages, options.tools) * 1.1);
+        options.state.scale = Math.max(options.state.scale ?? 1, used / estimateModelInput(request, options.tools) * 1.1);
       options.state.prepared = false;
+      options.state.trailingMessage = undefined;
       options.state.retry = 0;
       return response;
     } catch (error) {

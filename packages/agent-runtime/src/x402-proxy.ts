@@ -156,6 +156,7 @@ export class X402ProxyProvider implements TypedLlmProvider {
     // a silent stall is then distinguishable from a long generation.
     const body: Record<string, unknown> = {
       model: request.model,
+      ...(request.model.startsWith("anthropic/") ? { prompt_cache: true } : {}),
       messages: request.messages.map(toWireChatMessage),
       tools: request.tools.map((tool) => ({
         type: "function",
