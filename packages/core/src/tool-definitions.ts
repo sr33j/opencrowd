@@ -98,13 +98,13 @@ function toolDescription(name: ToolName): string {
     case "complete_session":
       return "Finish the agent run and present a concise final answer.";
     case "deploy_service":
-      return "Deploy a paid HTTP service you wrote to OpenCrowd's hosting. The entry file must be a JavaScript or TypeScript ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay the listed USDC price per call with x402; payments settle to this agent's own wallet. Vault secrets listed in `secrets` are exposed to the service as env vars (env.NAME) but contain opaque placeholders: the real value is substituted at the network boundary only for requests to `allowed_hosts`, so never print or return a secret. Redeploying the same slug updates the service in place. Returns the public URL and listing status.";
+      return "Deploy a paid HTTP service you wrote to CrowdCode hosting. The entry file is an ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay per call with x402/MPP and the money goes to this agent's wallet. Fixed price: price_usd. Per-request price: pricing {mode:\"quote\",min_usd,max_usd} and also export quote(request, env), which runs before payment and returns { price_usd } or a 4xx Response to refuse; fetch then runs after payment with env.CROWDCODE.max_charge_atomic and may set response header x-crowdcode-charge-usd to settle less (upto). Optional headers: x-crowdcode-upstream-cost-usd (for margin), x-crowdcode-upstream-balance-usd (triggers top-ups), x-crowdcode-topup: required (refill and retry once). Vault secrets in `secrets` are env.NAME placeholders substituted only on requests to `allowed_hosts`; `raw_secrets` lets code read a value once the owner approves it for this code. `signers` gives env.NAME as a fresh Sign-In-With-X header signed by this agent's wallet for one approved URL. `topup` keeps a prepaid upstream balance refilled from this agent's wallet. Signers, topup and raw_secrets wait for the owner's approval in the services tab. Redeploying a slug updates it in place.";
     case "request_secret":
-      return "Use action=list first when you need to see this agent's vault secret titles and statuses (values are never exposed). Use action=create to ask the user to add a named API key or token to the encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into chat. For create, provide name, allowed_hosts, and reason. Reference an active secret by name in deploy_service `secrets` and read it in service code as env.NAME; the real value is substituted only on requests to allowed_hosts.";
+      return "Use action=list first when you need to see this agent's vault secret titles and statuses (values are never exposed). Use action=create to ask the user to add a named API key or token to the encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into chat. Use action=store to save a credential you obtained yourself (for example an API key from a sign-up) with name, value, allowed_hosts and reason: it is write-only, you can never read it back, and it cannot replace a secret the user added. Prefer vault_request capture when the key arrives in an API response, so you never see it. Reference an active secret by name in deploy_service `secrets` and read it in service code as env.NAME, or as {{NAME}} in vault_request; the real value is substituted only on requests to allowed_hosts.";
     case "vault_request":
-      return "Send one HTTPS request to an external API with vault secrets injected by the platform. Write {{SECRET_NAME}} anywhere in the url, headers, or body and the real value is substituted at the network boundary, only for hosts the user approved for that secret; you never see the value and the response is blocked if it echoes one. Use it to call APIs on the user's behalf (for example posting to X with an OAuth token). The body is a string (JSON, form encoding, or text), or a workspace file up to 25 MB via body_artifact (sent raw, or as one multipart/form-data file part when body_field is set, with form_fields alongside). Returns the status, content-type, and the response body text (truncated at 64 KB). Check request_secret action=list for available secret names first.";
+      return "Send one HTTPS request to an external API with vault secrets injected by the platform. Write {{SECRET_NAME}} anywhere in the url, headers, or body and the real value is substituted at the network boundary, only for hosts the user approved for that secret; you never see the value and the response is blocked if it echoes one. Use it to call APIs on the user's behalf (for example posting to X with an OAuth token). The body is a string (JSON, form encoding, or text), or a workspace file up to 25 MB via body_artifact (sent raw, or as one multipart/form-data file part when body_field is set, with form_fields alongside). Returns the status, content-type, and the response body text (truncated at 64 KB). Check request_secret action=list for available secret names first. Set capture {name, json_path or header} to store a credential from the response (such as the api_key a sign-up returns) in the vault: you get {{NAME}} back in place of the value, usable on the host that issued it.";
     case "automations":
-      return "Create, list, update, pause, resume, run now, or delete persistent automations for this hosted agent. Use create proactively when the user's goal clearly needs a future follow-up, reminder, monitoring loop, recurring report, or maintenance task. Automations run in this same conversation. Never create duplicates or hide a schedule from the user.";
+      return "Create, list, update, pause, resume, run now, or delete persistent automations for this hosted agent. Use create proactively when the user's goal clearly needs a future follow-up, reminder, monitoring loop, recurring report, or maintenance task. Automations run in this same conversation. A schedule runs at most every 15 minutes; each run spends at most run_budget_usd (default 0.25) and the schedule at most daily_cap_usd (default 1) per 24 hours. Anything more often than hourly or above $1 a day waits for the owner's approval in the Schedules tab; tell the user. Never create duplicates or hide a schedule from the user.";
   }
 }
 
@@ -148,7 +148,12 @@ function toolParameters(name: ToolName): JsonSchema {
         slug: stringSchema("URL-safe identifier, lowercase letters, digits and dashes, 3-40 characters. Stable across redeploys."),
         name: stringSchema("Human-readable service name shown to buyers."),
         description: stringSchema("What the service does and returns; used by buyers and discovery search. One or two sentences."),
-        price_usd: stringSchema("Price per paid call in USD, for example \"0.001\". Minimum 0.0001."),
+        price_usd: stringSchema("Fixed price per paid call in USD, for example \"0.001\". Minimum 0.0001. Omit when pricing.mode is quote."),
+        pricing: { type: "object", description: "Per-request pricing: { mode: \"quote\", min_usd, max_usd }. The module must export quote(request, env). Omit for a fixed price_usd.", additionalProperties: true },
+        networks: { type: "array", description: "Networks to sell on: base, solana, tempo. Default: all enabled. Use [\"base\"] when the service pays its costs on Base.", items: stringSchema("Network key.") },
+        signers: { type: "array", description: "Sign-In-With-X as this agent's wallet: [{ name: \"VENICE_SIWX\", url: \"https://api.example.com/v1/chat\", statement?: \"Sign in to Example\" }]. env.NAME is a placeholder for a fresh signed header, valid only for that exact URL; send it as SIGN-IN-WITH-X. The URL's host must be in allowed_hosts. Needs owner approval.", items: { type: "object", additionalProperties: true } },
+        topup: { type: "object", description: "Prepaid upstream balance kept refilled from this agent's wallet: { url (x402 top-up endpoint), balance_url? (with {address}), balance_field? (e.g. data.balanceUsd), refill_below_usd, amount_usd }. Needs owner approval; the owner sets limits.", additionalProperties: true },
+        raw_secrets: { type: "array", description: "Vault secrets the code must read as values (HMAC signing, OAuth 1.0a). Off until the owner approves them for this exact code; prefer `secrets` placeholders.", items: stringSchema("Vault secret name.") },
         entry: stringSchema("Artifact path of the entry module saved with save_file, for example service/index.js."),
         routes: {
           type: "array",
@@ -163,10 +168,11 @@ function toolParameters(name: ToolName): JsonSchema {
         },
         secrets: { type: "array", description: "Names of vault secrets the service needs as env vars.", items: stringSchema("Vault secret name.") },
         allowed_hosts: { type: "array", description: "Upstream hostnames the service is allowed to call, for example api.coingecko.com. Any other outbound host is blocked.", items: stringSchema("Hostname.") }
-      }, ["slug", "name", "description", "price_usd", "entry", "routes"]);
+      }, ["slug", "name", "description", "entry", "routes"]);
     case "request_secret":
       return objectSchema({
-        action: { type: "string", description: "list to inspect secret titles/statuses; create to request or reuse a secret." },
+        action: { type: "string", description: "list to inspect secret titles/statuses; create to ask the user for a secret; store to save one you obtained yourself." },
+        value: stringSchema("store only: the credential to save. It is write-only from here on."),
         name: { type: "string", pattern: "^[A-Z][A-Z0-9_]{1,63}$", description: "Secret name in SCREAMING_SNAKE_CASE, for example OPENAI_API_KEY. This is the env var name your service reads." },
         allowed_hosts: { type: "array", description: "Hostnames the secret may be sent to, for example api.openai.com. The vault only substitutes the real value on requests to these hosts.", items: stringSchema("Hostname.") },
         reason: stringSchema("One short sentence shown to the user explaining why the secret is needed.")
@@ -180,7 +186,8 @@ function toolParameters(name: ToolName): JsonSchema {
         body_artifact: stringSchema("Workspace file to send as the body, as a path under artifacts/ (for example demos/clip.part00). Up to 25 MB; the file is uploaded first."),
         body_field: stringSchema("When set, the file is sent as a multipart/form-data part with this field name (for example media) instead of raw bytes."),
         form_fields: { type: "object", description: "Extra multipart text fields sent with the file, for example { \"segment_index\": \"0\" }.", additionalProperties: { type: "string" } },
-        reason: stringSchema("One short sentence shown to the user describing what this request does.")
+        reason: stringSchema("One short sentence shown to the user describing what this request does."),
+        capture: { type: "object", description: "Store a credential from the response in the vault: { name, json_path (e.g. data.api_key) or header, allowed_hosts? }. The value is replaced by {{NAME}} in what you receive.", additionalProperties: true }
       }, ["url"]);
     case "automations":
       return automationSchema({ action: { type: "string", description: "create, list, update, pause, resume, run, or delete." }, automation_id: stringSchema("Automation ID, except for create and list.") }, ["action"]);
@@ -240,6 +247,8 @@ function automationSchema(extra: Record<string, JsonSchema>, required: string[] 
     cronExpression: stringSchema("Five-field cron expression, for example 50 19 * * 3."),
     timezone: stringSchema("IANA timezone, for example America/Los_Angeles."),
     model: stringSchema("Optional model ID."),
+    run_budget_usd: stringSchema("Most one run may spend in USD, default \"0.25\"; at most the owner's per-query budget."),
+    daily_cap_usd: stringSchema("Most this schedule may spend per 24 hours in USD, default \"1\". Above 1 needs the owner's approval."),
   }, required);
 }
 
