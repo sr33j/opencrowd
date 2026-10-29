@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.15.0 — 2026-10-29
+
+- **`venice` now buys Venice per call through CrowdCode.** Each request is quoted by CrowdCode's Venice service (run by its `venice-reseller` agent) and paid with x402 `upto` USDC on Base from the AgentCash wallet. It is settled for the tokens actually used at Venice's price plus 20% (at least $0.001, never more than the quote). There is no $5 minimum and no prepaid credit, the models are the same, and the ledger books what settled. The payee is pinned to the reseller.
+- **`venice-direct` is the previous behaviour:** Venice itself, SIWX and the wallet's own prepaid credit. If your config says `provider: venice` and you want to keep your own credit, run `opencrowd config set provider venice-direct`.
+- A run's summary reports its model spend with fractional cents. It rounded each call to whole cents, so a run of sub-cent calls reported `llm: 0`.
+- An `upto` payment reads the wallet's USDC permit nonce at a block no older than the wallet's last settlement, keeps one payment in flight per wallet, and re-signs once if the payment is refused. Back-to-back payments otherwise read a spent nonce from a lagging RPC node about one time in three.
+
 ## 0.14.0 — 2026-10-29
 
 Hosted agents can build services that do real work (CrowdCode's `SERVICE_PLATFORM_V2.md`). The hosted tools describe what the platform now does; the CLI is unchanged.

@@ -95,7 +95,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   },
   {
     name: "provider",
-    usage: "/provider [help|blockrun|openrouter-x402-proxy|venice|openrouter]",
+    usage: "/provider [help|blockrun|openrouter-x402-proxy|venice|venice-direct|openrouter]",
     summary: "Show or select this session's LLM provider (validated immediately)",
     execute: async (rest, { session, state }) => {
       const config = await loadConfig();
@@ -124,7 +124,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
       }
       const normalized = normalizeProviderId(rest[0]);
       if (!normalized) {
-        throw new Error("/provider supports blockrun, openrouter-x402-proxy, venice, or openrouter (try /provider help)");
+        throw new Error("/provider supports blockrun, openrouter-x402-proxy, venice, venice-direct, or openrouter (try /provider help)");
       }
       const providerId: ProviderId = normalized;
       // Validate configuration immediately: this connects/authenticates and
@@ -416,14 +416,16 @@ function activeProviderId(session: SessionState, fallback: ProviderId): Provider
 const PROVIDER_DESCRIPTIONS: Record<ProviderId, string> = {
   blockrun: "BlockRun gateway; AgentCash wallet pays x402 USDC",
   "openrouter-x402-proxy": "legacy x402-paid proxy fronting OpenRouter-grade serving",
-  venice: "direct Venice integration using wallet-funded Venice credit",
+  venice: "Venice models through CrowdCode, paid per call in USDC (x402 upto: tokens used plus 20%, no minimum)",
+  "venice-direct": "Venice itself, using the wallet's own prepaid Venice credit ($5 minimum top-up)",
   openrouter: "direct OpenRouter API using OPENROUTER_API_KEY and account credit"
 };
 
 const PROVIDER_HELP: Array<Record<string, unknown>> = [
   { provider: "blockrun (default)", auth: "AgentCash / x402", description: PROVIDER_DESCRIPTIONS.blockrun },
   { provider: "openrouter-x402-proxy", auth: "AgentCash / x402", description: PROVIDER_DESCRIPTIONS["openrouter-x402-proxy"] },
-  { provider: "venice", auth: "AgentCash / SIWX", description: PROVIDER_DESCRIPTIONS.venice },
+  { provider: "venice", auth: "AgentCash / x402", description: PROVIDER_DESCRIPTIONS.venice },
+  { provider: "venice-direct", auth: "AgentCash / SIWX", description: PROVIDER_DESCRIPTIONS["venice-direct"] },
   { provider: "openrouter", auth: "OPENROUTER_API_KEY", description: PROVIDER_DESCRIPTIONS.openrouter }
 ];
 

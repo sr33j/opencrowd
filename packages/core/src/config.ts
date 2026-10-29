@@ -23,10 +23,13 @@ export interface OpenCrowdConfig {
   /** Vendor MCP servers (AgentCash, CrowdCode). Pin versions. */
   mcpServers: Record<string, McpServerConfig>;
   /** Default LLM provider for new sessions. */
-  provider: "blockrun" | "openrouter-x402-proxy" | "venice" | "openrouter";
+  provider: "blockrun" | "openrouter-x402-proxy" | "venice" | "venice-direct" | "openrouter";
   blockrun: ProviderModelDefaults;
   "openrouter-x402-proxy": ProviderModelDefaults;
+  /** Venice through CrowdCode's per-call x402 service. */
   venice: ProviderModelDefaults;
+  /** Venice itself, with the wallet's own prepaid credit. */
+  "venice-direct": ProviderModelDefaults;
   openrouter: ProviderModelDefaults;
   /** OpenAI-compatible, x402-metered proxy fronting OpenRouter-grade serving. */
   openrouterX402ProxyUrl: string;
@@ -68,6 +71,7 @@ export const DEFAULT_CONFIG: OpenCrowdConfig = {
   // answered-accuracy at 4-11c/question; deepseek-v4-flash subagents were
   // near-free with high cache-hit rates.
   venice: { model: "claude-sonnet-4-6", submodel: "deepseek-v4-flash" },
+  "venice-direct": { model: "claude-sonnet-4-6", submodel: "deepseek-v4-flash" },
   openrouter: { model: "auto", submodel: "auto" },
   openrouterX402ProxyUrl: "https://x402-tokens.fly.dev/v1",
   llmTimeoutMs: 300_000,
@@ -142,6 +146,7 @@ function normalizeConfig(value: unknown): OpenCrowdConfig {
     blockrun: providerDefaults(raw.blockrun, DEFAULT_CONFIG.blockrun),
     "openrouter-x402-proxy": proxyDefaults,
     venice: providerDefaults(raw.venice, DEFAULT_CONFIG.venice),
+    "venice-direct": providerDefaults(raw["venice-direct"], DEFAULT_CONFIG["venice-direct"]),
     openrouter: providerDefaults(raw.openrouter, DEFAULT_CONFIG.openrouter),
     openrouterX402ProxyUrl: stringValue(raw.openrouterX402ProxyUrl)
       ?? stringValue(raw.x402ProxyUrl)
@@ -176,7 +181,7 @@ export function resolvePaymentNetwork(config?: Pick<OpenCrowdConfig, "paymentNet
 
 function normalizeConfigProvider(value: unknown): OpenCrowdConfig["provider"] | undefined {
   if (value === "x402") return "openrouter-x402-proxy";
-  return value === "blockrun" || value === "openrouter-x402-proxy" || value === "venice" || value === "openrouter"
+  return value === "blockrun" || value === "openrouter-x402-proxy" || value === "venice" || value === "venice-direct" || value === "openrouter"
     ? value
     : undefined;
 }

@@ -204,7 +204,24 @@ The previous default remains available and is BlockRun's paired rescue route:
   and holds the upstream key. It is retained as a reliability fallback;
   Venice remains the wallet-native alternative.
 
-### Venice (backup: explicitly selectable, plus per-call rescue)
+### Venice (explicitly selectable, plus per-call rescue)
+
+`venice` buys each call from CrowdCode's Venice service
+(`https://crowdcode.app/s/venice-reseller/chat/completions`, run by the
+`venice-reseller` agent) over x402:
+
+- `POST` without payment returns a 402 quoting that exact request; the quote
+  is approved by the session budget before anything is signed.
+- Pays `upto` USDC on Base from the AgentCash wallet, only to the reseller's
+  pinned payee (override with `OPENCROWD_VENICE_URL` / `OPENCROWD_VENICE_PAYEE`).
+  Settles the tokens used at Venice's list price plus 20%, between $0.001 and
+  the quote; the ledger books the settled amount.
+- One payment in flight per wallet, and the permit's USDC nonce is read at a
+  block no older than the wallet's last settlement (a lagging RPC node would
+  otherwise report a spent nonce). A refused payment is re-signed once.
+- No streaming; the answer arrives in one response.
+
+### Venice direct (`venice-direct`)
 
 - Authenticates using the AgentCash wallet/SIWX path.
 - Uses prepaid Venice credit.
@@ -221,7 +238,7 @@ The previous default remains available and is BlockRun's paired rescue route:
 - Normalizes `cached_tokens` and cache-write fields into usage records.
 - Streams output so time-to-first-token is visible.
 
-Normal steady-state Venice inference is one network inference request per
+Normal steady-state Venice direct inference is one network inference request per
 turn. Local signing and local budget reservation are allowed; remote balance
 preflight is not.
 

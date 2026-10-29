@@ -1,3 +1,4 @@
+import { CrowdCodeVeniceProvider } from "./crowdcode-venice.js";
 import { DEFAULT_CONFIG, loadConfig, saveSession, type OpenCrowdConfig, type SessionState } from "@opencrowd/core";
 import {
   normalizeProviderId,
@@ -67,6 +68,9 @@ export function createTypedProvider(input: ProviderIdInput, options: TypedProvid
     return new X402ProxyProvider({ baseUrl: options.x402ProxyUrl, timeoutMs: options.timeoutMs });
   }
   if (id === "venice") {
+    return new CrowdCodeVeniceProvider({ timeoutMs: options.timeoutMs });
+  }
+  if (id === "venice-direct") {
     return new VeniceProvider({ timeoutMs: options.timeoutMs });
   }
   return new OpenRouterProvider({ apiKey: options.openrouterApiKey, timeoutMs: options.timeoutMs });
@@ -109,7 +113,7 @@ export async function resolveLlmRuntime(
   const requested = overrides.provider ?? session.models?.provider ?? config.provider;
   const normalized = normalizeProviderId(requested);
   if (!normalized) {
-    throw new Error(`unknown LLM provider \`${requested}\`; supported: blockrun, openrouter-x402-proxy, venice, openrouter`);
+    throw new Error(`unknown LLM provider \`${requested}\`; supported: blockrun, openrouter-x402-proxy, venice, venice-direct, openrouter`);
   }
   const providerId: ProviderId = normalized;
   const timeoutMs = overrides.nonInteractive
@@ -129,7 +133,7 @@ export async function resolveLlmRuntime(
       models: { ...recorded, provider: providerId },
       catalog,
       maxCostCentsPerCall: config.llmMaxCostCentsPerCall,
-      maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0,
+      maxTopUpCentsPerAction: providerId === "venice-direct" ? config.veniceMaxTopUpCents : 0,
       fallback
     };
   }
@@ -148,7 +152,7 @@ export async function resolveLlmRuntime(
     models,
     catalog,
     maxCostCentsPerCall: config.llmMaxCostCentsPerCall,
-    maxTopUpCentsPerAction: providerId === "venice" ? config.veniceMaxTopUpCents : 0,
+    maxTopUpCentsPerAction: providerId === "venice-direct" ? config.veniceMaxTopUpCents : 0,
     fallback
   };
 }
@@ -180,7 +184,7 @@ function resolveFallbackRuntime(
 
 /** Stable provider pairing used by the bounded per-call rescue ladder. */
 export function rescueProviderId(primary: ProviderId): ProviderId {
-  if (primary === "blockrun" || primary === "venice") {
+  if (primary === "blockrun" || primary === "venice" || primary === "venice-direct") {
     return "openrouter-x402-proxy";
   }
   return "venice";
