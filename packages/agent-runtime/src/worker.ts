@@ -1,4 +1,4 @@
-import { captureDetail, scrubText } from "@opencrowd/protocol";
+import { capStrings, captureDetail, MAX_EXTERNAL_STRING_CHARS, scrubText } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,6 +15,10 @@ import type { EconomyGateway } from "@opencrowd/economy";
 import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { loadKnowledgeTree } from "./knowledge.js";
+
+/** Above this the durable state is repaired on load rather than carried. Large
+ * enough that an ordinary run of capped tool results never triggers it. */
+const MAX_WORKER_STATE_CHARS = 2 * 1024 * 1024;
 
 export class RuntimePause extends Error {
   constructor(readonly outcome: RunOutcome, readonly operationId: string, message: string) {
@@ -79,9 +83,21 @@ export class MachineWorker {
     await containedPath(this.paths.home!, "metadata/worker.json");
     await mkdir(this.paths.metadata, { recursive: true });
     try {
-      this.state = JSON.parse(await readFile(this.statePath, "utf8")) as WorkerState;
+      const raw = await readFile(this.statePath, "utf8");
+      this.state = JSON.parse(raw) as WorkerState;
       if (this.state.version !== 1 || !Number.isSafeInteger(this.state.seq) || !this.state.commands || !this.state.runs) {
         throw new Error("worker checkpoint version or shape is invalid");
+      }
+      // Every mutate() re-serializes the whole of this file, so one oversized
+      // tool result in it costs memory on every write for the rest of the
+      // agent's life. Agent f047e0ef kept 21 MB of base64 audio here after the
+      // run that fetched it was OOM-killed, and was then OOM-killed 17 seconds
+      // into every boot that followed. Results are capped before they are
+      // stored now; repair a file written before they were, so an agent that
+      // was already poisoned starts instead of dying on its own state.
+      if (raw.length > MAX_WORKER_STATE_CHARS) {
+        this.state = capStrings(this.state, MAX_EXTERNAL_STRING_CHARS) as WorkerState;
+        await atomicWrite(this.statePath, JSON.stringify(this.state));
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
