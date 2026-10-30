@@ -1,4 +1,5 @@
 import type { JsonValue } from "./primitives.js";
+import { capString } from "./limits.js";
 import { isSensitiveKey } from "./redact.js";
 
 /** Bounded, explicitly marked diagnostic payloads. Never export credentials. */
@@ -13,9 +14,24 @@ export function scrubText(text: string): string {
 
 export function captureDetail(input: unknown, maxBytes = 96 * 1024) {
   let redacted = false;
+  // scrubText rewrites a string six times over; JSON.stringify copies it
+  // again. Cut each string to what this preview could keep anyway, and stop
+  // spending once the whole preview is accounted for, so the cost of
+  // capturing a diagnostic stays proportional to maxBytes and not to the
+  // megabytes an external service happened to return.
+  let spent = 0, truncatedStrings = false;
+  const budget = maxBytes * 8;
   const clean = (value: unknown, depth = 0): unknown => {
     if (depth > 30) return "[depth limit]";
-    if (typeof value === "string") { const s = scrubText(value); redacted ||= s !== value; return s; }
+    if (typeof value === "string") {
+      const limit = Math.min(maxBytes, Math.max(0, budget - spent));
+      truncatedStrings ||= value.length > limit;
+      const capped = capString(value, limit);
+      spent += capped.length;
+      const s = scrubText(capped);
+      redacted ||= s !== capped;
+      return s;
+    }
     if (Array.isArray(value)) return value.map(v => clean(v, depth + 1));
     if (value && typeof value === "object") {
       return Object.fromEntries(Object.entries(value).map(([key, v]) => {
@@ -28,5 +44,5 @@ export function captureDetail(input: unknown, maxBytes = 96 * 1024) {
   const value = clean(input), json = JSON.stringify(value), bytes = new TextEncoder().encode(json).length;
   // A preview is never represented as the complete result. Leave room for JSON escaping.
   return { value: bytes > maxBytes ? { preview: json.slice(0, Math.floor(maxBytes / 6)) } : value as JsonValue,
-    redacted, truncated: bytes > maxBytes, bytes };
+    redacted, truncated: bytes > maxBytes || truncatedStrings, bytes };
 }

@@ -12,7 +12,7 @@ import {
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
-import { runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
+import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { loadKnowledgeTree } from "./knowledge.js";
 
@@ -262,7 +262,7 @@ export class MachineWorker {
         try {
           if (saved?.approvalPending && name === "call_paid_service" && economy)
             await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
-          output = await invoke();
+          output = capToolResult(await invoke());
           // Keep durable tool diagnostics consistent with what the model sees.
           if (financialState && name === "get_budget_status") output = { ok: true, data: latestFinancialState };
           if (financialState && name === "complete_session" && output.ok && output.data && typeof output.data === "object")

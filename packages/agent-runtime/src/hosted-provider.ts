@@ -2,6 +2,7 @@ import { FinancialStateSchema, parseNetworkBalances, type FinancialState, Contex
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
+import { boundResponse } from "@opencrowd/economy";
 import type { DynamicToolDefinition, LlmProvider, LlmResponse } from "./index.js";
 import { RuntimePause, type HostedToolExecutor } from "./worker.js";
 
@@ -174,7 +175,10 @@ export function createHostedToolExecutor(options: HostedBridgeOptions): HostedTo
     }
     try {
       const result = await postHostedTool(options, name, { ...args, ...(source === undefined ? {} : { source }) }, { signal: context.signal });
-      return (result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error ?? "tool failed" }) as ToolResult;
+      // vault_request returns an upstream HTTP body: media in it becomes an
+      // artifact and the rest is capped, exactly as a paid response is.
+      if (result.ok) return { ok: true, data: await boundResponse(context.session, result.data) };
+      return { ok: false, error: result.error ?? "tool failed" } as ToolResult;
     } catch (error) {
       if (context.signal?.aborted) throw error;
       if ((error as Error).message === "tool request exceeds 1 MiB") return { ok: false, error: "tool request exceeds 1 MiB; reduce the service source" };

@@ -788,3 +788,77 @@ it("disabling CrowdCode drops pending review gates without changing spending pol
   await blocked.execute("set_crowdcode_enabled", { enabled: false });
   expect(await blocked.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 })).toMatchObject({ ok: false, error: expect.stringMatching(/purchases are disabled/) });
 });
+
+describe("external response bodies", () => {
+  /** A real RIFF/WAVE header, which is what the media sniffer reads. */
+  function wav(dataBytes: number): Buffer {
+    const header = Buffer.alloc(44);
+    header.write("RIFF", 0, "latin1");
+    header.writeUInt32LE(36 + dataBytes, 4);
+    header.write("WAVEfmt ", 8, "latin1");
+    header.writeUInt32LE(16, 16);
+    header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+    header.writeUInt32LE(24000, 24); header.writeUInt32LE(48000, 28);
+    header.writeUInt16LE(2, 32); header.writeUInt16LE(16, 34);
+    header.write("data", 36, "latin1");
+    header.writeUInt32LE(dataBytes, 40);
+    return Buffer.concat([header, Buffer.alloc(dataBytes, 7)]);
+  }
+
+  it("stores a paid TTS response as an audio artifact instead of inline base64", async () => {
+    // The x402.forgemesh.io/tts shape that OOM-killed a 512 MB executor.
+    const audio = wav(7_533_936);
+    const agentcash = new MockAgentCashAdapter({
+      fetchResults: { [ENDPOINT]: { ok: true, ambiguous: false, status: 200, authMode: "paid",
+        data: { audio_base64: audio.toString("base64"), format: "wav" },
+        payment: { paidUsd: 0.01, rail: "x402-base", reference: "0xmocktts", payTo: "0xmockpayee" } } }
+    });
+    const { session, gateway } = await setup({ agentcash });
+    await inspect(gateway);
+
+    const result = await gateway.execute("call_paid_service", { url: ENDPOINT, method: "POST", body: { text: "hello" }, max_cost_cents: 5 });
+
+    expect(result.ok).toBe(true);
+    const data = result.data as { data?: { audio_base64?: { artifact_path?: string; bytes?: number; media_type?: string } }; artifact_path?: string };
+    const media = data.data?.audio_base64;
+    expect(media).toMatchObject({ bytes: audio.length, media_type: "audio/wav" });
+    expect(media!.artifact_path).toMatch(/^artifacts\/generated\/[0-9a-f]{20}\.wav$/);
+    // The bytes are on disk, byte for byte, and nowhere in the tool result.
+    expect((await readFile(join(session.sessionDir, media!.artifact_path!))).equals(audio)).toBe(true);
+    expect(JSON.stringify(result).length).toBeLessThan(2_000);
+    // Nor in the saved service-call record, which used to re-serialize the body.
+    const saved = await readFile(join(session.sessionDir, data.artifact_path!), "utf8");
+    expect(saved.length).toBeLessThan(2_000);
+    expect(saved).not.toContain("UklGR");
+  });
+
+  it("truncates a large non-media string instead of copying it into the result", async () => {
+    const blob = "Q".repeat(3 * 1024 * 1024);
+    const agentcash = new MockAgentCashAdapter({
+      fetchResults: { [ENDPOINT]: { ok: true, ambiguous: false, status: 200, authMode: "paid",
+        data: { embedding: blob },
+        payment: { paidUsd: 0.01, rail: "x402-base", reference: "0xmockblob", payTo: "0xmockpayee" } } }
+    });
+    const { gateway } = await setup({ agentcash });
+    await inspect(gateway);
+
+    const result = await gateway.execute("call_paid_service", { url: ENDPOINT, method: "POST", body: { q: "x" }, max_cost_cents: 5 });
+
+    const embedding = (result.data as { data?: { embedding?: string } }).data?.embedding ?? "";
+    expect(embedding.length).toBeLessThan(200_000);
+    expect(embedding).toContain("[truncated ");
+  });
+
+  it("bounds an unpaid read the same way as a paid call", async () => {
+    const audio = wav(3_000_000);
+    const url = "https://svc.example/jobs/42";
+    const agentcash = new MockAgentCashAdapter({ readResults: { [url]: { status: "done", mp3: `data:audio/wav;base64,${audio.toString("base64")}` } } });
+    const { gateway } = await setup({ agentcash });
+
+    const result = await gateway.execute("read_service", { url });
+
+    expect(result.ok).toBe(true);
+    expect((result.data as { mp3?: { media_type?: string } }).mp3).toMatchObject({ bytes: audio.length, media_type: "audio/wav" });
+    expect(JSON.stringify(result).length).toBeLessThan(500);
+  });
+});
