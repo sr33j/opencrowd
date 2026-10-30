@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +30,31 @@ describe("durable JSONL worker", () => {
     const messages = await readFile(join(home,"workspace/sessions/session-1/messages.jsonl"),"utf8");
     expect(messages.match(/Write a report/g)).toHaveLength(2); // user prompt plus artifact tool content
     expect(messages.split('\n').filter(Boolean).map(l=>JSON.parse(l).message).filter(m=>m.role==='user')).toHaveLength(1);
+  });
+
+  it("repairs a durable state that already holds an oversized tool result, instead of dying on it", async () => {
+    // Agent f047e0ef kept 21 MB of base64 audio in worker.json after the run
+    // that fetched it was OOM-killed, and every boot afterwards was OOM-killed
+    // 17 seconds in re-serializing it. The state has to be able to recover.
+    const home = await root(); const events: Event[] = [];
+    const options = { agentHome: home, provider: vi.fn(() => createWorkerDemoProvider()), output: (line: string) => { events.push(JSON.parse(line)); } };
+    await new MachineWorker(options).initialize();
+    const statePath = join(home, "metadata/worker.json");
+    const poisoned = JSON.parse(await readFile(statePath, "utf8"));
+    poisoned.runs = { "run-0": { start: start("command-0", "run-0"), sessionId: "session-1", commandId: "command-0", tools: {
+      "0:call-1": { digest: "d", result: { ok: true, data: { audio_base64: "A".repeat(3_000_000) } } } } } };
+    await writeFile(statePath, JSON.stringify(poisoned));
+    expect((await readFile(statePath, "utf8")).length).toBeGreaterThan(3_000_000);
+
+    const recovered = new MachineWorker(options);
+    await recovered.initialize();
+
+    const repaired = await readFile(statePath, "utf8");
+    expect(repaired.length).toBeLessThan(400_000);
+    expect(JSON.parse(repaired).runs["run-0"].tools["0:call-1"].result.data.audio_base64).toContain("[truncated ");
+    // Still a working worker, not just a smaller file.
+    await recovered.handleLine(JSON.stringify(start())); await recovered.drain();
+    expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
   });
 
   it("pauses and resumes a pending model operation using the same ID without appending the prompt", async () => {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.15.2 — 2026-10-30
+
+- **An agent whose durable state already held an oversized tool result can start again.** 0.15.1 stopped new ones from being written, but a `worker.json` poisoned before it shipped was re-serialized in full on every state write, so one agent was killed by the kernel 17 seconds into every boot. A state file over 2 MiB is now capped and rewritten as it loads, so it repairs itself on the first start.
+
 ## 0.15.1 — 2026-10-30
 
 - **Media a paid service returns is saved as a file instead of being held in memory.** Extraction used to recognise only an OpenAI-style `b64_json` field, so a text-to-speech service that answered `{"audio_base64": "UklGR…"}` left 10 MB of base64 inline — in the tool result, the saved service-call record, the run journal, the tool message and the diagnostic capture at once. A 512 MB hosted agent was killed by the kernel mid-run. Any base64 string (or `data:<mime>;base64,` URI) whose decoded bytes carry a known media signature — WAV, MP3, OGG, FLAC, MP4/M4A, QuickTime, WebM, AVI, PNG, JPEG, GIF, WebP or PDF — now becomes a content-addressed artifact and is replaced with `{ artifact_path, bytes, media_type }`. The 24 MiB limit is unchanged. This covers `call_paid_service`, `read_service` and the hosted `vault_request`.
