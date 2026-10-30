@@ -15,6 +15,8 @@ export interface MockAgentCashOptions {
   /** Scripted fetch outcomes keyed by URL; a function receives the request. */
   fetchResults?: Record<string, PaidFetchResult | ((request: PaidFetchRequest) => PaidFetchResult)>;
   defaultFetchResult?: PaidFetchResult;
+  /** Scripted unpaid (SIWX) read bodies keyed by URL. */
+  readResults?: Record<string, unknown>;
 }
 
 export class MockAgentCashAdapter implements AgentCashAdapter {
@@ -71,6 +73,12 @@ export class MockAgentCashAdapter implements AgentCashAdapter {
         payTo: "0xmockpayee"
       }
     };
+  }
+
+  async read(url: string): Promise<McpCallResult> {
+    return url in (this.options.readResults ?? {})
+      ? { ok: true, data: this.options.readResults![url] }
+      : { ok: false, error: `no scripted read for ${url}` };
   }
 
   async bridge(input: { from: string; to: string; amountUsd: number }): Promise<McpCallResult> {

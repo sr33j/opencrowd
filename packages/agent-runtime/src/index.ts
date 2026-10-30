@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { contextLimits, isOutputLimitFinishReason, FinancialStateSchema, type FinancialState } from "@opencrowd/protocol";
+import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState } from "./context.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -821,6 +821,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
       "When the user says CrowdCode on/off, call set_crowdcode_enabled; default to session scope unless they ask for a persistent default. Use list_my_reviews and delete_my_review for user-directed review management, including while off. Before finishing a substantive task, consider concrete paid services that would fix real shortcomings and submit qualifying demand with request_service (input, output, problem, price_per_call), unless CrowdCode is off. Never invent a purchase or demand.",
+      "Generated media never reaches you as base64 you can read: when a service returns audio, an image, video or a PDF, the runtime has already written the bytes to a file and handed you {artifact_path, bytes, media_type} instead. Work from that path with run_shell — ffmpeg, python3 and node are installed, so converting a wav to the mp3 the owner asked for is one command — and leave the deliverable under artifacts/ in the format they asked for. Never pay a second time for a file you already hold.",
       "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",
       ...(options.promptSections ?? [])
     );
@@ -1125,6 +1126,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       } else {
         result = { ok: false, error: `unknown tool: ${call.name}` };
       }
+      result = capToolResult(result);
       await refreshFinancialState(); // includes a settled service payment and changed approvals
       const budgetAfterToolCall = currentBudget();
       if (options.financialState && call.name === "get_budget_status") result = { ok: true, data: financial };
@@ -1522,6 +1524,18 @@ async function completeMockLlmCall(
     });
     throw error;
   }
+}
+
+/**
+ * A tool result is copied into the model message, the progress event, the run
+ * journal, the event details and the telemetry preview. Cap each string once,
+ * here, so no single tool result can be large enough to matter five times
+ * over. The model only ever sees a 12k summary of it (truncateForModel), and
+ * media from a paid service has already become an artifact by this point.
+ */
+export function capToolResult(result: ToolResult): ToolResult {
+  return result.data === undefined ? result
+    : { ...result, data: capStrings(result.data, MAX_EXTERNAL_STRING_CHARS) as ToolResult["data"] };
 }
 
 function toolMessagePayload(payload: Record<string, unknown>): Record<string, unknown> {

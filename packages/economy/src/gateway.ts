@@ -2,6 +2,7 @@ import { CrowdCodePreferences } from "./crowdcode-preferences.js";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { extractMedia } from "./media.js";
+import { capStrings, MAX_EXTERNAL_STRING_CHARS } from "@opencrowd/protocol";
 import {
   appendLedgerEntry, SpendingApprovalRequired, SpendingDeclined,
   finalizeReservation,
@@ -175,7 +176,7 @@ export class EconomyGateway {
         case "review_paid_service":
           return await this.reviewPaidService(args);
         case "read_service":
-          return this.options.agentcash.read ? await this.options.agentcash.read(String(args.url ?? "")) : { ok: false, error: "Authenticated reads are unavailable" };
+          return await this.readService(args);
         case "bridge_usdc":
           return await this.bridgeUsdc(args, operationId);
         default:
@@ -215,6 +216,14 @@ export class EconomyGateway {
   private async serviceEvidence(endpoint: string): Promise<ServiceEvidence> {
     return await this.crowdcodeEnabled() ? this.options.crowdcode.getServiceScore({ apiEndpoint: endpoint })
       : { ok: true, unproven: true, summary: "CrowdCode is off; reputation checks and submissions are disabled." };
+  }
+
+  /** An unpaid read is still an external body: bound it like a paid one. */
+  private async readService(args: Record<string, unknown>): Promise<ToolResult> {
+    if (!this.options.agentcash.read) return { ok: false, error: "Authenticated reads are unavailable" };
+    const result = await this.options.agentcash.read(String(args.url ?? ""));
+    if (!result.ok || result.data === undefined) return result as ToolResult;
+    return { ...result, data: await boundResponse(this.options.session, result.data) } as ToolResult;
   }
 
   private async getWalletStatus(): Promise<ToolResult> {
@@ -401,7 +410,10 @@ export class EconomyGateway {
 
     // A transport failure may have no trustworthy response body. Missing
     // receipt metadata occurs after a real response, so preserve that body.
-    if (result.data) result.data = await extractMedia(session, result.data);
+    // Media leaves the process for an artifact and whatever text is left is
+    // capped, before this body reaches the tool result, the saved artifact,
+    // the run journal and the event details.
+    if (result.data) result.data = await boundResponse(session, result.data);
     const artifact = result.ambiguityReason === "transport" ? undefined : await saveArtifact(
       session,
       `service-calls/${Date.now()}-${slugUrl(endpoint)}.json`,
@@ -717,6 +729,17 @@ export class EconomyGateway {
   async listPurchasesRedacted(): Promise<Record<string, unknown>[]> {
     return (await listPurchases(this.options.session)).map(redactPurchase);
   }
+}
+
+/**
+ * What an external service returned, made safe to keep: media becomes an
+ * artifact and every remaining string is capped. Both halves matter — the
+ * artifact keeps megabytes of audio or video out of every copy we make of a
+ * tool result, and the cap stops a shape we have not thought of from doing
+ * the same thing again.
+ */
+export async function boundResponse(session: SessionState, data: unknown): Promise<unknown> {
+  return capStrings(await extractMedia(session, data), MAX_EXTERNAL_STRING_CHARS);
 }
 
 /** GET and HEAD send a flat object's fields as query parameters instead of a body. */

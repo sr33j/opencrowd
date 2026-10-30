@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.1 — 2026-10-30
+
+- **Media a paid service returns is saved as a file instead of being held in memory.** Extraction used to recognise only an OpenAI-style `b64_json` field, so a text-to-speech service that answered `{"audio_base64": "UklGR…"}` left 10 MB of base64 inline — in the tool result, the saved service-call record, the run journal, the tool message and the diagnostic capture at once. A 512 MB hosted agent was killed by the kernel mid-run. Any base64 string (or `data:<mime>;base64,` URI) whose decoded bytes carry a known media signature — WAV, MP3, OGG, FLAC, MP4/M4A, QuickTime, WebM, AVI, PNG, JPEG, GIF, WebP or PDF — now becomes a content-addressed artifact and is replaced with `{ artifact_path, bytes, media_type }`. The 24 MiB limit is unchanged. This covers `call_paid_service`, `read_service` and the hosted `vault_request`.
+- Every string that reaches a tool result, a run event or a diagnostic capture is capped at 128 KiB and says how much was cut, so no response shape can exhaust a small agent's memory. `captureDetail` cuts each string before scrubbing it rather than after.
+- The agent is told that generated media arrives as a file path, so it converts or delivers that file instead of looking for base64 it will never see.
+
 ## 0.15.0 — 2026-10-29
 
 - **`venice` now buys Venice per call through CrowdCode.** Each request is quoted by CrowdCode's Venice service (run by its `venice-reseller` agent) and paid with x402 `upto` USDC on Base from the AgentCash wallet. It is settled for the tokens actually used at Venice's price plus 20% (at least $0.001, never more than the quote). There is no $5 minimum and no prepaid credit, the models are the same, and the ledger books what settled. The payee is pinned to the reseller.
