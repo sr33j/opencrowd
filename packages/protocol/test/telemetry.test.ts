@@ -25,3 +25,24 @@ it("keeps the whole capture bounded when many strings are each under the per-str
   // 200 x 50k would be 10 MB; the shared budget stops it at a multiple of maxBytes.
   expect(d.bytes).toBeLessThan(4096*12);
 });
+it("redacts a credential in a URI of any scheme, not only a web one",()=>{
+  // A hosted agent's stderr is scrubbed with this. The DSN a failing psql,
+  // redis-cli or Python traceback prints used to pass through whole, because
+  // the rule only knew about http and https.
+  const d=captureDetail({stderr:[
+    'psql: error: connection to server at "db.internal" failed: FATAL: password authentication failed',
+    'connection string was postgres://app:hunter2@db.internal:5432/opencrowd',
+    'redis://default:r3disPass@cache.internal:6379 refused',
+    'mongodb+srv://svc:m0ng0@cluster0.example.net/admin timed out',
+    'fetched https://user:webpass@api.example.com/v1/items',
+  ].join('\n')});
+  const text=String((d.value as {stderr:string}).stderr);
+  expect(d.redacted).toBe(true);
+  for(const secret of ['hunter2','r3disPass','m0ng0','webpass']) expect(text).not.toContain(secret);
+  expect(text).toContain('postgres://[REDACTED]@db.internal:5432/opencrowd');
+  expect(text).toContain('redis://[REDACTED]@cache.internal:6379');
+  expect(text).toContain('mongodb+srv://[REDACTED]@cluster0.example.net/admin');
+  // The diagnostic itself is intact: this is redaction, not suppression.
+  expect(text).toContain('password authentication failed');
+  expect(text).toContain('cluster0.example.net');
+});

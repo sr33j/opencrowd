@@ -9,7 +9,12 @@ export function scrubText(text: string): string {
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [REDACTED]")
     .replace(/\b(?:sk-[A-Za-z0-9_-]{16,}|ph[csx]_[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)\b/g, "[REDACTED]")
     .replace(/\b((?:[A-Z_]*(?:SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_TOKEN)[A-Z_]*|authorization|cookie|signature|x-amz-signature)\s*[=:]\s*)[^\s&,;]+/gi, "$1[REDACTED]")
-    .replace(/(https?:\/\/)[^\s/@]+:[^\s/@]+@/g, "$1[REDACTED]@");
+    // Any scheme, not just http(s). A hosted agent's own stderr is scrubbed
+    // with this, and the credential that turns up there is as likely to be in
+    // a `postgres://user:password@host` DSN printed by psql, a failed
+    // `redis://`, `mongodb+srv://` or `amqp://` connection, or a Python
+    // traceback quoting the URL it was given, as it is to be in a web URL.
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/gi, "$1[REDACTED]@");
 }
 
 export function captureDetail(input: unknown, maxBytes = 96 * 1024) {
