@@ -1,5 +1,6 @@
 import { checkEndpointSchema, discoverOriginSchema } from "@agentcash/discovery";
 import type { PaymentNetwork } from "@opencrowd/core";
+import { deadline, DeadlineExceeded, withDeadline } from "@opencrowd/protocol";
 import type { PaymentRail } from "./agentcash.js";
 import type { ServiceSearch } from "./crowdcode.js";
 import type { McpCallResult } from "./mcp.js";
@@ -7,6 +8,22 @@ import {
   BASE_NETWORK, classifyOffer, describeRails, localRails, NETWORK_CAIP2, networkLabel, payableNetworks, RAIL_NETWORK, selectOffer,
   type OfferNetwork, type ServiceOffer
 } from "./offers.js";
+
+/**
+ * One unauthenticated probe of a stranger's endpoint. The abort signal below
+ * asks for the same thing; this is what holds when the signal cannot be
+ * honoured, which is the case that cost run 47a629fc its nine minutes.
+ */
+export const PROBE_DEADLINE_MS = 15_000;
+/**
+ * The whole probe sweep behind one search or origin listing. Candidates come
+ * from third-party catalogs, so the count is not ours to choose: without a
+ * shared budget a search costs as much as the slowest endpoints in a
+ * directory, multiplied by however many of them a catalog happens to list.
+ */
+export const VERIFY_SWEEP_DEADLINE_MS = 60_000;
+/** One catalog query (AgentCash) or one ranking call (CrowdCode). */
+export const CATALOG_DEADLINE_MS = 45_000;
 
 /** CrowdCode's cross-chain ranking of a search (`find_service`), supplied by the gateway when CrowdCode is on. */
 export type ServiceRanker = (search: ServiceSearch) => Promise<McpCallResult>;
@@ -43,13 +60,20 @@ export class BaseServiceDiscovery {
     this.rails = options.rails ?? localRails(options.paymentNetwork);
   }
 
-  async inspect(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult> {
+  async inspect(input: { url: string; method?: string; body?: unknown }, budgetMs = PROBE_DEADLINE_MS): Promise<McpCallResult> {
     const key = `${input.method ?? "POST"} ${input.url}`;
     const cached = this.cache.get(key);
     if (input.body === undefined && cached && cached.until > Date.now()) return { ok: true, data: cached.data };
-    const result = await checkEndpointSchema({ url: input.url, probe: true,
-      sampleInputBody: input.body && typeof input.body === "object" ? input.body as Record<string, unknown> : undefined,
-      signal: AbortSignal.timeout(10000) });
+    if (budgetMs <= 0) return { ok: false, error: "Endpoint inspection ran out of time before it started" };
+    let result;
+    try {
+      result = await withDeadline(() => checkEndpointSchema({ url: input.url, probe: true,
+        sampleInputBody: input.body && typeof input.body === "object" ? input.body as Record<string, unknown> : undefined,
+        signal: AbortSignal.timeout(Math.min(10000, budgetMs)) }), budgetMs, `probe of ${originOf(input.url)}`);
+    } catch (error) {
+      if (!(error instanceof DeadlineExceeded)) throw error;
+      return { ok: false, error: `${originOf(input.url)} did not answer the inspection probe within ${Math.round(budgetMs / 1000)}s` };
+    }
     if (!result.found) return { ok: false, error: result.message ?? "Endpoint inspection failed" };
     const advisory = result.advisories.find(a => a.method === (input.method ?? "POST").toUpperCase());
     if (!advisory) return { ok: false, error: "The endpoint does not advertise this method" };
@@ -96,18 +120,29 @@ export class BaseServiceDiscovery {
     return `Pays ${networkLabel(offer)}${offer.network_name === preferred ? "" : ` (${reason})`}. ${quote}`;
   }
 
-  /** Probe candidates in order and keep the first `limit` this payer can settle. */
-  private async verified(candidates: any[], limit: number) {
+  /**
+   * Probe candidates in order and keep the first `limit` this payer can
+   * settle, within one shared time budget.
+   *
+   * `incomplete` is true when the budget ran out with candidates left. The
+   * caller says so in the note: a short list of real, payable services is a
+   * usable answer, and far better than the nine-minute silence this sweep used
+   * to be capable of. Returning nothing at all would not be.
+   */
+  private async verified(candidates: any[], limit: number, budgetMs = VERIFY_SWEEP_DEADLINE_MS) {
     const services: any[] = [];
+    const budget = deadline(budgetMs);
+    let incomplete = false;
     // Small batches bound probes without serializing a whole provider catalog.
     for (let i = 0; i < candidates.length && services.length < limit; i += 4) {
+      if (budget.expired()) { incomplete = true; break; }
       const batch = await Promise.all(candidates.slice(i, i + 4).map(async c => {
         try {
           const endpoint = c.endpoint ?? new URL(c.path, typeof c.origin === "string" ? c.origin : c.origin?.url).href;
           // Catalogs do not always name the method: try POST, then GET.
           let method = c.method ?? "POST";
-          let inspection = await this.inspect({ url: endpoint, method });
-          if (!inspection.ok && !c.method) inspection = await this.inspect({ url: endpoint, method: method = "GET" });
+          let inspection = await this.inspect({ url: endpoint, method }, budget.slice(PROBE_DEADLINE_MS));
+          if (!inspection.ok && !c.method) inspection = await this.inspect({ url: endpoint, method: method = "GET" }, budget.slice(PROBE_DEADLINE_MS));
           const schema = inspection.data as any;
           if (!inspection.ok || !schema?.payable) return undefined;
           // Every network this service can be paid on, so a caller short on
@@ -123,7 +158,16 @@ export class BaseServiceDiscovery {
       }));
       services.push(...batch.filter(Boolean));
     }
-    return services.slice(0, limit);
+    // A budget that ran out inside the last batch leaves probes unanswered too.
+    if (budget.expired() && services.length < limit) incomplete = true;
+    return { services: services.slice(0, limit), incomplete };
+  }
+
+  /** What the model is told when the probe budget cut a candidate list short. */
+  private partialNote(incomplete: boolean): string {
+    return incomplete
+      ? " Some candidates were still being probed when the search's time budget ran out, so this list is partial; search again or narrow the query if nothing here fits."
+      : "";
   }
 
   /** The networks this payer settles, as CrowdCode names them. */
@@ -140,36 +184,63 @@ export class BaseServiceDiscovery {
   async search(query: string, options: SearchOptions = {}): Promise<McpCallResult> {
     const limit = Math.min(20, Math.max(1, options.limit ?? 8));
     const { rank, ...searchOptions } = options;
+    // Each leg is bounded on its own: a catalog that stops answering must cost
+    // this search one wait, not the whole tool call.
     const [result, balances] = await Promise.all([
-      this.searchApi(query, { ...searchOptions, limit: Math.min(50, limit * 3) })
-        .catch((error: Error): McpCallResult => ({ ok: false, error: error.message })),
-      rank && this.options.balances ? this.options.balances().catch(() => undefined) : Promise.resolve(undefined)
+      bounded(() => this.searchApi(query, { ...searchOptions, limit: Math.min(50, limit * 3) }), CATALOG_DEADLINE_MS, "AgentCash search"),
+      rank && this.options.balances
+        ? withDeadline(() => this.options.balances!(), CATALOG_DEADLINE_MS, "wallet balance read").catch(() => undefined)
+        : Promise.resolve(undefined)
     ]);
     const candidates = result.ok ? searchResults(result.data) : [];
     if (rank) {
-      const ranking = await rank({ query, networks: this.networks(), ...(balances ? { balances } : {}),
+      const ranking = await bounded(() => rank({ query, networks: this.networks(), ...(balances ? { balances } : {}),
         candidates: candidates.map(agentCashCandidate).filter((candidate): candidate is Record<string, unknown> => candidate !== undefined),
-        limit: Math.min(25, limit * 2) }).catch((error: Error): McpCallResult => ({ ok: false, error: error.message }));
+        limit: Math.min(25, limit * 2) }), CATALOG_DEADLINE_MS, "CrowdCode ranking");
       const services = (ranking.data as { services?: unknown } | undefined)?.services;
       if (ranking.ok && Array.isArray(services)) {
         const ordered = services.filter((service: any) => typeof service?.endpoint === "string")
           .map((service: any) => ({ endpoint: service.endpoint, method: service.method ?? undefined, name: service.name, ranking: service }));
-        return { ok: true, data: { services: await this.verified(ordered, limit), note: RANKED_NOTE } };
+        const verified = await this.verified(ordered, limit);
+        return { ok: true, data: { services: verified.services, note: `${RANKED_NOTE}${this.partialNote(verified.incomplete)}` } };
       }
     }
     if (!result.ok) return result;
-    return { ok: true, data: { services: await this.verified(candidates, limit),
-      note: `AgentCash discovery${rank ? " (CrowdCode ranking unavailable)" : ""}, verified ${describeRails(this.rails)}. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.` } };
+    const verified = await this.verified(candidates, limit);
+    return { ok: true, data: { services: verified.services,
+      note: `AgentCash discovery${rank ? " (CrowdCode ranking unavailable)" : ""}, verified ${describeRails(this.rails)}. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.${this.partialNote(verified.incomplete)}` } };
   }
 
   async discoverEndpoints(origin: string): Promise<McpCallResult> {
-    const result = await discoverOriginSchema({ target: origin, signal: AbortSignal.timeout(10000) });
+    let result;
+    try {
+      result = await withDeadline(() => discoverOriginSchema({ target: origin, signal: AbortSignal.timeout(10000) }),
+        PROBE_DEADLINE_MS, `discovery of ${origin}`);
+    } catch (error) {
+      if (!(error instanceof DeadlineExceeded)) throw error;
+      return { ok: false, error: `${origin} did not answer its discovery document within ${Math.round(PROBE_DEADLINE_MS / 1000)}s` };
+    }
     if (!result.found) return { ok: false, error: result.message ?? "Provider discovery failed" };
     const candidates = result.endpoints.filter(e => e.protocols?.some(protocol => protocol === "x402" || protocol === "mpp")).map(e => ({ ...e, origin: result.origin }));
-    return { ok: true, data: { services: await this.verified(candidates, 50), guidance: result.guidance,
+    const verified = await this.verified(candidates, 50);
+    return { ok: true, data: { services: verified.services, guidance: result.guidance,
       reads: result.endpoints.filter(e => ["siwx", "unprotected"].includes(e.authMode ?? "")),
       note: "Use read_service to poll job URLs. Do not buy the same generation twice." } };
   }
+}
+
+/**
+ * One catalog call as a result rather than an exception: a directory that is
+ * slow, down or rude is an ordinary condition of discovery, and the search
+ * still has the other catalog's answer to offer.
+ */
+function bounded(work: () => Promise<McpCallResult>, timeoutMs: number, stage: string): Promise<McpCallResult> {
+  return withDeadline(work, timeoutMs, stage).catch((error: Error): McpCallResult => ({ ok: false, error: error.message }));
+}
+
+/** The origin of a URL, for an error message that names the slow party. */
+function originOf(url: string): string {
+  try { return new URL(url).origin; } catch { return url; }
 }
 
 function searchResults(raw: any): any[] {

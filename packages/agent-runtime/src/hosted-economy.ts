@@ -22,7 +22,7 @@ import {
   type SearchOptions,
   type WalletStatusResult
 } from "@opencrowd/economy";
-import { SERVICE_GATEWAY_TIMEOUT_MS } from "@opencrowd/protocol";
+import { SERVICE_GATEWAY_TIMEOUT_MS, withDeadline } from "@opencrowd/protocol";
 import { HostedToolTimeout, postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
 
 /**
@@ -37,6 +37,13 @@ export const DEFAULT_CROWDCODE_BASE = "https://crowdcode-backend.onrender.com";
 const LIST_CACHE_MS = 60_000;
 /** CrowdCode's search waits on public catalogs (about 8s each, in parallel). */
 const FIND_TIMEOUT_MS = 20_000;
+/**
+ * CrowdCode's own directory reads (the service list, one service's reviews).
+ * They gate a purchase, so they cannot be skipped — but they are two HTTP
+ * calls to one service we operate, and nothing about them justifies a wait
+ * longer than this.
+ */
+const DIRECTORY_TIMEOUT_MS = 20_000;
 /**
  * The supervisor waits SERVICE_GATEWAY_TIMEOUT_MS on the gateway, which waits
  * SERVICE_PROVIDER_TIMEOUT_MS on the provider. The runtime must never be the
@@ -104,11 +111,13 @@ class ServiceDirectory {
     if (!force && this.cache && Date.now() - this.cache.fetchedAt < LIST_CACHE_MS) {
       return this.cache.services;
     }
-    const response = await this.fetcher(`${this.base}/api/services`, { headers: { accept: "application/json" } });
+    const response = await withDeadline(() => this.fetcher(`${this.base}/api/services`,
+      { headers: { accept: "application/json" }, signal: AbortSignal.timeout(DIRECTORY_TIMEOUT_MS) }),
+      DIRECTORY_TIMEOUT_MS, "CrowdCode service list");
     if (!response.ok) {
       throw new Error(`CrowdCode service list unavailable (HTTP ${response.status})`);
     }
-    const payload = await response.json() as unknown;
+    const payload = await withDeadline(() => response.json() as Promise<unknown>, DIRECTORY_TIMEOUT_MS, "CrowdCode service list body");
     const rows = Array.isArray(payload) ? payload : objectValue(payload)?.services;
     const services = (Array.isArray(rows) ? rows : []).map(parseListedService).filter((row): row is ListedService => row !== undefined);
     for (const service of services) {
@@ -130,8 +139,10 @@ class ServiceDirectory {
   }
 
   async detail(serviceId: string): Promise<{ status: number; body: Record<string, unknown> | undefined }> {
-    const response = await this.fetcher(`${this.base}/api/services/${encodeURIComponent(serviceId)}`, { headers: { accept: "application/json" } });
-    const body = objectValue(await response.json().catch(() => undefined));
+    const response = await withDeadline(() => this.fetcher(`${this.base}/api/services/${encodeURIComponent(serviceId)}`,
+      { headers: { accept: "application/json" }, signal: AbortSignal.timeout(DIRECTORY_TIMEOUT_MS) }),
+      DIRECTORY_TIMEOUT_MS, "CrowdCode service detail");
+    const body = objectValue(await withDeadline(() => response.json(), DIRECTORY_TIMEOUT_MS, "CrowdCode service detail body").catch(() => undefined));
     return { status: response.status, body };
   }
 }
@@ -321,13 +332,13 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
   /** The supervisor found no 402: the endpoint is free, so the worker fetches it itself. */
   private async fetchUnpaid(url: string, method: string, body: string | undefined, headers?: Record<string, string>): Promise<PaidFetchResult> {
     try {
-      const response = await this.fetcher(url, {
+      const response = await withDeadline(() => this.fetcher(url, {
         method,
         signal: AbortSignal.timeout(FREE_FETCH_TIMEOUT_MS),
         headers: { accept: "application/json", ...(body !== undefined ? { "content-type": "application/json" } : {}), ...(headers ?? {}) },
         ...(body !== undefined && method !== "GET" ? { body } : {})
-      });
-      const text = await response.text();
+      }), FREE_FETCH_TIMEOUT_MS, "unpaid request");
+      const text = await withDeadline(() => response.text(), FREE_FETCH_TIMEOUT_MS, "unpaid response body");
       return {
         ok: response.status < 400,
         ambiguous: false,
@@ -464,11 +475,11 @@ export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
   /** CrowdCode's cross-chain search and ranking over its public API. */
   async findServices(search: ServiceSearch): Promise<McpCallResult> {
     try {
-      const response = await this.directory.fetcher(`${this.directory.base}/api/services/find`, {
+      const response = await withDeadline(() => this.directory.fetcher(`${this.directory.base}/api/services/find`, {
         method: "POST", signal: AbortSignal.timeout(FIND_TIMEOUT_MS),
         headers: { accept: "application/json", "content-type": "application/json" }, body: JSON.stringify(search)
-      });
-      const body = objectValue(await response.json().catch(() => undefined));
+      }), FIND_TIMEOUT_MS + 5_000, "CrowdCode ranking");
+      const body = objectValue(await withDeadline(() => response.json(), FIND_TIMEOUT_MS, "CrowdCode ranking body").catch(() => undefined));
       return response.ok && body?.ok !== false ? { ok: true, data: body } : { ok: false, error: `CrowdCode search failed (HTTP ${response.status})` };
     } catch (error) {
       return { ok: false, error: `CrowdCode search unavailable: ${(error as Error).message}` };

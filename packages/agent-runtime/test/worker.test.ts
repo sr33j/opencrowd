@@ -6,6 +6,7 @@ import { MachineWorker, RuntimePause, createWorkerDemoProvider } from "../src/wo
 import { type Command, type Event } from "@opencrowd/protocol";
 import { createSession, readArtifact } from "@opencrowd/core";
 import { runAgentTaskDetailed, type LoopCheckpoint } from "../src/index.js";
+import { toolDeadlineError, toolDeadlineMs } from "../src/tool-deadlines.js";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });
@@ -184,4 +185,42 @@ it("captures every model/tool input and exact failure output while redacting cre
   expect(calls).toHaveLength(1);expect(results).toHaveLength(1);
   expect(JSON.stringify(calls[0])).not.toContain('private-test-secret');
   expect(results[0].payload).toMatchObject({toolCallId:calls[0].payload.toolCallId,status:'error',details:{value:{output:{data:{stdout:'exact stdout\n',stderr:'exact stderr\n',exit_code:17}}}}});
+});
+
+it("abandons a tool that never returns and lets the model carry the turn on", async () => {
+  // The backstop below every tool's own deadline. Without it one tool that
+  // never answers is a run the owner never hears back from — run 47a629fc
+  // spent nine minutes inside find_paid_service and then failed, having
+  // already spent $0.57.
+  const home = await root(), events: Event[] = [];
+  let turn = 0;
+  const provider = { complete: async () => ++turn === 1
+    ? { content: "Reading the saved page", toolCalls: [{ id: "read-1", name: "read_file", arguments: { path: "page.html" } }] }
+    : { content: "That tool stalled, so I used the shell instead.", toolCalls: [] } };
+  const worker = new MachineWorker({ agentHome: home, provider: () => provider,
+    toolExecutor: () => new Promise(() => undefined), toolDeadlineMs: () => 1_200,
+    output: line => events.push(JSON.parse(line)) });
+  await worker.initialize();
+  await worker.handleLine(JSON.stringify(start()));
+  await worker.drain();
+  const finished = events.filter(event => event.type === "tool.finished");
+  expect(finished).toHaveLength(1);
+  expect(finished[0].payload).toMatchObject({ toolName: "read_file", status: "error" });
+  expect(finished[0].payload.error).toContain("did not finish within 1s");
+  expect(finished[0].payload.error).toContain("Nothing was charged");
+  // The run reaches its own end rather than dying with the tool.
+  expect(events.filter(event => event.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
+});
+
+it("tells the model a timed-out paid call may have been charged, and not to retry it", () => {
+  // Every other tool is safe to try again. A payment is not, so the backstop
+  // uses the same words the gateway uses for its own unknown outcomes.
+  expect(toolDeadlineError("call_paid_service", 480_000))
+    .toContain("its payment state is unknown");
+  expect(toolDeadlineError("call_paid_service", 480_000))
+    .toContain("must not be retried automatically");
+  expect(toolDeadlineError("find_paid_service", 180_000)).toContain("Nothing was charged");
+  // A heavy toolchain's shell command must never trip the backstop; its own
+  // ceiling is 45 minutes.
+  expect(toolDeadlineMs("run_shell")).toBeGreaterThan(2_700_000);
 });

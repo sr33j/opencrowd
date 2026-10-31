@@ -1,4 +1,4 @@
-import { FinancialStateSchema, parseNetworkBalances, type FinancialState, ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
+import { FinancialStateSchema, parseNetworkBalances, type FinancialState, ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, HOSTED_TOOL_BRIDGE_TIMEOUT_MS, HOSTED_CONTROL_TOOL_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
@@ -48,6 +48,12 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
           });
         });
         req.setTimeout(MODEL_BRIDGE_TIMEOUT_MS, () => req.destroy(new Error("Hosted bridge timed out")));
+        // The idle timer above cannot end a reply that keeps trickling, and a
+        // model call this process never stops waiting for is a run the owner
+        // never hears back from. The pause below is the honest answer.
+        const total = setTimeout(() => req.destroy(new Error("Hosted bridge exceeded its total deadline")), MODEL_BRIDGE_TIMEOUT_MS);
+        total.unref?.();
+        req.once("close", () => clearTimeout(total));
         req.on("error", reject); req.end(body);
       }).catch(error => {
         if (context?.signal?.aborted || error instanceof HostedRequestError || error instanceof ContextWindowExceeded) throw error;
@@ -147,8 +153,15 @@ export async function postHostedTool(options: HostedBridgeOptions, name: string,
         } catch (error) { reject(error); }
       });
     });
-    const timeoutMs = settings.timeoutMs ?? SERVICE_BRIDGE_TIMEOUT_MS;
+    const timeoutMs = settings.timeoutMs ?? HOSTED_TOOL_BRIDGE_TIMEOUT_MS;
+    // Two timers, because `setTimeout` on a request is an *idle* timer: it
+    // never fires while a reply keeps trickling in, and the supervisor queues
+    // every request behind the one in flight, so a slow neighbour pushes this
+    // one's first byte arbitrarily far out. The second timer is the total.
     req.setTimeout(timeoutMs, () => req.destroy(new HostedToolTimeout(name, timeoutMs)));
+    const total = setTimeout(() => req.destroy(new HostedToolTimeout(name, timeoutMs)), timeoutMs);
+    total.unref?.();
+    req.once("close", () => clearTimeout(total));
     req.on("error", reject); req.end(body);
   });
   if (typeof result?.ok !== "boolean") throw new Error("Invalid hosted tool response");
@@ -174,7 +187,12 @@ export function createHostedToolExecutor(options: HostedBridgeOptions): HostedTo
       catch (error) { return { ok: false, error: `entry could not be read: ${(error as Error).message}` }; }
     }
     try {
-      const result = await postHostedTool(options, name, { ...args, ...(source === undefined ? {} : { source }) }, { signal: context.signal });
+      // These three are brokered by control (an upload, a vault read, a
+      // deploy), which takes up to 170s of its own; the rest answer in seconds.
+      const timeoutMs = ["deploy_service", "request_secret", "vault_request"].includes(name)
+        ? HOSTED_CONTROL_TOOL_TIMEOUT_MS : undefined;
+      const result = await postHostedTool(options, name, { ...args, ...(source === undefined ? {} : { source }) },
+        { signal: context.signal, ...(timeoutMs ? { timeoutMs } : {}) });
       // vault_request returns an upstream HTTP body: media in it becomes an
       // artifact and the rest is capped, exactly as a paid response is.
       if (result.ok) return { ok: true, data: await boundResponse(context.session, result.data) };

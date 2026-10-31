@@ -1,4 +1,4 @@
-import { capStrings, captureDetail, MAX_EXTERNAL_STRING_CHARS, scrubText } from "@opencrowd/protocol";
+import { capStrings, captureDetail, DeadlineExceeded, MAX_EXTERNAL_STRING_CHARS, scrubText, withDeadline } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import {
 import type { EconomyGateway } from "@opencrowd/economy";
 import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
+import { toolDeadlineError, toolDeadlineMs } from "./tool-deadlines.js";
 import { loadKnowledgeTree } from "./knowledge.js";
 
 /** Above this the durable state is repaired on load rather than carried. Large
@@ -62,6 +63,8 @@ export interface WorkerOptions {
   financialState?: (run: CommandOf<"run.start">, session: SessionState) => Promise<import("@opencrowd/protocol").FinancialState>;
   now?: () => Date;
   id?: () => string;
+  /** Test hook: the backstop deadline for one tool call, in milliseconds. */
+  toolDeadlineMs?: (name: string) => number;
 }
 
 /** Durable single-agent process boundary. stdout is exclusively validated protocol. */
@@ -278,7 +281,7 @@ export class MachineWorker {
         try {
           if (saved?.approvalPending && name === "call_paid_service" && economy)
             await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
-          output = capToolResult(await invoke());
+          output = capToolResult(await this.withinDeadline(name, invoke));
           // Keep durable tool diagnostics consistent with what the model sees.
           if (financialState && name === "get_budget_status") output = { ok: true, data: latestFinancialState };
           if (financialState && name === "complete_session" && output.ok && output.data && typeof output.data === "object")
@@ -376,6 +379,24 @@ export class MachineWorker {
           error.outcome === "payment_unknown" ? RUN_FAILURE_MESSAGE : error.message);
       } else if (error instanceof SpendingDeclined) await this.finish(runId, run, "user_stopped", error.message);
       else await this.finish(runId, run, "failed", RUN_FAILURE_MESSAGE);
+    }
+  }
+
+  /**
+   * The backstop deadline around one tool call.
+   *
+   * A `RuntimePause` must still travel: an approval or a funding stop is the
+   * tool reporting a decision, not failing to answer. Everything else becomes
+   * an ordinary tool error, so the loop keeps the turn and the model chooses
+   * what to do instead of the owner losing the run.
+   */
+  private async withinDeadline(name: string, invoke: () => Promise<ToolResult>): Promise<ToolResult> {
+    const timeoutMs = (this.options.toolDeadlineMs ?? toolDeadlineMs)(name);
+    try {
+      return await withDeadline(invoke, timeoutMs, `tool ${name}`);
+    } catch (error) {
+      if (!(error instanceof DeadlineExceeded)) throw error;
+      return { ok: false, error: toolDeadlineError(name, timeoutMs) };
     }
   }
 

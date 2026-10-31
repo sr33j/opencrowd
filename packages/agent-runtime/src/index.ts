@@ -48,6 +48,7 @@ import type { SteeringInbox } from "./inbox.js";
 export * from "./x402-proxy.js";
 export * from "./knowledge.js";
 export * from "./context.js";
+export * from "./tool-deadlines.js";
 
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */

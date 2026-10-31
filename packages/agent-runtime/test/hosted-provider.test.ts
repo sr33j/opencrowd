@@ -5,7 +5,8 @@ import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { it, expect } from 'vitest';
-import { createHostedProvider } from '../src/hosted-provider.js';
+import { createHostedProvider, postHostedTool } from '../src/hosted-provider.js';
+import { HOSTED_CONTROL_TOOL_TIMEOUT_MS, HOSTED_TOOL_BRIDGE_TIMEOUT_MS, SERVICE_BRIDGE_TIMEOUT_MS } from '@opencrowd/protocol';
 
 it('uses a credential-free socket and preserves approval operation identity', async () => {
   const home = await mkdtemp(join(tmpdir(), 'oc-bridge-')), socketPath = join(home, 'bridge.sock');
@@ -62,3 +63,34 @@ it('survives SIGKILL after a completed tool and resumes the same model operation
     child.kill('SIGKILL'); server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve())); await rm(home,{recursive:true,force:true});
   }
 },15000);
+
+it('gives up on a hosted tool whose reply trickles forever, and sizes unpaid waits below the paid one', async () => {
+  // `setTimeout` on a request is an idle timer, so a supervisor that keeps the
+  // socket warm without finishing never trips it. The total deadline does.
+  const home = await mkdtemp(join(tmpdir(), 'oc-trickle-')), socketPath = join(home, 'bridge.sock');
+  const drips: NodeJS.Timeout[] = [];
+  const server = createServer(async (req, res) => {
+    for await (const chunk of req) void chunk;
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.write('{"ok":tr');
+    drips.push(setInterval(() => res.write(' '), 20));
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    await expect(postHostedTool({ socketPath, runId: 'run-1', sessionId: 'session-1' }, 'economy.balance', {}, { timeoutMs: 400 }))
+      .rejects.toMatchObject({ name: 'HostedToolTimeout', code: 'hosted_tool_timeout' });
+  } finally {
+    for (const drip of drips) clearInterval(drip);
+    server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+it('waits thirteen minutes only on calls that can already have moved money', () => {
+  // A wallet read used to inherit the payment ceiling. Nothing that cannot be
+  // charged deserves to hold a run for that long.
+  expect(HOSTED_TOOL_BRIDGE_TIMEOUT_MS).toBeLessThan(SERVICE_BRIDGE_TIMEOUT_MS);
+  expect(HOSTED_TOOL_BRIDGE_TIMEOUT_MS).toBeGreaterThan(60_000); // The supervisor's own cap on these.
+  expect(HOSTED_CONTROL_TOOL_TIMEOUT_MS).toBeGreaterThan(170_000); // Control's own cap on a deploy.
+  expect(HOSTED_CONTROL_TOOL_TIMEOUT_MS).toBeLessThan(SERVICE_BRIDGE_TIMEOUT_MS);
+});
