@@ -9,7 +9,23 @@ export const MODEL_GATEWAY_TIMEOUT_MS = 420_000;
 export const MODEL_BRIDGE_TIMEOUT_MS = 2 * MODEL_GATEWAY_TIMEOUT_MS + 30_000;
 export const SERVICE_PROVIDER_TIMEOUT_MS = 300_000;
 export const SERVICE_GATEWAY_TIMEOUT_MS = 330_000;
+/**
+ * How long the runtime waits on the supervisor socket for a *paid* call, which
+ * may queue behind a model request before its own provider call begins. Only
+ * payments get this: it is thirteen minutes, and nothing that cannot already
+ * have moved money deserves to be waited on for thirteen minutes. Every other
+ * hosted tool uses HOSTED_TOOL_BRIDGE_TIMEOUT_MS.
+ */
 export const SERVICE_BRIDGE_TIMEOUT_MS = MODEL_GATEWAY_TIMEOUT_MS + SERVICE_GATEWAY_TIMEOUT_MS + 30_000;
+/**
+ * One unpaid supervisor-executed tool (a wallet read, a catalog read, a
+ * review). The supervisor's own ceiling on these is 30-60s, so this only has
+ * to outlast it, and a lost reply costs the model one honest tool error rather
+ * than a run.
+ */
+export const HOSTED_TOOL_BRIDGE_TIMEOUT_MS = 90_000;
+/** deploy_service, request_secret and vault_request: control's own cap is 170s. */
+export const HOSTED_CONTROL_TOOL_TIMEOUT_MS = 185_000;
 /** Allows inline generated media; decoded artifacts are limited to 24 MiB. */
 export const SERVICE_RESPONSE_MAX_BYTES = 34 * 1024 * 1024;
 export const DEFAULT_CONTEXT_WINDOW = 64_000;

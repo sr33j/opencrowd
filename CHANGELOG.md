@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.15.3 — 2026-10-31
+
+- **A tool that waits on the network now has a deadline, so one unresponsive stranger cannot cost a whole run.** `find_paid_service` ranked sixteen candidates for one agent, started probing them, and never returned; nine minutes later the run was killed, having already spent $0.57. Every probe carried a ten-second abort signal — and an abort signal only cancels what the thing it was handed to can cancel. `getaddrinfo` cannot be interrupted at all, and synchronous work never reaches the event loop where the abort is delivered. A deadline does not try to cancel anything: it stops waiting, and answers honestly. One probe is bounded at 15s, a whole probe sweep at 60s (a short list of real services, marked partial, beats silence), one catalog or ranking call at 45s, and every tool call has a backstop above its own budget in case a layer below it misses one.
+- A timed-out paid call reports its payment state as unknown, in the words the gateway already uses, and tells the model not to retry it. Everything else says plainly that nothing was charged.
+- Unpaid hosted tools no longer inherit the payment timeout. A wallet read, a catalog read or a review waited up to thirteen minutes on the supervisor socket, which is the budget for a call that may already have moved money; they now wait 90 seconds, and a brokered deploy or vault read 185. The model bridge gained a total deadline beside its idle one, because an idle timer never fires on a reply that keeps trickling.
+
 ## 0.15.2 — 2026-10-30
 
 - **An agent whose durable state already held an oversized tool result can start again.** 0.15.1 stopped new ones from being written, but a `worker.json` poisoned before it shipped was re-serialized in full on every state write, so one agent was killed by the kernel 17 seconds into every boot. A state file over 2 MiB is now capped and rewritten as it loads, so it repairs itself on the first start.
