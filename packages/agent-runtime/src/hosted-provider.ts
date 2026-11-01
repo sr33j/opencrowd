@@ -1,4 +1,4 @@
-import { FinancialStateSchema, parseNetworkBalances, type FinancialState, ContextWindowExceeded, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, HOSTED_TOOL_BRIDGE_TIMEOUT_MS, HOSTED_CONTROL_TOOL_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
+import { FinancialStateSchema, parseNetworkBalances, type FinancialState, ContextWindowExceeded, isContextWindowError, isRequestTooLargeError, upstreamRefusalSummary, MODEL_SELLER_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, HOSTED_TOOL_BRIDGE_TIMEOUT_MS, HOSTED_CONTROL_TOOL_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
 import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
@@ -9,9 +9,15 @@ import { RuntimePause, type HostedToolExecutor } from "./worker.js";
 /** A definitive request failure with resolved payment state; fail with the
  * gateway's message instead of pausing for reconciliation. */
 export class HostedRequestError extends Error {
-  constructor(readonly code: string, readonly status: number, message: string) {
+  constructor(readonly code: string, readonly status: number, message: string,
+    /** The seller's own refusal, when the gateway relayed one. */
+    readonly upstream?: { status: number; code: string }) {
     super(message);
     this.name = "HostedRequestError";
+  }
+  /** What the owner reads as the run's summary; undefined keeps the generic copy. */
+  get summary(): string | undefined {
+    return upstreamRefusalSummary(this);
   }
 }
 
@@ -28,7 +34,10 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
       const operationId = context?.operationId;
       if (!operationId?.startsWith(`${options.runId}:llm:`)) throw new Error("Hosted model operation scope is missing");
       const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: messages.map(({ contextArchive: _archive, ...message }) => message), tools });
-      if (Buffer.byteLength(body) > MODEL_REQUEST_MAX_BYTES) throw new Error("Hosted request exceeds the transport byte limit");
+      // Too big for the seller is a conversation to compact, not a run to end:
+      // the shared loop trims and asks again rather than failing here.
+      if (Buffer.byteLength(body) > MODEL_SELLER_REQUEST_MAX_BYTES)
+        throw new ContextWindowExceeded(`Hosted request is ${Buffer.byteLength(body)} bytes, above the ${MODEL_SELLER_REQUEST_MAX_BYTES} a seller accepts`);
       const result = await new Promise<any>((resolve, reject) => {
         const req = request({ socketPath: options.socketPath, path: "/model", method: "POST", signal: context?.signal,
           headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, res => {
@@ -87,9 +96,18 @@ function rejectedRequest(status: number, text: string): Error | undefined {
     if (body.paid === true && body.error === "model_failed")
       return new HostedRequestError("model_failed", status, String(body.message ?? "The model response failed after payment settled. Its receipt is saved."));
     if (body.paid !== false) return undefined;
-    if (isContextWindowError({ code: body.error, message: body.message })) return new ContextWindowExceeded(String(body.message ?? "Provider context window exceeded"));
+    // What the seller itself refused, when the gateway relayed its verdict
+    // rather than inventing one of its own.
+    const upstream = body.upstream && typeof body.upstream === "object" && typeof body.upstream.code === "string"
+      ? { status: Number(body.upstream.status) || status, code: body.upstream.code } : undefined;
+    const refusal = { code: upstream?.code ?? body.error, message: body.message };
+    if (isContextWindowError(refusal)) return new ContextWindowExceeded(String(body.message ?? "Provider context window exceeded"));
+    // A body this seller will not take is the same problem as a window it will
+    // not fill, and has the same answer: compact the conversation and ask again.
+    if (isRequestTooLargeError(refusal, upstream?.status ?? status))
+      return new ContextWindowExceeded(String(body.message ?? "The model provider refused this request as too large"));
     const code = typeof body.error === "string" && body.error ? body.error : `http_${status}`;
-    return new HostedRequestError(code, status, typeof body.message === "string" && body.message ? body.message : `The model request was rejected (${code})`);
+    return new HostedRequestError(code, status, typeof body.message === "string" && body.message ? body.message : `The model request was rejected (${code})`, upstream);
   } catch { return undefined; }
 }
 

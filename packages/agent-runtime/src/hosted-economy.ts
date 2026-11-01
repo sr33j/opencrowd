@@ -293,7 +293,11 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }
     if (reply.code === "payment_declined") throw new SpendingDeclined();
     if (reply.code === "approval_required") throw new RuntimePause("waiting_for_approval", purchaseId, "Spending approval required. Review the quoted amount to continue.");
-    if (reply.code === "expected_payment_required") {
+    // Nothing was paid, and the gateway's own probe was this exact request
+    // unpaid: `expected_payment_required` means it answered without a price,
+    // `upstream_refused` means it answered with a reason. Either way the
+    // useful thing for the model is the endpoint's own body, so fetch it.
+    if (reply.code === "expected_payment_required" || reply.code === "upstream_refused") {
       return this.fetchUnpaid(request.url, method, body, request.headers);
     }
     if (reply.code === "funding_required") {

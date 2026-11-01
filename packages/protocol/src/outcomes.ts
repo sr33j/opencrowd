@@ -3,6 +3,23 @@ import { z } from "zod";
 /** User-facing failure copy; detailed diagnostics belong to events and ledgers. */
 export const RUN_FAILURE_MESSAGE = "Something went wrong. You can retry or send another message.";
 
+/**
+ * Plain words for a model request a seller refused outright, before any
+ * payment, and undefined for every other failure, where the generic copy above
+ * is the honest answer.
+ *
+ * On 2026-11-01 a seller refused two of an owner's runs over a body-size cap
+ * and both ended "Something went wrong": the refusal was in the gateway's logs
+ * and nowhere the owner could see it. The gateway relays the seller's status
+ * and code now, and this is what that becomes on the owner's screen.
+ */
+export function upstreamRefusalSummary(error: unknown): string | undefined {
+  const refusal = error as { name?: unknown; code?: unknown; message?: unknown } | null;
+  if (!refusal || typeof refusal !== "object" || refusal.name !== "HostedRequestError" || refusal.code !== "upstream_refused") return undefined;
+  const detail = typeof refusal.message === "string" ? refusal.message.trim() : "";
+  return `The model provider refused this request before any payment, so nothing was charged${detail ? `: ${detail}` : "."} You can retry or send another message.`;
+}
+
 /** Typed run outcomes (plan section 7.3). */
 export const RUN_OUTCOMES = [
   "completed",

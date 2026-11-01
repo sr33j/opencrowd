@@ -1,5 +1,24 @@
 /** Shared by the runtime and hosted gateway. Transport limits are bytes, not tokens. */
 export const MODEL_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
+/**
+ * What one model request body may be, in bytes, at the seller that accepts the
+ * least.
+ *
+ * `MODEL_REQUEST_MAX_BYTES` is the transport's ceiling. This is the market's,
+ * and it is far lower. Measured against both sellers on 2026-11-01:
+ * CrowdCode's Venice reseller refuses a body above 6.75 MB (three bytes a
+ * token of the largest context window Venice sells), and BlockRun takes 10 MB
+ * but not 11, where it truncates the body and answers `400 INVALID_JSON`
+ * rather than a 413. The gateway re-serializes tool calls and tool definitions
+ * on the way out, so a conversation compacted to this still fits after that,
+ * with room for a seller whose cap we have measured wrong.
+ *
+ * A catalogue context window is a seller's claim about tokens, and on
+ * 2026-11-01 a wrong one (1,000,000 for a model behind a 512 KiB body cap)
+ * cost an owner two runs. This is a fact about bytes, so the hosted rail
+ * compacts against both.
+ */
+export const MODEL_SELLER_REQUEST_MAX_BYTES = 5 * 1024 * 1024;
 export const MODEL_MAX_MESSAGES = 1000;
 /** Non-streaming generation can take minutes. Outer hops also allow quoting,
  * signing and receipt verification; they must not abandon a live paid call. */
@@ -63,6 +82,23 @@ export function estimateContextTokens(value: unknown): number {
 
 export function estimateModelInput(messages: readonly unknown[], tools: unknown): number {
   return messages.reduce<number>((total, message) => total + estimateContextTokens(message), estimateContextTokens(tools) + 32);
+}
+
+/**
+ * A seller's refusal that this exact body is too big for it.
+ *
+ * Unlike a context-window refusal this is about bytes, not tokens, and it is
+ * always made before payment. HTTP 413 means it on its own; the sellers that
+ * answer 400 have to say so in a code or a message. The run's answer to both
+ * is the same: compact and ask again.
+ */
+export function isRequestTooLargeError(value: unknown, status?: number): boolean {
+  if (status === 413) return true;
+  const error = value as { code?: unknown; message?: unknown; error?: unknown } | undefined;
+  if (!error || typeof error !== "object") return false;
+  if (["request_too_large", "payload_too_large", "request_entity_too_large", "body_too_large"].includes(String(error.code))) return true;
+  if (typeof error.message === "string" && /request (?:body|entity|payload) (?:is )?too large|payload too large|request too large|body must be at most/i.test(error.message)) return true;
+  return error.error !== value && !!error.error && isRequestTooLargeError(typeof error.error === "string" ? { message: error.error } : error.error);
 }
 
 /** Only explicit model-context errors qualify; HTTP 400/413 alone never do. */
