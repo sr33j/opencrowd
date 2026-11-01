@@ -67,6 +67,74 @@ export function contextLimits(window?: number, maxOutput?: number, requestedOutp
   return { contextWindow, outputTokens, trigger: Math.min(Math.floor(contextWindow * 0.8), inputCeiling), target: Math.min(Math.floor(contextWindow * 0.4), inputCeiling) };
 }
 
+/**
+ * What one turn's input may cost before the run starts summarising its older
+ * history away, in US dollars.
+ *
+ * A chat pays for its whole history on every single turn, so the bill grows
+ * with the square of the conversation. An owner's chat reached 178,000 input
+ * tokens on a model at $0.396 per million (Venice's $0.33 and the reseller's
+ * margin) and every further message cost $0.0708 — for a 40-token reply. The
+ * window was a million tokens, so nothing compacted: the context limit was
+ * never the binding one, the price was.
+ *
+ * Two cents a turn is roughly 60,000 tokens at that model's price, which is a
+ * long working conversation. It is deliberately a *cost* and not a token
+ * count: the same two cents buys 200,000 tokens on `openai/gpt-5.6-luna` and
+ * 5,000 on `claude-opus-5-5`, and each of those is the right amount of history
+ * to carry for what it costs.
+ */
+export const CONTEXT_COST_BUDGET_USD = 0.02;
+/**
+ * History no cost trigger may compact below. Two cents of the dearest models
+ * is a few thousand tokens, which is not a conversation an agent can work in;
+ * past this floor the right answer is a cheaper model, not a shorter memory.
+ */
+export const CONTEXT_MIN_HISTORY_TOKENS = 24_000;
+
+/**
+ * The input size at which a turn costs more than `CONTEXT_COST_BUDGET_USD`,
+ * given what the seller charges per million input tokens and how much of the
+ * last turn it served from its prompt cache.
+ *
+ * The cache is why this takes an observed hit rate rather than just a price.
+ * Compaction and prompt caching pull in opposite directions: compacting
+ * rewrites the prefix and throws away the cached history, while resending a
+ * cached history is almost free — on `deepseek-v4-1-flash-uncensored` a cached
+ * input token costs a fortieth of a fresh one. So the trigger is set by the
+ * price actually being paid: while the cache keeps hitting, a long history
+ * costs little and is kept; the turn it stops hitting, the trigger tightens to
+ * the uncached price and the history is compacted.
+ *
+ * `undefined` when the seller's price is unknown — the window remains the only
+ * limit, which is where this started.
+ */
+export function costTriggerTokens(prices?: {
+  /** USD per million input tokens, as the buyer is charged. */
+  inputPriceUsdPerMillion?: number;
+  /** USD per million input tokens served from cache, where the seller discounts them. */
+  cachedInputPriceUsdPerMillion?: number;
+  /** Fraction of the last turn's input the seller said it read from cache. */
+  cachedFraction?: number;
+}): number | undefined {
+  const input = prices?.inputPriceUsdPerMillion;
+  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) return undefined;
+  const cachedPrice = prices?.cachedInputPriceUsdPerMillion;
+  // A seller that discounts cached tokens without saying by how much is
+  // treated as not discounting them at all.
+  const cached = typeof cachedPrice === "number" && Number.isFinite(cachedPrice) && cachedPrice >= 0 && cachedPrice < input
+    ? cachedPrice : input;
+  const fraction = typeof prices?.cachedFraction === "number" && Number.isFinite(prices.cachedFraction)
+    ? Math.min(1, Math.max(0, prices.cachedFraction)) : 0;
+  const effective = input * (1 - fraction) + cached * fraction;
+  if (effective <= 0) return undefined;
+  return Math.max(CONTEXT_MIN_HISTORY_TOKENS, Math.floor((CONTEXT_COST_BUDGET_USD / effective) * 1_000_000));
+}
+
+/** A cent per thousand tokens, as this file's unit: ten dollars per million. */
+export const centsPer1kToUsdPerMillion = (cents: number | undefined) =>
+  typeof cents === "number" && Number.isFinite(cents) && cents > 0 ? cents * 10 : undefined;
+
 /** Conservative fallback: ASCII ~3 chars/token; non-ASCII at its UTF-8 byte count.
  * Provider usage calibrates this upward. It is an estimate, never an exact tokenizer. */
 export function estimateContextTokens(value: unknown): number {

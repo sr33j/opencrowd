@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, type FinancialState } from "@opencrowd/protocol";
-import { completeWithContext, type ContextState } from "./context.js";
+import { completeWithContext, type ContextState, type ModelPrices } from "./context.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
@@ -718,6 +718,13 @@ export interface AgentRunOptions {
   contextWindowTokens?: number;
   maxOutputTokens?: number;
   /**
+   * What the seller charges per million input tokens, cached and not. With it,
+   * compaction also triggers on what a turn costs rather than only on how much
+   * of the window it fills — a chat inside a million-token window can cost
+   * seven cents a message long before any limit is near.
+   */
+  prices?: ModelPrices;
+  /**
    * Session-completion gate: returns a blocking reason (e.g. a pending
    * required review) or undefined. The loop refuses to complete while it
    * blocks, nudging the model once before stopping deterministically.
@@ -963,14 +970,21 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     try {
       if (options.financialState && !restored?.response && !contextState.prepared) {
         await refreshFinancialState();
-        const snapshot: LlmMessage = { role: "system", content: financialPrefix + JSON.stringify(financial) };
-        const index = messages.findIndex(m => m.role === "system" && m.content.startsWith(financialPrefix));
-        if (index === -1) messages.splice(1, 0, snapshot);
-        else messages[index] = snapshot;
+        // The snapshot goes *after* the history, not into it. Written into the
+        // history it rewrote message 1 on every turn, and a prefix that moves
+        // every turn is a prefix no seller can cache: a chat then pays full
+        // price for all of itself, every message, for ever. A `user` role
+        // rather than `system` because a trailing system message is hoisted
+        // back into the prefix by the providers that collect one, which would
+        // undo the whole point; the stable system instructions above are what
+        // give this snapshot its authority.
+        const legacy = messages.findIndex(m => m.role === "system" && m.content.startsWith(financialPrefix));
+        if (legacy !== -1) messages.splice(legacy, 1);
+        contextState.trailingMessage = { role: "user", content: financialPrefix + JSON.stringify(financial) };
       }
       response = restored?.response ?? await completeWithContext(session, messages, {
           provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
-          contextWindowTokens: limits.contextWindow, maxOutputTokens: limits.outputTokens,
+          contextWindowTokens: limits.contextWindow, maxOutputTokens: limits.outputTokens, prices: options.prices,
           hosted: options.hosted, signal: options.signal, operationId: `${options.runId ?? session.sessionId}:llm:${turn}`,
           checkpoint: () => checkpoint(turn),
           onCompaction: async (result) => {
