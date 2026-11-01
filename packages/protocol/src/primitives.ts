@@ -50,6 +50,15 @@ export const ModelPolicySchema = z.looseObject({
   model: z.string().min(1).optional(),
   contextWindowTokens: z.int().min(1024).max(4_000_000).optional(),
   maxOutputTokens: z.int().positive().optional(),
+  /**
+   * What this model's input costs the agent, in USD per million tokens, and
+   * what a token the seller serves from its prompt cache costs instead. The
+   * run compacts on price as well as on window size, so a chat inside a
+   * million-token window does not quietly cost seven cents a message, and
+   * leaves a long history alone for as long as the cache is making it cheap.
+   */
+  inputPriceUsdPerMillion: z.number().nonnegative().max(10_000).optional(),
+  cachedInputPriceUsdPerMillion: z.number().nonnegative().max(10_000).optional(),
   submodel: z.string().min(1).optional()
 });
 export type ModelPolicy = z.infer<typeof ModelPolicySchema>;

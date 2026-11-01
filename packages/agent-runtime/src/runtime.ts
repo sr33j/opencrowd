@@ -27,6 +27,7 @@ import {
   type TypedLlmRuntime
 } from "./index.js";
 import { fallbackContextWindowTokens } from "./providers.js";
+import { centsPer1kToUsdPerMillion } from "@opencrowd/protocol";
 import type { SteeringInbox } from "./inbox.js";
 
 /**
@@ -115,6 +116,14 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
       maxTurns: runOptions.maxTurns,
       compactOutput: runOptions.compactOutput,
       contextWindowTokens,
+      // A cent per thousand tokens is ten dollars per million. The catalogue
+      // publishes no cached-input price, so a cache hit on a CLI run lowers
+      // the bill without relaxing the trigger: it compacts sooner than it
+      // strictly has to, which is the safe direction to be wrong in.
+      ...(llm.kind === "typed"
+        ? { prices: { inputPriceUsdPerMillion: centsPer1kToUsdPerMillion(
+            llm.main.catalog?.find((model) => model.id === llm.main.model)?.inputCostCentsPer1k) } }
+        : {}),
       onProgress: runOptions.onProgress,
       history,
       onMessage: (message) => storage.appendMessage(session, message),

@@ -38,11 +38,11 @@ it("refreshes model and service spending, replaces local budgets and keeps one a
       expect(messages[0].content).toContain("You operate this service for its owner.");
       expect(messages[0].content).toContain("Inference and paid tools debit its USDC wallet.");
       if (calls === 1) {
-        const tool = JSON.parse(messages.at(-1)!.content);
+        const tool = JSON.parse(messages.at(-2)!.content);
         expect(tool.budget_before_tool_call.current_run.inference_spent_usdc).toBe("0.000123");
         expect(tool.budget_after_tool_call.current_run.service_spent_usdc).toBe("0.050000");
       }
-      if (calls === 2) expect(JSON.parse(messages.at(-1)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
+      if (calls === 2) expect(JSON.parse(messages.at(-2)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
       inference += 123n;
       const name = ["call_paid_service", "get_budget_status", "complete_session"][calls++];
       return { content: "", toolCalls: [{ id: `call-${calls}`, name, arguments: name === "complete_session" ? { final_message: "Done" } : {} }] };
@@ -57,7 +57,7 @@ it("marks financial reads unavailable without retrying a paid response or return
     financialState: async () => { throw new Error("control offline"); },
     provider: { complete: async messages => {
       calls++;
-      expect(messages[1].content).toContain('"status":"unavailable"');
+      expect(messages.at(-1)!.content).toContain('"status":"unavailable"');
       return { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "Done" } }] };
     } },
   });

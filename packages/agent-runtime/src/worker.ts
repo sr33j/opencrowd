@@ -341,6 +341,10 @@ export class MachineWorker {
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
+        prices: {
+          inputPriceUsdPerMillion: run.start.payload.modelPolicy.inputPriceUsdPerMillion,
+          cachedInputPriceUsdPerMillion: run.start.payload.modelPolicy.cachedInputPriceUsdPerMillion,
+        },
         provider,
         financialState,
         history: run.checkpoint ? undefined : await this.history(session),

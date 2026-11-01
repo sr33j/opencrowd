@@ -168,6 +168,12 @@ export class X402ProxyProvider implements TypedLlmProvider {
     if (request.promptCacheKey) {
       body.prompt_cache_key = request.promptCacheKey;
     }
+    // Claude is the one family that does not cache unless asked: BlockRun
+    // documents `prompt_cache` as the opt-in, and without it every turn of a
+    // Claude chat pays full price for the whole history again.
+    if (/(^|\/)anthropic\//.test(request.model) || /(^|\/)claude[-/]/.test(request.model)) {
+      body.prompt_cache = true;
+    }
     if (request.maxOutputTokens) {
       body.max_tokens = request.maxOutputTokens;
     }
