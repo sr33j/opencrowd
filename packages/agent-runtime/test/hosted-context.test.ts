@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RUN_FAILURE_MESSAGE, type Command, type Event } from "@opencrowd/protocol";
+import { createSession } from "@opencrowd/core";
 import { MachineWorker } from "../src/worker.js";
+import { completeWithContext, type ContextState } from "../src/context.js";
 import { createHostedProvider, HostedRequestError } from "../src/hosted-provider.js";
 import type { LlmMessage } from "../src/index.js";
 
@@ -81,6 +83,66 @@ describe("hosted bridge failure classification", () => {
       try { expect(await b.run()).toMatchObject({ outcome: "failed", summary: RUN_FAILURE_MESSAGE, pendingOperationId: "run-1:llm:0" }); }
       finally { await b.close(); }
     }
+  });
+
+  it("compacts and retries when a seller refuses the body's size, and never pays for the refusal", async () => {
+    const bodies: number[] = [];
+    const home = await root(), socketPath = join(home, "bridge.sock");
+    // The live reseller's cap on 2026-11-01. The catalogue said the model held
+    // a million tokens, so nothing compacted until the seller said no.
+    const cap = 512 * 1024;
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      const body = Buffer.concat(chunks);
+      bodies.push(body.length);
+      if (body.length > cap) {
+        res.writeHead(413, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "upstream_refused", message: "request_too_large: The request body must be at most 524288 bytes",
+          status: 413, paid: false, upstream: { status: 413, code: "request_too_large" } }));
+        return;
+      }
+      res.end(JSON.stringify({ status: "complete", response: { content: "Done.", toolCalls: [] } }));
+    });
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    try {
+      // About 180,000 estimated tokens: well inside the window the catalogue
+      // claims, well outside the body the seller takes.
+      const input = conversation(60, 9000);
+      expect(bytes(input)).toBeGreaterThan(cap);
+      const provider = createHostedProvider({ socketPath, runId: "run-1", sessionId: "session-1" });
+      const workspaceRoot = join(home, "workspace");
+      const session = await createSession({ workspaceRoot, sessionId: "session-1" });
+      const messages = structuredClone(input);
+      const state: ContextState = {};
+      const response = await completeWithContext(session, messages, { provider, tools: [], state, hosted: true,
+        contextWindowTokens: 1_000_000, maxOutputTokens: 4096, operationId: "run-1:llm:0" });
+      expect(response.content).toBe("Done.");
+      expect(bodies[0]).toBeGreaterThan(cap);
+      expect(bodies.at(-1)).toBeLessThanOrEqual(cap);
+      // Bulky old tool output went to files first, so the turns themselves,
+      // the original request and the current task all survive.
+      expect(bytes(messages)).toBeLessThan(bytes(input) / 2);
+      expect(messages.some(m => m.contextArchive)).toBe(true);
+      expect(messages[0]).toEqual(input[0]);
+      expect(messages).toContainEqual(input[1]);
+      expect(messages.at(-1)).toEqual(input.at(-1));
+    } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
+  it("ends a seller's other pre-payment refusals with the reason, not generic copy", async () => {
+    const b = await bridge(res => {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: "upstream_refused", message: "unknown_model: This service does not sell gpt-9.",
+        status: 404, paid: false, upstream: { status: 404, code: "unknown_model" } }));
+    });
+    try {
+      const error = await createHostedProvider({ socketPath: b.socketPath, runId: "run-1", sessionId: "session-1" })
+        .complete([{ role: "user", content: "hi" }], { operationId: "run-1:llm:0" }).catch(e => e);
+      expect(error).toBeInstanceOf(HostedRequestError);
+      expect(error.upstream).toEqual({ status: 404, code: "unknown_model" });
+      expect(await b.run()).toMatchObject({ outcome: "failed", summary:
+        "The model provider refused this request before any payment, so nothing was charged: unknown_model: This service does not sell gpt-9. You can retry or send another message." });
+    } finally { await b.close(); }
   });
 
   it("sends preflighted history unchanged beyond the old 64 KB limit", async () => {

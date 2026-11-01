@@ -272,6 +272,20 @@ describe("hosted economy: payment over the bridge", () => {
     expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ query: "free" }))).toHaveLength(1);
   });
 
+  it("fetches the endpoint itself when the gateway relays the seller's own refusal", async () => {
+    // The gateway's probe was this exact request, unpaid, so the endpoint's
+    // own body is what the model should see — the same answer as a seller that
+    // simply did not ask for payment.
+    const { fetcher, calls } = fakeFetch({ endpointStatus: 200 });
+    const { socketPath } = await bridge(() => ({ ok: false, error: "invalid_request: query is required", code: "upstream_refused" }));
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "free" }, max_cost_cents: 1 });
+    expect(call.ok).toBe(true);
+    expect(call.data).toMatchObject({ outcome: "free", status: 200 });
+    expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ query: "free" }))).toHaveLength(1);
+  });
+
   it("records payment_unknown and transport failures as ambiguous purchases that are never retried", async () => {
     const { fetcher } = fakeFetch();
     const { socketPath } = await bridge(() => ({ ok: false, error: "settlement receipt not confirmed", code: "payment_unknown" }));

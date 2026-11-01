@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
 import { createSession } from "@opencrowd/core";
-import { ContextWindowExceeded, contextLimits, estimateContextTokens, isContextWindowError } from "@opencrowd/protocol";
+import { ContextWindowExceeded, contextLimits, estimateContextTokens, isContextWindowError, isRequestTooLargeError, upstreamRefusalSummary, MODEL_REQUEST_MAX_BYTES, MODEL_SELLER_REQUEST_MAX_BYTES } from "@opencrowd/protocol";
 import { compactContext, completeWithContext, type ContextState } from "../src/context.js";
 import { runAgentTaskDetailed, type LlmMessage } from "../src/index.js";
 
@@ -116,6 +116,26 @@ it("only recognizes context failures, not generic HTTP/body-size or output-limit
   expect(isContextWindowError({ finish_reason: "length" })).toBe(false);
   expect(isContextWindowError({ error: { code: "context_length_exceeded" } })).toBe(true);
   expect(contextLimits(8000, 1000)).toMatchObject({ trigger: 6400, target: 3200, outputTokens: 1000 });
+});
+
+it("recognizes a seller's body-size refusal separately from a context window one", () => {
+  // Bytes, not tokens, and told apart from a window refusal because the
+  // gateway relays the seller's status beside its code.
+  expect(isRequestTooLargeError({ code: "request_too_large", message: "The request body must be at most 524288 bytes" })).toBe(true);
+  expect(isRequestTooLargeError({ error: { code: "payload_too_large" } })).toBe(true);
+  expect(isRequestTooLargeError({ code: "invalid_request" }, 413)).toBe(true);
+  expect(isRequestTooLargeError({ code: "unknown_model", message: "This service does not sell gpt-9" }, 404)).toBe(false);
+  expect(isRequestTooLargeError({ code: "context_length_exceeded" })).toBe(false);
+  expect(isRequestTooLargeError(undefined)).toBe(false);
+  // A hosted run's byte budget is the seller's, far below the transport's.
+  expect(MODEL_SELLER_REQUEST_MAX_BYTES).toBeLessThan(MODEL_REQUEST_MAX_BYTES);
+});
+
+it("names a seller's pre-payment refusal for the owner and leaves every other failure generic", () => {
+  expect(upstreamRefusalSummary({ name: "HostedRequestError", code: "upstream_refused", message: "request_too_large: too big" }))
+    .toBe("The model provider refused this request before any payment, so nothing was charged: request_too_large: too big You can retry or send another message.");
+  expect(upstreamRefusalSummary({ name: "HostedRequestError", code: "model_failed", message: "paid and broken" })).toBeUndefined();
+  expect(upstreamRefusalSummary(new Error("anything else"))).toBeUndefined();
 });
 
 it("bounds many short messages even when they fit the token window", async () => {

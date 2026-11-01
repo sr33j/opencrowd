@@ -8,7 +8,7 @@ import {
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
-  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, type CommandOf, type Event, type EventType,
+  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, upstreamRefusalSummary, type CommandOf, type Event, type EventType,
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
@@ -378,7 +378,9 @@ export class MachineWorker {
         await this.finish(runId, run, error.outcome === "payment_unknown" ? "failed" : error.outcome,
           error.outcome === "payment_unknown" ? RUN_FAILURE_MESSAGE : error.message);
       } else if (error instanceof SpendingDeclined) await this.finish(runId, run, "user_stopped", error.message);
-      else await this.finish(runId, run, "failed", RUN_FAILURE_MESSAGE);
+      // A seller's refusal before payment is a fact the owner can act on, so
+      // it is said in plain words instead of "something went wrong".
+      else await this.finish(runId, run, "failed", upstreamRefusalSummary(error) ?? RUN_FAILURE_MESSAGE);
     }
   }
 

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { relative, join } from "node:path";
 import { atomicWrite, containedPath, type SessionState } from "@opencrowd/core";
-import { ContextWindowExceeded, contextLimits, estimateContextTokens, estimateModelInput, isContextWindowError, MODEL_REQUEST_MAX_BYTES, MODEL_MAX_MESSAGES } from "@opencrowd/protocol";
+import { ContextWindowExceeded, contextLimits, estimateContextTokens, estimateModelInput, isContextWindowError, isRequestTooLargeError, MODEL_REQUEST_MAX_BYTES, MODEL_SELLER_REQUEST_MAX_BYTES, MODEL_MAX_MESSAGES } from "@opencrowd/protocol";
 import type { LlmMessage, LlmProvider, LlmResponse } from "./index.js";
 
 export interface ContextState {
@@ -38,7 +38,8 @@ export async function completeWithContext(session: SessionState, messages: LlmMe
       return response;
     } catch (error) {
       // Cloud must never infer payment safety from an arbitrary error message.
-      const overflow = error instanceof ContextWindowExceeded || (!options.hosted && isContextWindowError(error));
+      const overflow = error instanceof ContextWindowExceeded
+        || (!options.hosted && (isContextWindowError(error) || isRequestTooLargeError(error)));
       if (!overflow || (options.state.retry ?? 0) >= 2) throw error;
       options.state.retry = (options.state.retry ?? 0) + 1;
       options.state.prepared = false;
@@ -53,6 +54,9 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   maxOutputTokens?: number;
   tools: unknown;
   state: ContextState;
+  /** A hosted run must fit the seller that accepts the least, not the transport. */
+  hosted?: boolean;
+  maxRequestBytes?: number;
 }): Promise<{ tokensBefore: number; tokensAfter: number; archivePath?: string }> {
   const limits = contextLimits(options.contextWindowTokens, options.maxOutputTokens);
   const scale = options.state.scale ?? 1;
@@ -72,10 +76,19 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   const count = (list: LlmMessage[]) => Math.ceil(list.reduce((total, m) => total + measure(m).tokens, toolTokens) * scale);
   const tokensBefore = count(messages);
   const retry = options.state.retry ?? 0;
-  const trigger = Math.floor(limits.trigger * 0.5 ** retry);
-  const target = Math.min(limits.target, Math.floor(trigger * 0.5));
   const bytes = (list: LlmMessage[]) => list.reduce((total, m) => total + measure(m).bytes, toolBytes);
-  const transportLimit = MODEL_REQUEST_MAX_BYTES - 64 * 1024; // envelope/wire-format headroom
+  // Whichever ceiling binds, less envelope/wire-format headroom. A hosted run
+  // is refused by its seller long before the transport complains.
+  const budget = options.maxRequestBytes ?? (options.hosted ? MODEL_SELLER_REQUEST_MAX_BYTES : MODEL_REQUEST_MAX_BYTES);
+  const byteCeiling = budget - 64 * 1024;
+  // What this attempt aims at. A retry follows a refusal the catalogue did not
+  // predict, so it aims at half of what is measurably here as well as half of
+  // the window: halving a trigger derived from a window that claims a million
+  // tokens leaves a 147,000-token conversation untouched and spends the retry
+  // on the very same refusal.
+  const trigger = retry ? Math.min(Math.floor(limits.trigger * 0.5 ** retry), Math.floor(tokensBefore * 0.5)) : limits.trigger;
+  const target = Math.min(limits.target, Math.floor(trigger * 0.5));
+  const transportLimit = retry ? Math.floor(Math.min(byteCeiling, bytes(messages) * 0.5)) : byteCeiling;
   if (tokensBefore <= trigger && bytes(messages) <= transportLimit && messages.length <= MODEL_MAX_MESSAGES && !retry)
     return { tokensBefore, tokensAfter: tokensBefore };
 
@@ -138,7 +151,10 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   const tokensAfter = count(current());
   // 40% is a target. System instructions + tools may exceed it, but exceeding
   // the trigger after removing everything eligible is a deterministic failure.
-  if (tokensAfter > trigger || bytes(current()) > transportLimit || list.length > MODEL_MAX_MESSAGES)
+  // A retry's own goal is deliberately tighter than the model and the seller
+  // allow; missing that is a reason to send the smaller request and let the
+  // provider answer, not to end the run on our own arithmetic.
+  if (tokensAfter > Math.max(trigger, limits.trigger) || bytes(current()) > byteCeiling || list.length > MODEL_MAX_MESSAGES)
     throw new Error(`Context cannot fit after compaction: system instructions, tools and required references exceed the input budget. Original context: ${archivePath}`);
   messages.splice(0, messages.length, ...current());
   return { tokensBefore, tokensAfter, archivePath };
