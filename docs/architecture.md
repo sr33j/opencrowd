@@ -207,8 +207,9 @@ The previous default remains available and is BlockRun's paired rescue route:
 ### Venice (explicitly selectable, plus per-call rescue)
 
 `venice` buys each call from CrowdCode's Venice service
-(`https://crowdcode.app/s/venice-reseller/chat/completions`, run by the
-`venice-reseller` agent) over x402:
+(`https://crowdcode.app/s/venice-proxy/chat/completions`, run by the
+`venice-proxy` agent; `…/s/venice-reseller/…`, its name before 0.16.2, is
+still served) over x402:
 
 - `POST` without payment returns a 402 quoting that exact request; the quote
   is approved by the session budget before anything is signed.

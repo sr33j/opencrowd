@@ -10,7 +10,7 @@ import {
 } from "./providers.js";
 
 /**
- * Venice through CrowdCode: the `venice-reseller` agent's x402 service.
+ * Venice through CrowdCode: the `venice-proxy` agent's x402 service.
  *
  * Venice sells inference only as $5 of prepaid credit bound to one wallet.
  * CrowdCode's reseller carries that credit and sells each request: this
@@ -27,8 +27,12 @@ import {
  *    A load-balanced RPC node a block behind reports the nonce the last
  *    settlement just spent, and the payment is refused.
  */
-export const CROWDCODE_VENICE_URL = "https://crowdcode.app/s/venice-reseller/chat/completions";
-/** The reseller agent's wallet: the only payee this provider pays. */
+/**
+ * The service was `venice-reseller` until 0.16.2; its old URL stays served,
+ * by the same agent with the same payee, for every CLI that still has it.
+ */
+export const CROWDCODE_VENICE_URL = "https://crowdcode.app/s/venice-proxy/chat/completions";
+/** The proxy agent's wallet: the only payee this provider pays. */
 export const CROWDCODE_VENICE_PAYEE = "0xeEc135BDe3C69e48Ce6Cf5b9e4520d65baf90FC3";
 const VENICE_MODELS_URL = "https://api.venice.ai/api/v1/models?type=text";
 const BASE_USDC = "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913";
