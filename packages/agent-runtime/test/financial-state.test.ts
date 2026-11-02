@@ -30,19 +30,24 @@ it("refreshes model and service spending, replaces local budgets and keeps one a
     dynamicTools: { definitions: [{ name: "call_paid_service", description: "test", parameters: {} }],
       execute: async () => { services += 50_000n; return { ok: true }; } },
     provider: { complete: async messages => {
-      const snapshots = messages.filter(m => m.content.startsWith("Current hosted financial snapshot: "));
-      expect(snapshots).toHaveLength(1);
-      const snapshot = JSON.parse(snapshots[0].content.split(": ").slice(1).join(": "));
+      // One authoritative snapshot per request: a note on the latest user
+      // message, or the latest tool result's own budget_after_tool_call.
+      const snapshots = messages.filter(m => m.content.includes("Current hosted financial snapshot: "));
+      const last = messages.at(-1)!;
+      expect(snapshots).toEqual(last.role === "user" ? [last] : []);
+      const snapshot = last.role === "user"
+        ? JSON.parse(last.content.slice(last.content.indexOf("{"), last.content.indexOf("]\n\n")))
+        : JSON.parse(last.content).budget_after_tool_call;
       expect(snapshot.current_run.inference_spent_usdc).toBe(atomicUsdc(inference));
       expect(snapshot.current_run.service_spent_usdc).toBe(atomicUsdc(services));
       expect(messages[0].content).toContain("You operate this service for its owner.");
       expect(messages[0].content).toContain("Inference and paid tools debit its USDC wallet.");
       if (calls === 1) {
-        const tool = JSON.parse(messages.at(-2)!.content);
+        const tool = JSON.parse(messages.at(-1)!.content);
         expect(tool.budget_before_tool_call.current_run.inference_spent_usdc).toBe("0.000123");
         expect(tool.budget_after_tool_call.current_run.service_spent_usdc).toBe("0.050000");
       }
-      if (calls === 2) expect(JSON.parse(messages.at(-2)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
+      if (calls === 2) expect(JSON.parse(messages.at(-1)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
       inference += 123n;
       const name = ["call_paid_service", "get_budget_status", "complete_session"][calls++];
       return { content: "", toolCalls: [{ id: `call-${calls}`, name, arguments: name === "complete_session" ? { final_message: "Done" } : {} }] };

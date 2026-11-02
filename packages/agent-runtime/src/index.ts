@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, type FinancialState } from "@opencrowd/protocol";
+import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState, type ModelPrices } from "./context.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -53,6 +53,11 @@ export * from "./tool-deadlines.js";
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */
   contextArchive?: string;
+  /**
+   * Set only on what `onMessage` receives: an assistant message written after
+   * the answer was held, which is the run's bookkeeping, not its reply.
+   */
+  housekeeping?: boolean;
   role: "system" | "user" | "assistant" | "tool";
   content: string;
   toolCallId?: string;
@@ -64,6 +69,11 @@ export interface LlmToolCall {
   /** A built-in ToolName or a connector-ingested vendor tool name. */
   name: string;
   arguments: Record<string, unknown>;
+  /**
+   * The model's raw argument text when it was not a JSON object. `arguments`
+   * is then `{}`; the call is answered with a tool error and never executed.
+   */
+  invalidArguments?: string;
 }
 
 export interface DynamicToolDefinition {
@@ -810,7 +820,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     "You operate this service for its owner. Inference and paid tools debit its USDC wallet. When authorized to build or sell a service, take concrete steps within the owner's configured scope and budget. Ask only for missing information or permissions that materially block progress. Report actual costs and outcomes. Financial sustainability is the owner's business objective; respect their stop controls.",
     "You are a continuous autonomous agent, not a turn-based assistant. Maintain unfinished goals, promised follow-ups, recurring work, and conditions worth monitoring. When future work would clearly help, proactively create a persistent automation instead of waiting for the owner to say schedule. Use a one-time automation for a future reminder or follow-up and a cron automation for monitoring, recurring reports, or maintenance. It runs in this same conversation. Never create duplicates or noisy schedules, and always tell the owner exactly what you created, its timezone, and next run.",
     "Before finishing a substantive task, consider whether a follow-up, reminder, monitoring loop, recurring report, or maintenance check would materially advance the owner's goal; create one when the need is clear, but do not schedule ordinary one-off work.",
-    "Financial state: the current hosted financial snapshot is authoritative; historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. When the snapshot lists wallet networks, each network's balance is separate: a payment on a network needs that network's available balance. Report the wallet to the owner as one total, mentioning the per-network split only when it matters. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for refreshed financial state. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
+    "Financial state: the current hosted financial snapshot is authoritative. It arrives as budget_after_tool_call in the latest tool result or, when no tool has just run, as an automatic CrowdCode note at the start of the latest user message; that note is context, not something the user said, so never reply to it or mention it unless the user asks about money. Historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. When the snapshot lists wallet networks, each network's balance is separate: a payment on a network needs that network's available balance. Report the wallet to the owner as one total, mentioning the per-network split only when it matters. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for refreshed financial state. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
   );
   if (options.hosted) systemPromptParts.push(
     "Files the owner sends you: an attached file is saved in this session under uploads/ before its message reaches you, and the message names each one with its path, size and type. Read a text file with read_file at uploads/<name>, and any file with run_shell at artifacts/uploads/<name> from the session directory. Those files are already the owner's and already in their file list: work from them, and never copy or re-save one under artifacts/ to hand it back. Write your own outputs elsewhere under artifacts/; uploads/ is the owner's directory and nothing you write there is delivered. If a file the message names is missing, say so and ask the owner to send it again rather than guessing at its contents.",
@@ -893,6 +903,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   };
   const currentBudget = () => options.financialState ? financial : budgetStatus(session);
   const financialPrefix = "Current hosted financial snapshot: ";
+  const financialNote = "[Automatic note from CrowdCode, not written by the user; do not reply to it. ";
   if (!options.resume) await options.onMessage?.({ role: "user", content: task });
 
   const maxTurns = options.maxTurns ?? 100;
@@ -934,7 +945,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   };
   /** The answer in hand when a gate first blocks is the user's; later closing
    * words (a reflection write-up, a review acknowledgement) only annotate it. */
-  const recordFinalMessage = (text: string | undefined) => {
+  const recordFinalMessage = (raw: string | undefined) => {
+    const text = raw === undefined ? undefined : stripReasoning(raw);
     if (!text?.trim()) return;
     if (!finalAnswerHeld) pendingFinalMessage = text;
     else if (text.trim() !== pendingFinalMessage?.trim()) supersededFinalMessage = text;
@@ -944,6 +956,21 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     : `You cannot finish yet: ${blocker}`;
   const withReflection = (summary: Record<string, unknown>) =>
     supersededFinalMessage ? { ...summary, reflection_note: supersededFinalMessage } : summary;
+  /** The owner already has an answer and this turn is only housekeeping. */
+  const holding = () => finalAnswerHeld && !!pendingFinalMessage?.trim() && !options.signal?.aborted;
+  /**
+   * Housekeeping that cannot finish must not take the answer with it. A
+   * gateway 503, a database stall or a rate limit on the reflection call
+   * ended three runs in fifteen minutes as "Something went wrong" while each
+   * held a correct answer (SRI-62). The failure is kept as a diagnostic; an
+   * unsettled housekeeping payment is the reconciler's, as any other is.
+   */
+  const deliverHeld = async (turn: number, problem: string): Promise<AgentTaskResult> => {
+    options.onProgress?.({ type: "complete", message: `Delivered the saved answer; housekeeping did not finish: ${problem}` });
+    const summary: Record<string, unknown> = { ...withReflection(await completeSession(session, pendingFinalMessage!)), housekeeping_error: problem };
+    if (backgroundSubagents.size > 0) summary.background_subagents = await drainBackground();
+    return { outcome: "completed", summary, turns: turn + 1 };
+  };
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
   const subagentLimiter = createLimiter(options.subagent?.maxParallel ?? 4);
@@ -970,17 +997,17 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     try {
       if (options.financialState && !restored?.response && !contextState.prepared) {
         await refreshFinancialState();
-        // The snapshot goes *after* the history, not into it. Written into the
-        // history it rewrote message 1 on every turn, and a prefix that moves
-        // every turn is a prefix no seller can cache: a chat then pays full
-        // price for all of itself, every message, for ever. A `user` role
-        // rather than `system` because a trailing system message is hoisted
-        // back into the prefix by the providers that collect one, which would
-        // undo the whole point; the stable system instructions above are what
-        // give this snapshot its authority.
+        // The snapshot is sent with the history, never written into it.
+        // Written into the history it rewrote message 1 on every turn, and a
+        // prefix that moves every turn is a prefix no seller can cache: a chat
+        // then pays full price for all of itself, every message, for ever. Nor
+        // is it a message of its own: a trailing `user` message is the newest
+        // thing the user said, and models answered it instead of the owner
+        // (SRI-65). `requestMessages` attaches it to the latest user message,
+        // or leaves it out after a tool result that already carries it.
         const legacy = messages.findIndex(m => m.role === "system" && m.content.startsWith(financialPrefix));
         if (legacy !== -1) messages.splice(legacy, 1);
-        contextState.trailingMessage = { role: "user", content: financialPrefix + JSON.stringify(financial) };
+        contextState.note = `${financialNote}${financialPrefix}${JSON.stringify(financial)}]`;
       }
       response = restored?.response ?? await completeWithContext(session, messages, {
           provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
@@ -996,6 +1023,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       options.signal?.throwIfAborted();
       await refreshFinancialState(); // includes the model payment, including a replayed receipt
     } catch (error) {
+      if (holding()) return deliverHeld(turn, `the housekeeping model call failed: ${(error as Error).message}`);
       if (error instanceof BudgetExhaustedError) {
         // Budget exhaustion is a deterministic stop, not a fault: finish
         // with what the session accomplished so far.
@@ -1011,12 +1039,17 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         ? { ...response, toolCalls: [] }
         : response);
       messages.push(assistantMessage);
-      await options.onMessage?.(assistantMessage);
+      // What the model says after its answer is held is bookkeeping (a
+      // reflection, a review acknowledgement), and owners read it appended to
+      // a third of their replies (SRI-66). It stays in the history and is
+      // marked, so a host can keep it out of the conversation.
+      await options.onMessage?.(finalAnswerHeld ? { ...assistantMessage, housekeeping: true } : assistantMessage);
     }
     await checkpoint(turn, response, completedTools);
     if (isOutputLimitFinishReason(response.finishReason)) {
       outputContinuationPrefix += response.content;
       if (outputContinuationNudges >= 1) {
+        if (holding()) return deliverHeld(turn, "the housekeeping turn hit the output limit twice");
         const summary = await completeSession(
           session,
           `Stopped: the LLM hit its output limit twice. Partial response:\n\n${outputContinuationPrefix}`
@@ -1040,6 +1073,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const blocker = await options.completionGate?.(completionNudges > 0);
       if (blocker) {
         if (completionNudges >= 1) {
+          if (holding()) return deliverHeld(turn, `the completion gate still blocks: ${blocker}`);
           const summary = await completeSession(session, `Stopped: ${blocker}`);
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
@@ -1101,45 +1135,60 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         data: { tool: call.name, arguments: call.arguments }
       });
       const budgetBeforeToolCall = currentBudget();
+      // Arguments that were not JSON (SRI-63) never execute as sent. A broken
+      // complete_session still finishes when the answer is already in hand:
+      // the reply's own text, or the answer this housekeeping turn is holding.
+      const salvaged = call.invalidArguments === undefined || call.name !== "complete_session" ? undefined
+        : response.content.trim() ? response.content : holding() ? pendingFinalMessage : undefined;
+      const baseArguments = salvaged === undefined ? call.arguments : { final_message: salvaged };
       const callArguments = call.name === "complete_session" && outputContinuationPrefix
         ? {
-          ...call.arguments,
-          final_message: outputContinuationPrefix + (typeof call.arguments.final_message === "string" ? call.arguments.final_message : "")
+          ...baseArguments,
+          final_message: outputContinuationPrefix + (typeof baseArguments.final_message === "string" ? baseArguments.final_message : "")
         }
-        : call.arguments;
+        : baseArguments;
       let result: ToolResult;
-      if (completedTools[call.id]) {
-        result = completedTools[call.id];
-      } else if (call.name === "spawn_subagent") {
-        try {
-          result = options.subagent
-            ? await (spawnedThisTurn.get(call.id) ?? Promise.resolve({ ok: false, error: "subagent launch failed" }))
-            : { ok: false, error: "subagents are not enabled for this session" };
-        } catch (error) { await Promise.allSettled(spawnedThisTurn.values()); throw error; }
-      } else if (call.name === "check_subagents") {
-        if (call.arguments.wait === true) {
-          result = { ok: true, data: { subagents: await drainBackground() } };
+      try {
+        if (completedTools[call.id]) {
+          result = completedTools[call.id];
+        } else if (call.invalidArguments !== undefined && salvaged === undefined) {
+          result = { ok: false, error: invalidArgumentsError(call.name, call.invalidArguments) };
+        } else if (call.name === "spawn_subagent") {
+          try {
+            result = options.subagent
+              ? await (spawnedThisTurn.get(call.id) ?? Promise.resolve({ ok: false, error: "subagent launch failed" }))
+              : { ok: false, error: "subagents are not enabled for this session" };
+          } catch (error) { await Promise.allSettled(spawnedThisTurn.values()); throw error; }
+        } else if (call.name === "check_subagents") {
+          if (call.arguments.wait === true) {
+            result = { ok: true, data: { subagents: await drainBackground() } };
+          } else {
+            result = {
+              ok: true,
+              data: {
+                subagents: [...backgroundSubagents.values()].map((entry) => ({
+                  subagent_index: entry.index,
+                  task: entry.task,
+                  status: entry.status,
+                  ...(entry.status === "finished" && entry.result?.ok && entry.result.data && typeof entry.result.data === "object"
+                    ? entry.result.data as Record<string, unknown>
+                    : entry.status === "finished" ? { outcome: "error", error: entry.result?.error } : {})
+                }))
+              }
+            };
+          }
+        } else if (TOOL_NAMES.includes(call.name as ToolName)) {
+          result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress, signal: options.signal });
+        } else if (options.dynamicTools) {
+          result = await options.dynamicTools.execute(call.name, callArguments);
         } else {
-          result = {
-            ok: true,
-            data: {
-              subagents: [...backgroundSubagents.values()].map((entry) => ({
-                subagent_index: entry.index,
-                task: entry.task,
-                status: entry.status,
-                ...(entry.status === "finished" && entry.result?.ok && entry.result.data && typeof entry.result.data === "object"
-                  ? entry.result.data as Record<string, unknown>
-                  : entry.status === "finished" ? { outcome: "error", error: entry.result?.error } : {})
-              }))
-            }
-          };
+          result = { ok: false, error: `unknown tool: ${call.name}` };
         }
-      } else if (TOOL_NAMES.includes(call.name as ToolName)) {
-        result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress, signal: options.signal });
-      } else if (options.dynamicTools) {
-        result = await options.dynamicTools.execute(call.name, callArguments);
-      } else {
-        result = { ok: false, error: `unknown tool: ${call.name}` };
+      } catch (error) {
+        // A paused approval or a lost gateway reply is a reason to stop a run,
+        // never to take back an answer it already gave.
+        if (holding()) return deliverHeld(turn, `the housekeeping tool ${call.name} failed: ${(error as Error).message}`);
+        throw error;
       }
       result = capToolResult(result);
       await refreshFinancialState(); // includes a settled service payment and changed approvals
@@ -1174,6 +1223,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         if (call.name === "call_paid_service") {
           serviceCallFailures += 1;
           if (serviceCallFailures >= 3) {
+            if (holding()) return deliverHeld(turn, `paid service calls failed ${serviceCallFailures} times: ${result.error}`);
             const summary = await completeSession(session, `Stopped after ${serviceCallFailures} service call failures. Last error: ${result.error}`);
             return { outcome: "stopped", summary, turns: turn + 1 };
           }
@@ -1182,6 +1232,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         const count = (repeatedFailures.get(key) ?? 0) + 1;
         repeatedFailures.set(key, count);
         if (count >= 2) {
+          if (holding()) return deliverHeld(turn, `${call.name} failed repeatedly: ${result.error}`);
           const summary = await completeSession(session, `Stopped because ${call.name} failed repeatedly: ${result.error}`);
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
@@ -1201,6 +1252,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const blocker = await options.completionGate?.(completionNudges > 0);
       if (blocker) {
         if (completionNudges >= 1) {
+          if (holding()) return deliverHeld(turn, `the completion gate still blocks: ${blocker}`);
           const summary = await completeSession(session, `Stopped: ${blocker}`);
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
@@ -1234,6 +1286,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       return { outcome: "completed", summary, turns: turn + 1 };
     }
   }
+  if (holding()) return deliverHeld(maxTurns - 1, "the run reached its maximum turns during housekeeping");
   if (backgroundSubagents.size > 0) {
     await drainBackground();
   }
@@ -1491,8 +1544,16 @@ function assistantMessageFromResponse(response: LlmResponse): LlmMessage {
   return {
     role: "assistant",
     content: response.content,
-    toolCalls: response.toolCalls
+    // The raw text of a malformed call is for this runtime's error, not a
+    // field a provider request may carry.
+    toolCalls: response.toolCalls.map(({ invalidArguments: _invalid, ...call }) => call)
   };
+}
+
+/** What a model is told when its tool call's arguments were not JSON. */
+function invalidArgumentsError(name: string, raw: string): string {
+  const shown = raw.length > 300 ? `${raw.slice(0, 300)}…` : raw;
+  return `Your ${name} call was not run: its arguments were not a valid JSON object (${JSON.stringify(shown)}). Call ${name} again with valid JSON arguments.`;
 }
 
 async function completeMockLlmCall(

@@ -12,3 +12,4 @@ export * from "./context.js";
 export * from "./deadlines.js";
 export * from "./spending.js";
 export * from "./financial-state.js";
+export * from "./reasoning.js";

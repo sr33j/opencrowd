@@ -82,6 +82,9 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
       for (const call of result.response.toolCalls) {
         if (typeof call.id !== "string" || !call.id || typeof call.name !== "string" || !call.arguments
           || typeof call.arguments !== "object" || Array.isArray(call.arguments)) throw new Error("Invalid hosted tool call");
+        // A call whose arguments were not JSON arrives with its raw text, and
+        // is answered with a tool error rather than failing the paid response.
+        if (call.invalidArguments !== undefined && typeof call.invalidArguments !== "string") delete call.invalidArguments;
       }
       return result.response as LlmResponse;
     }

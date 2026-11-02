@@ -1,4 +1,4 @@
-import { capStrings, captureDetail, DeadlineExceeded, MAX_EXTERNAL_STRING_CHARS, scrubText, withDeadline } from "@opencrowd/protocol";
+import { capStrings, captureDetail, DeadlineExceeded, MAX_EXTERNAL_STRING_CHARS, scrubText, stripReasoning, withDeadline } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -360,8 +360,11 @@ export class MachineWorker {
             .map(message => JSON.stringify({ type: "message", timestamp: new Date().toISOString(), message }) + "\n").join(""));
         },
         onMessage: async message => {
-          if (message.role === "assistant" && message.content) await this.emit("assistant.message", {
-            messageId: randomUUID(), content: message.content
+          // Bookkeeping after the answer is not part of the owner's reply
+          // (SRI-66); model.finished keeps it for whoever is debugging.
+          const content = message.role === "assistant" && !message.housekeeping ? stripReasoning(message.content) : "";
+          if (content.trim()) await this.emit("assistant.message", {
+            messageId: randomUUID(), content
           }, runId, run.commandId);
         },
         toolExecutor: (name, args, context) => record(name, args, () =>
