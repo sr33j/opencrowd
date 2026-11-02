@@ -270,6 +270,20 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     if (reply.ok) {
       const data = objectValue(reply.data) ?? {};
       const status = numberValue(data.status);
+      // The agent called its own service. CrowdCode ran it as an owner test:
+      // nothing was paid, so there is no purchase to review (SRI-68).
+      if (data.outcome === "owner_test") {
+        const ok = status !== undefined && status < 400;
+        return {
+          ok,
+          ambiguous: false,
+          status,
+          data: decodeBody(data.body, data.content_type),
+          authMode: "free",
+          error: ok ? undefined : `your service answered HTTP ${status ?? "?"}`,
+          note: "This is your own service, so CrowdCode ran this call as a free owner test: nothing was paid or earned. Buyers pay the listed price as usual."
+        };
+      }
       const outcome = data.outcome === "paid_success" ? "paid_success" : "paid_failure";
       const paidAtomic = numberValue(data.amount_atomic);
       // The gateway chose the network; an older gateway that omits it paid on Base.

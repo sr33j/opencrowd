@@ -261,6 +261,31 @@ describe("hosted economy: payment over the bridge", () => {
     expect(await gateway.hasPendingRequiredReviews()).toBe(false);
   });
 
+  it("reports a call to the agent's own service as a free owner test, with nothing to review (SRI-68)", async () => {
+    const { fetcher, calls } = fakeFetch();
+    const { socketPath } = await bridge((name) => name === "economy.pay"
+      ? { ok: true, data: { outcome: "owner_test", status: 200, body: JSON.stringify({ words: 3, sentences: 1 }), content_type: "application/json",
+        amount_atomic: "0", attempt_id: "att_own" } }
+      : { ok: false, error: "unexpected" });
+    const { session, gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { text: "one two three" } });
+    expect(call.ok).toBe(true);
+    expect(call.data).toMatchObject({ outcome: "free", status: 200, charged_cost_cents: 0, review_required: false,
+      note: expect.stringContaining("own service"), data: { words: 3, sentences: 1 } });
+    expect(JSON.stringify(call)).not.toMatch(/payment state is unknown|must not be retried/);
+    expect((await loadSession(session.workspaceRoot, session.sessionId)).spentCents).toBe(0);
+    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+    // The worker never fetched the service itself: the gateway's answer is the answer.
+    expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ text: "one two three" }))).toHaveLength(0);
+    // A handler error on its own test is the service's answer, not an uncertain payment.
+    const { socketPath: failing } = await bridge(() => ({ ok: true, data: { outcome: "owner_test", status: 500, body: "boom", content_type: "text/plain", amount_atomic: "0" } }));
+    const { gateway: second } = await economy(fetcher, failing);
+    await second.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const broken = await second.execute("call_paid_service", { url: SEARCH, method: "POST", body: { text: "x" } });
+    expect(broken).toMatchObject({ ok: false, error: "your service answered HTTP 500", data: { outcome: "free", status: 500, charged_cost_cents: 0 } });
+  });
+
   it("fetches the endpoint itself when the supervisor reports expected_payment_required", async () => {
     const { fetcher, calls } = fakeFetch({ endpointStatus: 200 });
     const { socketPath } = await bridge(() => ({ ok: false, error: "the endpoint did not require payment", code: "expected_payment_required" }));

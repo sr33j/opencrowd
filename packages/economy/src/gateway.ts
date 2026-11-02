@@ -502,6 +502,7 @@ export class EconomyGateway {
         artifact_path: artifact?.path,
         review_required: record.review_required,
         review_available: true,
+        ...(result.note ? { note: result.note } : {}),
         data: result.data,
         ...(result.ok ? {} : { error: result.error })
       },
