@@ -2,6 +2,13 @@ import { z } from "zod";
 
 /** User-facing failure copy; detailed diagnostics belong to events and ledgers. */
 export const RUN_FAILURE_MESSAGE = "Something went wrong. You can retry or send another message.";
+/**
+ * What a run paused at `payment_unknown` tells its owner. The model call was
+ * cut off while its payment may have been in flight; the hosted reconciler
+ * settles or releases that payment from the chain and resumes the run, which
+ * replays a saved answer rather than buying it again.
+ */
+export const PAYMENT_RECONCILING_MESSAGE = "The model call was interrupted while its payment was in flight. CrowdCode is confirming that payment and will continue this run automatically; nothing is charged twice. You can also send a new message.";
 
 /**
  * Plain words for a model request a seller refused outright, before any
