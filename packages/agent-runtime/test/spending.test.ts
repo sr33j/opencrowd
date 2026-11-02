@@ -26,7 +26,7 @@ it("resumes a saved query after approval without repeating a completed model or 
     const afterTool = request.messages.some(m => m.role === "tool");
     await request.authorizePayment!(afterTool ? 150 : 50, afterTool ? "second" : "first");
     paid++;
-    return { content: afterTool ? "Done" : "", toolCalls: afterTool ? [] : [{ id: "tool-1", name: "test_tool", arguments: {} }], usage: { costCents: afterTool ? 150 : 50 } };
+    return { content: afterTool ? "Done: the test tool ran once." : "", toolCalls: afterTool ? [] : [{ id: "tool-1", name: "test_tool", arguments: {} }], usage: { costCents: afterTool ? 150 : 50 } };
   } };
   const runtime = createOpenCrowdRuntime({ workspace: root,
     llmProvider: async () => ({ kind: "typed", main: { provider, model: "test", maxCostCentsPerCall: 100 } }),
@@ -50,7 +50,7 @@ it("checkpoints parallel subagents and shares the parent query budget across an 
   let mainCalls = 0, subPayments = 0;
   const main: TypedLlmProvider = { id: "blockrun", quotesPayments: true, listModels: async () => [], complete: async request => {
     await request.authorizePayment!(1, "main"); mainCalls++;
-    return request.messages.some(m => m.role === "tool") ? { content: "Done", toolCalls: [], usage: { costCents: 1 } }
+    return request.messages.some(m => m.role === "tool") ? { content: "Done: out.txt is saved.", toolCalls: [], usage: { costCents: 1 } }
       : { content: "", toolCalls: ["a", "b"].map(id => ({ id, name: "spawn_subagent", arguments: { task: id, background: true } })), usage: { costCents: 1 } };
   } };
   const sub: TypedLlmProvider = { id: "blockrun", quotesPayments: true, listModels: async () => [], complete: async request => {

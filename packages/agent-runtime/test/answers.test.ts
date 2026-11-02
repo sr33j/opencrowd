@@ -7,7 +7,7 @@ import { createSession, executeTool } from "@opencrowd/core";
 import { atomicUsdc, stripReasoning, type Command, type Event, type FinancialState } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
 import { economyTools } from "../src/economy-tools.js";
-import { runAgentTaskDetailed, type LlmMessage, type LlmProvider, type LlmResponse, type ToolExecutor } from "../src/index.js";
+import { isNonAnswer, runAgentTaskDetailed, type LlmMessage, type LlmProvider, type LlmResponse, type ToolExecutor } from "../src/index.js";
 import { MachineWorker, RuntimePause } from "../src/worker.js";
 
 /**
@@ -207,6 +207,99 @@ describe("SRI-63: a malformed tool call is a tool error, not a failed run", () =
     const result = await runAgentTaskDetailed(await session(), "What is a stock?", { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
     expect(result).toMatchObject({ outcome: "completed", summary: { final_message: "A stock represents an ownership share in a company." } });
     expect(provider.complete).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("SRI-79: a placeholder or an acknowledgement is not the answer", () => {
+  const search = { id: "s", name: "call_paid_service", arguments: { url: "https://api.exa.ai/search", method: "POST", body: { query: "US stablecoin regulation" } } };
+  const sourced = "The two biggest developments were the GENIUS Act (https://www.congress.gov/bill/119th-congress/senate-bill/1582) and the OCC's interpretive letter 1183 (https://www.occ.gov/news-issuances/news-releases/2025/nr-occ-2025-16.html).";
+  /** Hosted economy tools: a paid search that returns sources, a review, and the reflection gate. */
+  function economy(pendingReview = { value: true }) {
+    return reflection({
+      definitions: () => ["request_service", "call_paid_service", "review_paid_service"].map(name => ({ name, description: name, parameters: { type: "object" } })),
+      execute: async (name: string) => {
+        if (name === "call_paid_service") return { ok: true, data: { status: 200, body: { results: [{ url: "https://www.congress.gov/bill/119th-congress/senate-bill/1582" }] } } };
+        if (name === "review_paid_service") pendingReview.value = false;
+        return { ok: true, data: { enabled: true } };
+      },
+      hasPendingRequiredReviews: async () => pendingReview.value,
+    });
+  }
+
+  it("does not lock in a placeholder when the reflection gate blocks (run 0a28c67b)", async () => {
+    const tools = economy();
+    const requests: LlmMessage[][] = [];
+    const replies: LlmResponse[] = [
+      { content: "", toolCalls: [search] },
+      { content: "", toolCalls: [{ id: "rv", name: "review_paid_service", arguments: { rating: 5 } }] },
+      complete("I’m preparing the current, source-cited answer now."),
+      complete(sourced),
+    ];
+    const provider = { complete: vi.fn(async (messages: LlmMessage[]) => { requests.push(structuredClone(messages)); return replies[requests.length - 1]; }) };
+    const result = await runAgentTaskDetailed(await session(), "What were the two biggest developments in US stablecoin regulation in the last 12 months? Use a paid web search and cite source URLs.",
+      { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe(sourced);
+    const nudge = requests[3].at(-1)!.content;
+    expect(nudge).toContain("is not an answer");
+    expect(nudge).not.toContain("nothing you write now can replace it");
+  });
+
+  it("asks once for the answer when the model ends with a bare acknowledgement (run 4a309106)", async () => {
+    const url = "https://crowdcode.app/x402/services/sweep2-wordcount";
+    const requests: LlmMessage[][] = [];
+    const replies: LlmResponse[] = [
+      { content: "", toolCalls: [{ id: "sh", name: "run_shell", arguments: { command: "deploy" } }] },
+      complete("Acknowledged."),
+      complete(`Deployed sweep2-wordcount at ${url}. The self-test call failed in transport.`),
+    ];
+    const provider = { complete: vi.fn(async (messages: LlmMessage[]) => { requests.push(structuredClone(messages)); return replies[requests.length - 1]; }) };
+    const result = await runAgentTaskDetailed(await session(), "Deploy a paid service with slug sweep2-wordcount. Test it once and give me its URL.",
+      { provider, toolExecutor: shell(async () => ({ ok: true, data: { stdout: url, exit_code: 0 } })) });
+    expect(result.outcome).toBe("completed");
+    expect(String(result.summary.final_message)).toContain(url);
+    expect(requests[2].at(-1)!.content).toContain('("Acknowledged.") is not an answer');
+  });
+
+  it("delivers what the model says after one reminder, rather than looping", async () => {
+    const provider = { complete: vi.fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "sh", name: "run_shell", arguments: { command: "true" } }] })
+      .mockResolvedValue(complete("Done.")) };
+    const result = await runAgentTaskDetailed(await session(), "Touch the file.", { provider, toolExecutor: shell(async () => ({ ok: true, data: { exit_code: 0 } })) });
+    expect(result).toMatchObject({ outcome: "completed", summary: { final_message: "Done." } });
+    expect(provider.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it("leaves a short reply alone when the run did no work", async () => {
+    const provider = { complete: vi.fn().mockResolvedValue(complete("OK.")) };
+    const result = await runAgentTaskDetailed(await session(), "Reply with just OK.", { provider });
+    expect(result).toMatchObject({ outcome: "completed", summary: { final_message: "OK." } });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it("still holds a real answer, and the reflection's acknowledgement does not replace it", async () => {
+    const tools = economy({ value: false });
+    const provider = { complete: vi.fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [search] })
+      .mockResolvedValueOnce(complete(sourced))
+      .mockResolvedValueOnce(complete("Acknowledged.")) };
+    const result = await runAgentTaskDetailed(await session(), "stablecoin news", { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
+    expect(result).toMatchObject({ outcome: "completed", summary: { final_message: sourced } });
+    expect(provider.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([
+    ["Acknowledged.", true], ["Done.", true], ["OK", true], ["Got it!", true], ["Noted.", true],
+    ["I’m preparing the current, source-cited answer now.", true], ["I'll now compile the results.", true],
+    ["Let me summarize what I found.", true], ["One moment while I format the answer.", true], ["I am now putting together your report.", true],
+    ["Done. The service is live at https://crowdcode.app/x402/services/wc.", false],
+    ["Done: deleted 3 files.", false],
+    ["I'm sorry, the search service is down, so I couldn't find sources.", false],
+    ["I'll need your API key to continue.", false],
+    ["The answer is 42.", false],
+    ["", false],
+  ])("isNonAnswer(%j) is %s", (text, expected) => {
+    expect(isNonAnswer(text)).toBe(expected);
   });
 });
 

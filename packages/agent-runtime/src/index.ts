@@ -49,6 +49,8 @@ export * from "./x402-proxy.js";
 export * from "./knowledge.js";
 export * from "./context.js";
 export * from "./tool-deadlines.js";
+export * from "./non-answer.js";
+import { isNonAnswer } from "./non-answer.js";
 
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */
@@ -668,6 +670,8 @@ export interface LoopCheckpoint {
   pendingFinalMessage?: string;
   /** The held answer is the user's; gate follow-up work must not replace it. */
   finalAnswerHeld?: boolean;
+  /** Times the model was told its final message was not an answer (SRI-79). */
+  answerNudges?: number;
   outputContinuationNudges: number;
   outputContinuationPrefix: string;
   serviceCallFailures: number;
@@ -914,6 +918,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   // housekeeping (required reviews, CrowdCode reflection). Its closing words
   // must never become the answer the owner reads.
   let finalAnswerHeld = options.resume?.finalAnswerHeld ?? false;
+  let answerNudges = options.resume?.answerNudges ?? 0;
   let supersededFinalMessage: string | undefined;
   let outputContinuationNudges = options.resume?.outputContinuationNudges ?? 0;
   let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
@@ -921,7 +926,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
     await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState, deliveredMessageIds: [...deliveredMessageIds],
-      completionNudges, pendingFinalMessage, finalAnswerHeld, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
+      completionNudges, pendingFinalMessage, finalAnswerHeld, answerNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
       repeatedFailures: [...repeatedFailures.entries()] }));
   };
   const injectMessages = async (turn: number) => {
@@ -951,9 +956,22 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     if (!finalAnswerHeld) pendingFinalMessage = text;
     else if (text.trim() !== pendingFinalMessage?.trim()) supersededFinalMessage = text;
   };
+  /**
+   * A placeholder ("I'm preparing the answer now.") or a bare "Acknowledged."
+   * after real work is not the user's answer, and a gate must not lock it in
+   * (SRI-79). A run that only talked has nothing more to report.
+   */
+  const placeholder = () => !finalAnswerHeld && !!pendingFinalMessage && isNonAnswer(pendingFinalMessage)
+    && messages.some(m => m.role === "assistant" && m.toolCalls?.some(call => call.name !== "complete_session"));
+  const notAnAnswer = () => `Your final message so far ("${pendingFinalMessage!.trim()}") is not an answer, and the user sees only your final message, never your tool results.`;
+  /** Holds the answer in hand, unless it is only a placeholder. */
+  const hold = () => { if (pendingFinalMessage?.trim() && !placeholder()) finalAnswerHeld = true; };
   const gateNudge = (blocker: string) => finalAnswerHeld
     ? `Your final answer is already saved and will be delivered to the user exactly as written; nothing you write now can replace it. Before this run ends: ${blocker} Then call complete_session again to finish; a one-line acknowledgement is enough, and do not restate the answer.`
-    : `You cannot finish yet: ${blocker}`;
+    : placeholder()
+      ? `You cannot finish yet: ${blocker} ${notAnAnswer()} When you call complete_session again, put the complete answer to the user's request in it.`
+      : `You cannot finish yet: ${blocker}`;
+  const answerNudge = () => `${notAnAnswer()} Call complete_session again with the complete answer to the user's request: what you found or did, with the URLs, figures or identifiers they need.`;
   const withReflection = (summary: Record<string, unknown>) =>
     supersededFinalMessage ? { ...summary, reflection_note: supersededFinalMessage } : summary;
   /** The owner already has an answer and this turn is only housekeeping. */
@@ -1071,15 +1089,21 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
       recordFinalMessage(finalMessage);
       const blocker = await options.completionGate?.(completionNudges > 0);
+      const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {
+          hold();
           if (holding()) return deliverHeld(turn, `the completion gate still blocks: ${blocker}`);
           const summary = await completeSession(session, `Stopped: ${blocker}`);
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
         completionNudges += 1;
-        if (pendingFinalMessage?.trim()) finalAnswerHeld = true;
-        const nudge: LlmMessage = { role: "user", content: gateNudge(blocker) };
+      }
+      if (blocker || unanswered) {
+        if (unanswered) answerNudges += 1;
+        hold();
+        const content = blocker ? gateNudge(blocker) : answerNudge();
+        const nudge: LlmMessage = { role: "user", content };
         messages.push(nudge);
         await options.onMessage?.(nudge);
         await checkpoint(turn + 1);
@@ -1250,17 +1274,23 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         ? (result.data as Record<string, unknown>).final_message : undefined;
       if (typeof finalMessage === "string") recordFinalMessage(finalMessage);
       const blocker = await options.completionGate?.(completionNudges > 0);
+      const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {
+          hold();
           if (holding()) return deliverHeld(turn, `the completion gate still blocks: ${blocker}`);
           const summary = await completeSession(session, `Stopped: ${blocker}`);
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
         completionNudges += 1;
-        if (pendingFinalMessage?.trim()) finalAnswerHeld = true;
+      }
+      if (blocker || unanswered) {
+        if (unanswered) answerNudges += 1;
+        hold();
+        const content = blocker ? gateNudge(blocker) : answerNudge();
         const gateMessage = {
           role: "user",
-          content: gateNudge(blocker)
+          content
         } as LlmMessage;
         messages.push(gateMessage);
         await options.onMessage?.(gateMessage);

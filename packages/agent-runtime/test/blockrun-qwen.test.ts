@@ -177,7 +177,7 @@ describe("qwen/qwen3.8-max on BlockRun", () => {
         ])
         : sseResponse([
           { choices: [{ index: 0, delta: { content: "All " }, finish_reason: null }] },
-          { choices: [{ index: 0, delta: { content: "done." }, finish_reason: "stop" }] }
+          { choices: [{ index: 0, delta: { content: "done: the budget scope is query." }, finish_reason: "stop" }] }
         ]);
     });
     const provider = new BlockRunProvider({ fetchImpl: fetcher as unknown as typeof fetch });
