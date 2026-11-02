@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { RUN_FAILURE_MESSAGE, type Command, type Event } from "@opencrowd/protocol";
+import { PAYMENT_RECONCILING_MESSAGE, RUN_FAILURE_MESSAGE, type Command, type Event } from "@opencrowd/protocol";
 import { createSession } from "@opencrowd/core";
 import { MachineWorker } from "../src/worker.js";
 import { completeWithContext, type ContextState } from "../src/context.js";
@@ -72,7 +72,10 @@ describe("hosted bridge failure classification", () => {
     } finally { await b.close(); }
   });
 
-  it("ends ambiguous failures without locking the conversation", async () => {
+  it("pauses an interrupted paid call for reconciliation instead of failing the run (SRI-58)", async () => {
+    // Run bdf636cf on 2026-11-01: a gateway deploy reset the connection 62
+    // seconds into a Venice call whose answer the gateway had already saved,
+    // and the run ended "failed" while its payment settled.
     for (const handler of [
       (res: import("node:http").ServerResponse) => { res.statusCode = 503; res.end(JSON.stringify({ error: "upstream_unavailable" })); },
       (res: import("node:http").ServerResponse) => { res.statusCode = 400; res.end(JSON.stringify({ error: "x", paid: true })); },
@@ -80,9 +83,61 @@ describe("hosted bridge failure classification", () => {
       (res: import("node:http").ServerResponse) => { res.destroy(); }
     ]) {
       const b = await bridge(handler);
-      try { expect(await b.run()).toMatchObject({ outcome: "failed", summary: RUN_FAILURE_MESSAGE, pendingOperationId: "run-1:llm:0" }); }
+      try { expect(await b.run()).toMatchObject({ outcome: "payment_unknown", summary: PAYMENT_RECONCILING_MESSAGE, pendingOperationId: "run-1:llm:0" }); }
       finally { await b.close(); }
     }
+  });
+
+  it("resumes the paused operation once its payment is reconciled, and replays the saved answer", async () => {
+    const home = await root(), socketPath = join(home, "bridge.sock");
+    const operations: string[] = [];
+    let interrupted = false;
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      operations.push(JSON.parse(Buffer.concat(chunks).toString("utf8")).operationId);
+      // The first attempt is cut off mid-call; the resume gets the ledger's replay.
+      if (!interrupted) { interrupted = true; res.destroy(); return; }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ status: "complete", response: { content: "the saved answer", toolCalls: [] } }));
+    });
+    await new Promise<void>(resolve => server.listen(socketPath, resolve));
+    const events: Event[] = [];
+    const worker = new MachineWorker({ agentHome: join(home, "data"), output: line => { events.push(JSON.parse(line)); },
+      provider: () => createHostedProvider({ socketPath, runId: "run-1", sessionId: "session-1" }) });
+    const finished = () => events.filter(e => e.type === "run.finished").at(-1)!.payload as { outcome: string; summary?: string; checkpointId?: string; pendingOperationId?: string };
+    try {
+      await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
+      const paused = finished();
+      expect(paused).toMatchObject({ outcome: "payment_unknown", pendingOperationId: "run-1:llm:0" });
+      // A different run cannot start while this one is paused on its payment.
+      await worker.handleLine(JSON.stringify({ ...command, id: "command-other", runId: "run-2", seq: 2 }));
+      expect(events.some(e => e.type === "command.rejected" && e.commandId === "command-other")).toBe(true);
+      await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "command-2", runId: "run-1", seq: 3, emittedAt: "2026-09-05T00:00:00Z", type: "run.resume",
+        payload: { sessionId: "session-1", cause: "payment_reconciled", operationId: "run-1:llm:0", checkpointId: paused.checkpointId } }));
+      await worker.drain();
+      expect(finished()).toMatchObject({ outcome: "completed" });
+      // The same operation both times: a resume never buys a fresh call.
+      expect(operations).toEqual(["run-1:llm:0", "run-1:llm:0"]);
+    } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); }
+  });
+
+  it("lets a new message supersede a run paused on its payment", async () => {
+    const b = await bridge(res => { res.destroy(); });
+    const home = await root();
+    const events: Event[] = [];
+    const worker = new MachineWorker({ agentHome: join(home, "data"), output: line => { events.push(JSON.parse(line)); },
+      provider: () => createHostedProvider({ socketPath: b.socketPath, runId: "run-1", sessionId: "session-1" }) });
+    try {
+      await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
+      // Control cancels a waiting run before it starts the owner's next one.
+      await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "cancel-1", runId: "run-1", seq: 2, emittedAt: "2026-09-05T00:00:00Z", type: "run.cancel",
+        payload: { reason: "Superseded by a new message." } }));
+      await worker.drain();
+      expect(events.filter(e => e.type === "run.finished").at(-1)!.payload).toMatchObject({ outcome: "cancelled" });
+      await worker.handleLine(JSON.stringify({ ...command, id: "command-next", runId: "run-2", seq: 3 }));
+      expect(events.some(e => e.type === "command.accepted" && e.commandId === "command-next")).toBe(true);
+      await worker.drain();
+    } finally { await b.close(); }
   });
 
   it("compacts and retries when a seller refuses the body's size, and never pays for the refusal", async () => {

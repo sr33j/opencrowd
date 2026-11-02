@@ -8,7 +8,7 @@ import {
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
-  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, upstreamRefusalSummary, type CommandOf, type Event, type EventType,
+  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, PAYMENT_RECONCILING_MESSAGE, upstreamRefusalSummary, type CommandOf, type Event, type EventType,
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
@@ -380,10 +380,15 @@ export class MachineWorker {
       if (signal.aborted) await this.finish(runId, run, "cancelled", "Run cancelled");
       else if (error instanceof RuntimePause) {
         await this.mutate(() => { run.pendingOperationId = error.operationId; });
-        // Payment uncertainty belongs to the ledger, not the conversation.
-        // End this task so a new user request can proceed while it reconciles.
-        await this.finish(runId, run, error.outcome === "payment_unknown" ? "failed" : error.outcome,
-          error.outcome === "payment_unknown" ? RUN_FAILURE_MESSAGE : error.message);
+        // An interrupted paid call is a pause, never a failure: the gateway may
+        // already hold the answer it paid for (on 2026-11-01 run bdf636cf's
+        // did, and the run still ended "failed"). The hosted reconciler
+        // settles or releases the payment and resumes this exact operation,
+        // which replays a saved answer instead of buying it twice. A new
+        // message from the owner still supersedes the pause: control cancels
+        // a waiting run before it starts the next one.
+        await this.finish(runId, run, error.outcome,
+          error.outcome === "payment_unknown" ? PAYMENT_RECONCILING_MESSAGE : error.message);
       } else if (error instanceof SpendingDeclined) await this.finish(runId, run, "user_stopped", error.message);
       // A seller's refusal before payment is a fact the owner can act on, so
       // it is said in plain words instead of "something went wrong".

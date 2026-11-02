@@ -20,12 +20,57 @@ export const MODEL_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
  */
 export const MODEL_SELLER_REQUEST_MAX_BYTES = 5 * 1024 * 1024;
 export const MODEL_MAX_MESSAGES = 1000;
-/** Non-streaming generation can take minutes. Outer hops also allow quoting,
- * signing and receipt verification; they must not abandon a live paid call. */
+/**
+ * How long a paid model call may take at the seller, at least. Non-streaming
+ * generation can take minutes; outer hops also allow quoting, signing and
+ * receipt verification, and must not abandon a live paid call.
+ */
 export const MODEL_PROVIDER_TIMEOUT_MS = 300_000;
-export const MODEL_GATEWAY_TIMEOUT_MS = 420_000;
-// A new run may wait for one cancelled request to drain before its own call.
-export const MODEL_BRIDGE_TIMEOUT_MS = 2 * MODEL_GATEWAY_TIMEOUT_MS + 30_000;
+/** ...and at most, for the largest request and the longest answer. */
+export const MODEL_PROVIDER_MAX_TIMEOUT_MS = 480_000;
+/** How long the unpaid quote (the 402) may take, at least and at most. */
+export const MODEL_QUOTE_TIMEOUT_MS = 15_000;
+export const MODEL_QUOTE_MAX_TIMEOUT_MS = 45_000;
+const MIB = 1024 * 1024;
+/**
+ * The seller's allowance for one paid model call, sized from the request.
+ *
+ * A flat deadline is wrong at both ends: generous for a short question, and
+ * short for a long-context turn that asks for a long answer, which is the
+ * call an owner has waited longest for. Time goes to reading the input and to
+ * writing the output, so the allowance is a fixed overhead plus both — read at
+ * a minute per MiB of body (about 260,000 tokens) and written at 25 tokens a
+ * second, the pace of the slowest reasoning models we sell — kept between the
+ * floor every call has always had and a ceiling the outer hops are sized for.
+ */
+export function modelProviderTimeoutMs(request: { requestBytes: number; maxOutputTokens?: number }): number {
+  const bytes = Math.max(0, request.requestBytes || 0), output = Math.max(0, request.maxOutputTokens || 0);
+  const estimate = 60_000 + (bytes / MIB) * 60_000 + output * 40;
+  return Math.round(Math.min(MODEL_PROVIDER_MAX_TIMEOUT_MS, Math.max(MODEL_PROVIDER_TIMEOUT_MS, estimate)));
+}
+/**
+ * The allowance for the unpaid quote. A seller has to receive and read the
+ * body before it can price it, so a large body earns a longer wait; a seller
+ * that cannot quote a small one in fifteen seconds is not going to.
+ */
+export function modelQuoteTimeoutMs(requestBytes: number): number {
+  const estimate = MODEL_QUOTE_TIMEOUT_MS + (Math.max(0, requestBytes || 0) / MIB) * 10_000;
+  return Math.round(Math.min(MODEL_QUOTE_MAX_TIMEOUT_MS, estimate));
+}
+/** The gateway's whole model route: the longest quote, the longest call, and signing and settlement around them. */
+export const MODEL_GATEWAY_TIMEOUT_MS = MODEL_QUOTE_MAX_TIMEOUT_MS + MODEL_PROVIDER_MAX_TIMEOUT_MS + 75_000;
+/**
+ * How long the supervisor keeps re-sending one model call while the gateway
+ * cannot take it — a deploy restarting the gateway's only Machine, which
+ * drains its in-flight calls for up to five minutes first, or a moment of
+ * database trouble. Re-sending is safe because the gateway's ledger is keyed
+ * by the operation: a retry replays the purchase it already made, or makes the
+ * one it never started.
+ */
+export const MODEL_GATEWAY_RETRY_BUDGET_MS = 330_000;
+// A new run may wait for one cancelled request to drain before its own call,
+// and its own call may wait out a gateway restart.
+export const MODEL_BRIDGE_TIMEOUT_MS = 2 * MODEL_GATEWAY_TIMEOUT_MS + MODEL_GATEWAY_RETRY_BUDGET_MS + 30_000;
 export const SERVICE_PROVIDER_TIMEOUT_MS = 300_000;
 export const SERVICE_GATEWAY_TIMEOUT_MS = 330_000;
 /**
