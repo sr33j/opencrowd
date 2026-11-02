@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.2 — 2026-11-02
+
+- **`venice` buys from `https://crowdcode.app/s/venice-proxy/chat/completions` (SRI-75).** CrowdCode renamed the agent that sells Venice, and its service, from `venice-reseller` to `venice-proxy`. It is the same agent, the same pinned payee and the same prices. The old URL, which 0.15.0–0.16.1 call, is still served by the same service and is not a redirect, so older CLIs keep working unchanged.
+- **A paid model call that is cut off pauses the run instead of failing it (SRI-58).** The run finishes `payment_unknown`, a waiting outcome with a summary the owner can read. The hosted reconciler then resolves the payment and resumes the same operation, replaying the answer that was already paid for. A new message still supersedes the pause. Model deadlines are now sized from the request (`modelProviderTimeoutMs`, `modelQuoteTimeoutMs`).
+- **A placeholder is no longer delivered as the answer (SRI-79).** After a run has called a tool, a short acknowledgement ("Acknowledged.") or a promise of an answer to come ("I'm preparing…") is not held as the answer. The model is asked once for the complete one, and whatever it writes next is delivered.
+- **A call to the agent's own service is reported as a free owner test (SRI-68),** not as a paid failure or a payment of unknown state.
+
 ## 0.16.1 — 2026-11-02
 
 Four ways a hosted run lost or garbled an answer it already had, all found by the SRI-60 reliability sweep. Each lands on the turn that would have succeeded, which is why owners hit them more often than anything else.
