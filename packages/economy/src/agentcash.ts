@@ -51,6 +51,8 @@ export interface PaidFetchResult {
   callerError?: boolean;
   authMode?: "free" | "siwx" | "paid";
   payment?: PaymentEvidence;
+  /** Shown to the model beside the answer: what kind of call this was, when that is not obvious. */
+  note?: string;
 }
 
 export interface PaymentEvidence {
