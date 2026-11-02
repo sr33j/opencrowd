@@ -8,10 +8,17 @@ export interface ContextState {
   /** Once prepared, an interrupted/paused request must be replayed byte-for-byte. */
   prepared?: boolean;
   /**
-   * This turn's changing context, sent after the history and never added to
-   * it. Checkpointed, because a paused payment has to be replayed byte for
-   * byte, and kept out of `messages` so the prefix a seller caches does not
-   * move when a balance does.
+   * This turn's changing context (the hosted financial snapshot), attached to
+   * the latest user message of the request and never added to the history.
+   * Checkpointed, because a paused payment has to be replayed byte for byte,
+   * and kept out of `messages` so the prefix a seller caches does not move
+   * when a balance does. See `requestMessages`.
+   */
+  note?: string;
+  /**
+   * The same context as a standalone trailing `user` message, as 0.16.0 sent
+   * it. Only a checkpoint written by that version carries one, and it is
+   * replayed exactly so a paused payment's request does not change.
    */
   trailingMessage?: LlmMessage;
   retry?: number;
@@ -28,6 +35,27 @@ export interface ContextState {
 export interface ModelPrices {
   inputPriceUsdPerMillion?: number;
   cachedInputPriceUsdPerMillion?: number;
+}
+
+/**
+ * The messages a turn actually sends: the history, with this turn's note on
+ * the latest user message.
+ *
+ * 0.16.0 sent the snapshot as a message of its own after the history, and a
+ * trailing `user` message is, to a model, the newest thing the user said. On
+ * the turn after a tool call it answered that instead of the owner: "Snapshot
+ * received and noted as authoritative. No additional action taken." (SRI-65,
+ * gpt-5.6-luna, the default model). Now the note is prefixed to a message the
+ * user (or this runtime) really sent, so the request is still the last words
+ * the model reads. After a tool result there is no note at all: the result
+ * already carries `budget_after_tool_call`, the same snapshot read after the
+ * tool ran, and leaving the request unchanged keeps the whole prefix cached.
+ */
+export function requestMessages(messages: LlmMessage[], state: ContextState): LlmMessage[] {
+  if (state.trailingMessage) return [...messages, state.trailingMessage];
+  const last = messages.at(-1);
+  if (!state.note || last?.role !== "user") return messages;
+  return [...messages.slice(0, -1), { ...last, content: `${state.note}\n\n${last.content}` }];
 }
 
 export async function completeWithContext(session: SessionState, messages: LlmMessage[], options: {
@@ -48,8 +76,7 @@ export async function completeWithContext(session: SessionState, messages: LlmMe
     await options.checkpoint?.(); // freeze the exact request BEFORE payment/network I/O
     try {
       const retry = options.state.retry ?? 0;
-      const trailing = options.state.trailingMessage;
-      const request = trailing ? [...messages, trailing] : messages;
+      const request = requestMessages(messages, options.state);
       const response = await options.provider.complete(request, { signal: options.signal,
         operationId: options.operationId && `${options.operationId}${retry ? `:context:${retry}` : ""}` });
       const used = response.usage?.inputTokens;
@@ -63,6 +90,7 @@ export async function completeWithContext(session: SessionState, messages: LlmMe
           ? Math.min(1, cached / used) : 0;
       }
       options.state.prepared = false;
+      options.state.note = undefined;
       options.state.trailingMessage = undefined;
       options.state.retry = 0;
       return response;
@@ -162,12 +190,12 @@ export async function compactContext(session: SessionState, messages: LlmMessage
     }
     return saved;
   };
-  // The trailing message is this turn's own context, sent after the history
-  // and never part of it, so it is budgeted for exactly like the tools: it
-  // takes room in the request without being a message compaction may remove.
-  const trailing = options.state.trailingMessage;
-  const toolTokens = estimateContextTokens(options.tools) + 32 + (trailing ? estimateContextTokens(trailing) : 0);
-  const toolBytes = Buffer.byteLength(JSON.stringify(options.tools)) + 32 + (trailing ? Buffer.byteLength(JSON.stringify(trailing)) + 1 : 0);
+  // The note is this turn's own context, sent with the history and never part
+  // of it, so it is budgeted for exactly like the tools: it takes room in the
+  // request without being something compaction may remove.
+  const extra = options.state.trailingMessage ?? options.state.note;
+  const toolTokens = estimateContextTokens(options.tools) + 32 + (extra ? estimateContextTokens(extra) : 0);
+  const toolBytes = Buffer.byteLength(JSON.stringify(options.tools)) + 32 + (extra ? Buffer.byteLength(JSON.stringify(extra)) + 1 : 0);
   const count = (list: LlmMessage[]) => Math.ceil(list.reduce((total, m) => total + measure(m).tokens, toolTokens) * scale);
   const tokensBefore = count(messages);
   const retry = options.state.retry ?? 0;

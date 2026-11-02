@@ -1280,8 +1280,11 @@ describe("dependency-injected runtime", () => {
     });
     const session = await runtime.createSession({ budgetCents: 100 });
     const result = await runtime.runTask(session, "finish");
-    expect(result.outcome).toBe("stopped");
-    expect(String(result.summary.final_message)).toContain("required review");
+    // The review is still owed, and still pending for a later retry, but it
+    // cannot take back the answer the owner was already given (SRI-62).
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("finished");
+    expect(String(result.summary.housekeeping_error)).toContain("required review");
   });
 });
 
@@ -1336,7 +1339,7 @@ describe("completion gating", () => {
     expect(String(result.summary.final_message)).toContain("output limit twice");
   });
 
-  it("nudges once, then stops deterministically while the completion gate blocks", async () => {
+  it("nudges once, then delivers the held answer while the completion gate still blocks", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50 , approvalMode: "auto" });
     let completions = 0;
@@ -1353,8 +1356,9 @@ describe("completion gating", () => {
     });
 
     expect(completions).toBe(2); // initial attempt + one nudge
-    expect(result.outcome).toBe("stopped");
-    expect(String(result.summary.final_message)).toContain("required review");
+    expect(result.outcome).toBe("completed");
+    expect(result.summary.final_message).toBe("all done");
+    expect(String(result.summary.housekeeping_error)).toContain("required review");
   });
 
   it("completes normally once the gate clears", async () => {

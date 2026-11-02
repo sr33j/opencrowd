@@ -373,16 +373,11 @@ export async function readSseCompletion(
   const toolCalls = [...toolCallsByIndex.entries()]
     .sort(([left], [right]) => left - right)
     .map(([index, entry]) => {
-      let parsedArguments: Record<string, unknown> = {};
-      try {
-        parsedArguments = entry.argumentsText ? JSON.parse(entry.argumentsText) as Record<string, unknown> : {};
-      } catch {
-        parsedArguments = {};
-      }
+      const parsed = parseToolArguments(entry.argumentsText);
       return {
         id: entry.id ?? `call-${index}`,
         name: entry.name ?? "",
-        arguments: parsedArguments
+        ...parsed
       };
     })
     .filter((toolCall) => toolCall.name !== "");
@@ -719,19 +714,26 @@ function toParsedToolCall(value: unknown): WireToolCall | null {
   if (!name) {
     return null;
   }
-  let parsedArguments: Record<string, unknown> = objectValue(fn.arguments) ?? {};
-  if (typeof fn.arguments === "string") {
-    try {
-      parsedArguments = JSON.parse(fn.arguments) as Record<string, unknown>;
-    } catch {
-      parsedArguments = {};
-    }
-  }
+  const parsed = typeof fn.arguments === "string" ? parseToolArguments(fn.arguments) : { arguments: objectValue(fn.arguments) ?? {} };
   return {
     id: stringValue(object.id) ?? `call-${Date.now()}`,
     name,
-    arguments: parsedArguments
+    ...parsed
   };
+}
+
+/**
+ * A tool call's argument text as an object, or `{}` with the raw text kept
+ * when it is not one, so the loop can tell the model instead of running the
+ * tool with no arguments as though it had asked for that.
+ */
+function parseToolArguments(text: string | undefined): { arguments: Record<string, unknown>; invalidArguments?: string } {
+  if (!text?.trim()) return { arguments: {} };
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return { arguments: parsed as Record<string, unknown> };
+  } catch { /* reported below */ }
+  return { arguments: {}, invalidArguments: text.slice(0, 2000) };
 }
 
 function messageContent(value: unknown): string {

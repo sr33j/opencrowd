@@ -46,21 +46,37 @@ it("keeps every turn's prefix byte-identical while the balance changes, and the 
     } },
   });
   expect(calls.length).toBeGreaterThan(1);
-  // Everything before the trailing snapshot is the prefix a seller caches; it
-  // has to be the same bytes on turn two as on turn one, however much the
+  // Everything before the latest user message is the prefix a seller caches;
+  // it has to be the same bytes on turn two as on turn one, however much the
   // balance moved in between.
   const prefix = calls[0].slice(0, -1);
   expect(JSON.stringify(calls[1].slice(0, prefix.length))).toBe(JSON.stringify(prefix));
+  // The snapshot rides on the owner's own message, before their words, and is
+  // never a message of its own that a model could answer instead (SRI-65).
   expect(calls[0].at(-1)).toMatchObject({ role: "user" });
-  expect(calls[0].at(-1)!.content).toContain("Current hosted financial snapshot: ");
-  expect(calls[0].at(-1)!.content).not.toBe(calls[1].at(-1)!.content);
-  // Exactly one snapshot per request, and never a message in the conversation.
-  for (const messages of calls)
-    expect(messages.filter(m => m.content.startsWith("Current hosted financial snapshot: "))).toHaveLength(1);
-  expect(history.some(m => m.content.startsWith("Current hosted financial snapshot: "))).toBe(false);
+  expect(calls[0].at(-1)!.content).toMatch(/^\[Automatic note from CrowdCode, not written by the user; do not reply to it\. Current hosted financial snapshot: \{/);
+  expect(calls[0].at(-1)!.content.endsWith("Stable context.\n")).toBe(true);
+  // After a tool result the request is the history itself: the result already
+  // carries the snapshot read after the tool ran, so nothing at all moves.
+  expect(calls[1].at(-1)).toMatchObject({ role: "tool" });
+  expect(JSON.parse(calls[1].at(-1)!.content).budget_after_tool_call.current_run.inference_spent_usdc).toBe("0.007000");
+  expect(calls[1].some(m => m.content.includes("Current hosted financial snapshot: "))).toBe(false);
+  for (const messages of calls) expect(messages.some(m => m.content.startsWith("Current hosted financial snapshot: "))).toBe(false);
+  expect(history.some(m => m.content.includes("Current hosted financial snapshot: "))).toBe(false);
   // It still has to be replayable: a paused payment is re-sent byte for byte.
-  expect(checkpoints.some(c => c.context?.prepared && c.context.trailingMessage)).toBe(true);
-  expect(checkpoints.every(c => !c.messages.some(m => m.content.startsWith("Current hosted financial snapshot: ")))).toBe(true);
+  expect(checkpoints.some(c => c.context?.prepared && c.context.note)).toBe(true);
+  expect(checkpoints.every(c => !c.messages.some(m => m.content.includes("Current hosted financial snapshot: ")))).toBe(true);
+});
+
+it("replays a 0.16.0 checkpoint's standalone snapshot exactly as it was sent", async () => {
+  const sent: LlmMessage[][] = [];
+  const trailing: LlmMessage = { role: "user", content: "Current hosted financial snapshot: {}" };
+  const messages: LlmMessage[] = [{ role: "system", content: "s" }, { role: "user", content: "hi" }];
+  await completeWithContext(await session(), messages, {
+    provider: { complete: async request => { sent.push(structuredClone(request)); return { content: "ok", toolCalls: [] }; } },
+    tools: [], state: { prepared: true, trailingMessage: trailing },
+  });
+  expect(sent[0]).toEqual([...messages, trailing]);
 });
 
 it("drops a snapshot an older runtime left in the history rather than keeping two", async () => {
@@ -74,10 +90,11 @@ it("drops a snapshot an older runtime left in the history rather than keeping tw
       return { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "Done" } }] };
     } },
   });
-  const snapshots = calls[0].filter(m => m.content.startsWith("Current hosted financial snapshot: "));
+  const snapshots = calls[0].filter(m => m.content.includes("Current hosted financial snapshot: "));
   expect(snapshots).toHaveLength(1);
   expect(snapshots[0].content).not.toContain("stale");
   expect(snapshots[0]).toBe(calls[0].at(-1));
+  expect(snapshots[0].content.endsWith("\n\ncontinue")).toBe(true);
 });
 
 it.each(["blockrun", "x402"])("%s asks Claude to cache and keys the conversation", async adapter => {
@@ -209,12 +226,12 @@ it("leaves a running summary of what it removed, and carries it into the next co
   expect(second.content.split("\n").filter(line => line.startsWith("- ")).length).toBeGreaterThanOrEqual(firstLines.length);
 });
 
-it("budgets for the trailing snapshot without letting compaction remove it", async () => {
+it("budgets for the snapshot note without letting compaction remove it", async () => {
   const s = await session();
-  const trailing: LlmMessage = { role: "user", content: `Current hosted financial snapshot: ${"x".repeat(60_000)}` };
+  const note = `Current hosted financial snapshot: ${"x".repeat(60_000)}`;
   const messages = longChat();
   const withSnapshot = await compactContext(s, structuredClone(messages), {
-    contextWindowTokens: 1_000_000, maxOutputTokens: 4096, tools: [], state: { trailingMessage: trailing },
+    contextWindowTokens: 1_000_000, maxOutputTokens: 4096, tools: [], state: { note },
   });
   const without = await compactContext(s, structuredClone(messages), {
     contextWindowTokens: 1_000_000, maxOutputTokens: 4096, tools: [], state: {},
