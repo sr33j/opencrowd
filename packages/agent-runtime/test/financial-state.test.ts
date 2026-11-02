@@ -50,7 +50,7 @@ it("refreshes model and service spending, replaces local budgets and keeps one a
       if (calls === 2) expect(JSON.parse(messages.at(-1)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
       inference += 123n;
       const name = ["call_paid_service", "get_budget_status", "complete_session"][calls++];
-      return { content: "", toolCalls: [{ id: `call-${calls}`, name, arguments: name === "complete_session" ? { final_message: "Done" } : {} }] };
+      return { content: "", toolCalls: [{ id: `call-${calls}`, name, arguments: name === "complete_session" ? { final_message: "Built the paid utility." } : {} }] };
     } },
   });
   expect(result.summary.budget).toMatchObject({ current_run: { inference_spent_usdc: "0.000369", service_spent_usdc: "0.050000", remaining_budget_usdc: "0.949631" } });
