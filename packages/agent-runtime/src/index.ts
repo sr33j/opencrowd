@@ -1035,7 +1035,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           onCompaction: async (result) => {
             await atomicWrite(conversationPath(session), messages.filter(m => m.role !== "system")
               .map(message => JSON.stringify({ type: "message", message }) + "\n").join(""));
-            options.onProgress?.({ type: "complete", message: `Compacted context: ~${result.tokensBefore} → ~${result.tokensAfter} tokens. Archive: ${result.archivePath}`, data: result });
+            // Say what went where, not only how much: a summarized exchange is
+            // one line now, a saved message is still there word for word.
+            const what = [result.summarized ? `${result.summarized} earlier message${result.summarized === 1 ? "" : "s"} summarized` : "",
+              result.saved ? `${result.saved} long message${result.saved === 1 ? "" : "s"} saved to files` : ""].filter(Boolean).join(", ");
+            options.onProgress?.({ type: "complete", message: `Compacted context: ~${result.tokensBefore} → ~${result.tokensAfter} tokens${what ? ` (${what})` : ""}. Archive: ${result.archivePath}`, data: result });
           }
         });
       options.signal?.throwIfAborted();

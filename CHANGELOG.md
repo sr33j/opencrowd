@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.3 — 2026-11-03
+
+- **Switching to a dearer model mid-chat no longer throws away the material the chat is about (SRI-81).** In reliability sweep #2 an owner pasted four ~40,000-token logs, got all four "IMPORTANT FACT" lines back, switched to `venice/deepseek-v4-flash` and asked again. The switch's cost compaction cut 178,000 tokens to 14,000 by removing the logs whole, and the new model repeated the one fact an early turn had missed. Compaction now saves long pasted messages (over 4,096 characters, oldest first) to verbatim files before it removes any exchange, so the questions and answers about them stay word for word and the material is still there to search. Each saved message's pointer quotes its first 240 characters, so the model knows which file holds what.
+- **The newest answer is the last thing compaction removes.** The latest reply to the owner and the request it answered now outlast the housekeeping after it (the reflection prompt, `complete_session`), not just older exchanges.
+- **The running summary is told which line wins, and to check before answering.** The archive pointer now says the summary is lossy, that a later line or message stands over an earlier one it contradicts, and that questions about earlier pasted material, facts or answers are answered by searching the archive and saved files (`rg -n 'keyword' context/`), not from the summary alone. A reply (an assistant message with no tool call) keeps up to 400 characters in the summary instead of 160, and up to a quarter of the compaction's target is held for the summary while exchanges are removed, rather than whatever was left over.
+- `compactContext` now reports `summarized` (messages now one line of the summary) and `saved` (messages replaced by a pointer to their verbatim file), and the CLI's compaction progress line says both.
+
 ## 0.16.2 — 2026-11-02
 
 - **`venice` buys from `https://crowdcode.app/s/venice-proxy/chat/completions` (SRI-75).** CrowdCode renamed the agent that sells Venice, and its service, from `venice-reseller` to `venice-proxy`. It is the same agent, the same pinned payee and the same prices. The old URL, which 0.15.0–0.16.1 call, is still served by the same service and is not a redirect, so older CLIs keep working unchanged.
