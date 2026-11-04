@@ -206,6 +206,28 @@ describe("artifacts", () => {
     await expect(saveArtifact(session, "../outside.txt", "no")).rejects.toThrow("artifact path");
     await expect(listArtifacts(session)).resolves.toEqual(["reports/out.txt"]);
   });
+
+  it("lists another chat's files only when asked for every chat", async () => {
+    // Agent 2aeb8505 made three PDFs in one chat, was asked about them in the
+    // next, listed its files, saw none, and told the owner it had no PDFs.
+    const root = await tempRoot();
+    const earlier = await createSession({ workspaceRoot: root, sessionId: "chat-earlier" });
+    await saveArtifact(earlier, "drip/report.pdf", "%PDF-1.4");
+    await createSession({ workspaceRoot: root, sessionId: "chat-empty" });
+    const current = await createSession({ workspaceRoot: root, sessionId: "chat-now", shellEnabled: true });
+    await saveArtifact(current, "notes.txt", "mine");
+
+    await expect(executeTool("list_files", {}, { session: current })).resolves.toMatchObject({ ok: true, data: ["notes.txt"] });
+    const all = await executeTool("list_files", { scope: "all" }, { session: current });
+    expect(all).toMatchObject({ ok: true, data: {
+      files: ["notes.txt"],
+      other_chats: [{ session_id: "chat-earlier", shell_dir: "../chat-earlier/artifacts", files: ["drip/report.pdf"] }]
+    } });
+    // The shell_dir is a real path from where run_shell starts.
+    const shell = await runShell(current, "cat ../chat-earlier/artifacts/drip/report.pdf");
+    expect(shell.stdout).toBe("%PDF-1.4");
+    await expect(executeTool("list_files", { scope: "everything" }, { session: current })).resolves.toMatchObject({ ok: false, error: "scope must be chat or all" });
+  });
 });
 
 describe("shell policy", () => {
