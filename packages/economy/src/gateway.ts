@@ -16,6 +16,7 @@ import {
 import type { AgentCashAdapter, PaidFetchResult, PaymentRail } from "./agentcash.js";
 import type { CrowdCodeAdapter, ServiceEvidence } from "./crowdcode.js";
 import { describeRails } from "./offers.js";
+import { documentedHeader, findFollowUpTokens, followUpKey, loadFollowUps, saveFollowUp, sellerOpenApi } from "./follow-ups.js";
 import {
   loadApprovalRules,
   matchApprovalRule,
@@ -267,7 +268,11 @@ export class EconomyGateway {
     }
     const evidence = await this.serviceEvidence(endpoint);
     const rail = railFromSchema(schema.data);
-    const priceCeilingCents = priceCeilingFromSchema(schema.data);
+    // Free but signed: its ceiling is nothing. Should the seller price it by
+    // the time it is called, the gateway sees a quote above the ceiling and
+    // asks the owner instead of paying.
+    const free = (schema.data as { free?: unknown } | undefined)?.free === true;
+    const priceCeilingCents = free ? 0 : priceCeilingFromSchema(schema.data);
     const payTo = schema.data && typeof schema.data === "object" && typeof (schema.data as { pay_to?: unknown }).pay_to === "string"
       ? (schema.data as { pay_to: string }).pay_to : undefined;
     await this.rememberInspection(inspectionKey(endpoint, method), {
@@ -286,6 +291,8 @@ export class EconomyGateway {
         method,
         rail,
         price_ceiling_cents: priceCeilingCents,
+        // A free, signed call is the one thing never to move funds for; say it first.
+        ...(free ? { free: true, note: (schema.data as { note?: unknown }).note } : {}),
         schema: schema.data,
         reputation: evidence.ok
           ? {
@@ -335,6 +342,11 @@ export class EconomyGateway {
         error: `this endpoint offers no payment rail this agent can pay automatically (payable: ${describeRails(rails)})`
       };
     }
+    // A token from an earlier purchase of this exact request is the seller's
+    // documented way to make it again for free. Try that first: paying twice
+    // for something already bought is the one outcome worse than a refusal.
+    const reread = await this.followUpRead(target, method, body);
+    if (reread) return reread;
     const requestedCostCents = intArg(args.max_cost_cents) ?? inspection.priceCeilingCents;
     let quotedCostCents = requestedCostCents;
     let quoteIdentity: unknown;
@@ -492,6 +504,7 @@ export class EconomyGateway {
               ].join(" ")
       };
     }
+    const followUp = result.ok && paid ? await this.keepFollowUp(target, method, result.data, purchaseId) : undefined;
     return {
       ok: result.ok,
       data: {
@@ -503,11 +516,60 @@ export class EconomyGateway {
         review_required: record.review_required,
         review_available: true,
         ...(result.note ? { note: result.note } : {}),
+        ...(followUp ? { follow_up: followUp } : {}),
         data: result.data,
         ...(result.ok ? {} : { error: result.error })
       },
       ...(result.ok ? {} : { error: result.error })
     };
+  }
+
+  /**
+   * Keep a follow-up token a paid answer carried, with the request header its
+   * seller documents for it, and tell the model what it is for.
+   */
+  private async keepFollowUp(url: string, method: string, data: unknown, purchaseId: string) {
+    const tokens = findFollowUpTokens(data);
+    if (!tokens.length) return undefined;
+    const fetchFree = this.options.agentcash.fetchFree?.bind(this.options.agentcash);
+    const openapi = fetchFree ? await sellerOpenApi(originOf(url), async (address) => {
+      const response = await fetchFree({ url: address, method: "GET" });
+      return response.ok ? response.data : undefined;
+    }).catch(() => undefined) : undefined;
+    for (const token of tokens) {
+      const header = openapi ? documentedHeader(openapi, url, method, token.field) : undefined;
+      if (!header) continue;
+      await saveFollowUp(this.options.session, followUpKey(method, url), { header, value: token.value, field: token.field, purchaseId, savedAt: new Date().toISOString() });
+      return { header, token_field: token.field, saved: true,
+        note: `The seller issued a follow-up token (${token.field}) and documents the ${header} request header for it. It is saved: calling this same URL again with call_paid_service sends ${header} automatically, and a seller that honours it answers without charging.` };
+    }
+    return { token_field: tokens[0].field, saved: false,
+      note: `This answer carries a follow-up token (${tokens[0].field}), but the seller's OpenAPI names no request header for it. Check the seller's documentation before paying for the same request again.` };
+  }
+
+  /** The same request again with a saved follow-up token, unpaid. */
+  private async followUpRead(url: string, method: string, body: unknown): Promise<ToolResult | undefined> {
+    const fetchFree = this.options.agentcash.fetchFree?.bind(this.options.agentcash);
+    if (!fetchFree) return undefined;
+    const credential = (await loadFollowUps(this.options.session))[followUpKey(method, url)];
+    if (!credential) return undefined;
+    const result = await fetchFree({ url, method, body: typeof body === "string" ? body : body === undefined ? undefined : JSON.stringify(body),
+      headers: { [credential.header]: credential.value } }).catch(() => undefined);
+    // Only a real answer counts; a 402 means the token no longer unlocks it.
+    if (!result?.ok || result.status === 402 || result.data === undefined) return undefined;
+    const data = await boundResponse(this.options.session, result.data);
+    const artifact = await saveArtifact(this.options.session, `service-calls/${Date.now()}-${slugUrl(url)}.json`,
+      JSON.stringify({ status: result.status, body: data }, null, 2), { endpoint: url, method });
+    await appendLedgerEntry(this.options.session.ledgerPath, {
+      session_id: this.options.session.sessionId, type: "service_call", resource_url: url, method,
+      quoted_cost_cents: 0, charged_cost_cents: 0, status: "ok", approval_mode: this.options.session.approvalMode,
+      artifact_path: artifact?.path, notes: `free follow-up with ${credential.header} from purchase ${credential.purchaseId ?? "?"}`
+    });
+    return { ok: true, data: {
+      outcome: "free", status: result.status, charged_cost_cents: 0, artifact_path: artifact?.path, review_required: false,
+      note: `Free re-read: sent the ${credential.header} token this seller issued with your earlier purchase${credential.purchaseId ? ` ${credential.purchaseId}` : ""}; nothing was paid. This is the same content that purchase bought.`,
+      data
+    } };
   }
 
   private async resolveApproval(

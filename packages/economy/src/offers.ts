@@ -30,6 +30,12 @@ export interface ServiceOffer {
   rail: PaymentRail;
   price_usd?: number;
   pay_to?: string;
+  /**
+   * A zero-amount MPP charge: the seller asks only which wallet is calling.
+   * The payer answers with a signed proof; nothing moves, and no balance is
+   * needed on that network or any other (SRI-88).
+   */
+  free?: true;
 }
 
 export const RAIL_NETWORK: Record<Exclude<PaymentRail, "unsupported">, OfferNetwork> = {
@@ -95,7 +101,8 @@ export function classifyOffer(option: Record<string, any>): ServiceOffer {
   else if (protocol === "mpp" && name === "tempo" && asset.toLowerCase() === TEMPO_USDC
     && (option.paymentMethod === undefined || option.paymentMethod === "tempo") && (option.intent === undefined || option.intent === "charge")) rail = "mppx";
   return { network, ...(name ? { network_name: name } : {}), protocol, rail, ...(price_usd !== undefined ? { price_usd } : {}),
-    ...(typeof option?.payTo === "string" ? { pay_to: option.payTo } : {}) };
+    ...(typeof option?.payTo === "string" ? { pay_to: option.payTo } : {}),
+    ...(protocol === "mpp" && rail === "mppx" && price_usd === 0 ? { free: true as const } : {}) };
 }
 
 export interface OfferSelection {

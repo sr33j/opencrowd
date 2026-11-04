@@ -24,6 +24,10 @@ import {
 } from "@opencrowd/economy";
 import { SERVICE_GATEWAY_TIMEOUT_MS, withDeadline } from "@opencrowd/protocol";
 import { HostedToolTimeout, postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
+import {
+  HOSTING_RESERVE_USD, PLAN_FUNDING_TOOL, PLAN_INFERENCE_ALLOWANCE_USD, describePlan, planTaskFunding,
+  type PlanCall, type PlanFunds
+} from "./funding-plan.js";
 
 /**
  * Hosted adapters for the economy gateway. The same enforced purchase
@@ -284,6 +288,21 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
           note: "This is your own service, so CrowdCode ran this call as a free owner test: nothing was paid or earned. Buyers pay the listed price as usual."
         };
       }
+      // Free but signed: the seller asked which wallet was calling, the
+      // gateway answered with a zero-amount identity proof, and nothing was
+      // paid on any network (SRI-88). There is no purchase to review.
+      if (data.outcome === "free_proof") {
+        const ok = status !== undefined && status < 400;
+        return {
+          ok,
+          ambiguous: false,
+          status,
+          data: decodeBody(data.body, data.content_type),
+          authMode: "free",
+          error: ok ? undefined : `the service answered HTTP ${status ?? "?"} to a signed identity proof`,
+          note: `Free: the service asked only for proof of which wallet is calling (a zero-amount MPP challenge on ${stringValue(data.network) ?? "tempo"}). CrowdCode signed it; no USDC moved and no balance was needed on any network, so never move funds for a call like this.`
+        };
+      }
       const outcome = data.outcome === "paid_success" ? "paid_success" : "paid_failure";
       const paidAtomic = numberValue(data.amount_atomic);
       // The gateway chose the network; an older gateway that omits it paid on Base.
@@ -347,6 +366,11 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }
   }
 
+  /** An unpaid request with extra headers: a seller's documented follow-up, or its OpenAPI. */
+  fetchFree(request: { url: string; method: string; body?: string; headers?: Record<string, string> }): Promise<PaidFetchResult> {
+    return this.fetchUnpaid(request.url, request.method.toUpperCase(), request.body, request.headers);
+  }
+
   /** The supervisor found no 402: the endpoint is free, so the worker fetches it itself. */
   private async fetchUnpaid(url: string, method: string, body: string | undefined, headers?: Record<string, string>): Promise<PaidFetchResult> {
     try {
@@ -379,12 +403,14 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
    */
   private async fundingHint(request: PaidFetchRequest): Promise<string> {
     const wallet = await this.getBalance().catch(() => undefined);
-    const networks = Array.isArray((wallet?.data as any)?.networks) ? (wallet!.data as any).networks as Record<string, unknown>[] : [];
-    const available = networks.map((n) => ({ network: stringValue(n.network) ?? "?", usd: numberValue(n.available_usd ?? n.balance_usd) }))
-      .filter((n): n is { network: string; usd: number } => n.usd !== undefined);
+    // What each network can spend. Base's figure is already net of hosting
+    // owed (it is one of Base's holds); naming the debt says why Base spends
+    // less than it holds, which "base 0.51" alone never did.
+    const available = walletFunds(wallet?.data).map((n) => ({ network: n.network, usd: n.availableUsd, owed: n.hostingOwedUsd ?? 0 }));
     if (!available.length) return " Check get_wallet_status for where your USDC is.";
     const total = available.reduce((sum, n) => sum + n.usd, 0);
-    const line = ` Your available USDC: ${available.map((n) => `${n.network} ${n.usd.toFixed(2)}`).join(", ")} (total ${total.toFixed(2)}).`;
+    const owed = available.filter((n) => n.owed > 0).map((n) => `; ${n.network} is net of $${n.owed.toFixed(2)} owed for hosting`).join("");
+    const line = ` Your spendable USDC: ${available.map((n) => `${n.network} ${n.usd.toFixed(2)}`).join(", ")} (total ${total.toFixed(2)}${owed}). If this task makes more paid calls, call plan_funding with all of them before moving anything: one move sized to the whole task, not one per call.`;
     const target = RAIL_NETWORK[request.rail];
     const funded = available.filter((n) => n.network !== target && n.usd >= request.maxAmountUsd).map((n) => n.network);
     const elsewhere = funded.length
@@ -397,6 +423,32 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     if (!move.worthwhile)
       return `${line}${elsewhere} Moving funds is the other way, but the most ${move.from} can spare is ${size}, and a fee of ${cost} is ${Math.round(move.feeShare * 100)}% of that — too much to spend without asking. If no equivalent service fits, say exactly that to the owner: this service is sold only on ${target}, moving ${size} there would cost ${cost} in fees, and ask whether to do it.`;
     return `${line}${elsewhere} Otherwise move the funds yourself and retry — a move this size is within the policy and is not something to ask the owner about, any more than paying for the call is: bridge_usdc {"from":"${move.from}","to":"${target}","amount_usd":${move.amount}} (fee ${cost}, counted as spending; the spending guard pauses it for approval by itself if the owner's mode requires that), then retry this call.`;
+  }
+
+  /**
+   * plan_funding: probe every planned call for every network it accepts, read
+   * what each network can spend, and plan the task's funding once
+   * (funding-plan.ts). Read-only; the probes are unpaid.
+   */
+  async planFunding(args: Record<string, unknown>): Promise<McpCallResult> {
+    const raw = Array.isArray(args.calls) ? args.calls.slice(0, 12) : [];
+    const wanted = raw.map(objectValue).filter((call): call is Record<string, unknown> => !!call && !!stringValue(call.url));
+    if (!wanted.length) return { ok: false, error: "plan_funding needs calls: [{url, method, count}]" };
+    const [calls, wallet] = await Promise.all([
+      Promise.all(wanted.map(async (call): Promise<PlanCall> => {
+        const url = stringValue(call.url)!, method = (stringValue(call.method) ?? "GET").toUpperCase();
+        const count = Math.min(20, Math.max(1, Math.floor(numberValue(call.count) ?? 1)));
+        const probe = await this.discovery.inspect({ url, method, body: objectValue(call.sample_body) }).catch((error) => ({ ok: false, error: (error as Error).message, data: undefined }));
+        const offers = Array.isArray((probe.data as any)?.offers) ? (probe.data as any).offers as Record<string, unknown>[] : [];
+        const payable = offers.filter((offer) => offer.payable === true && numberValue(offer.price_usd) !== undefined)
+          .map((offer) => ({ network: stringValue(offer.network) ?? "?", priceUsd: numberValue(offer.price_usd)!, ...(offer.free === true ? { free: true } : {}) }));
+        return { url, method, count, offers: payable, ...(probe.ok ? (payable.length ? {} : { error: "the endpoint offers nothing this wallet can pay" }) : { error: probe.error ?? "the endpoint could not be probed" }) };
+      })),
+      this.getBalance().catch(() => undefined)
+    ]);
+    const funds = walletFunds(wallet?.data);
+    if (!funds.length) return { ok: false, error: "the wallet's balances could not be read; nothing was planned. Try again shortly." };
+    return { ok: true, data: describePlan(planTaskFunding(calls, funds)) };
   }
 
   /**
@@ -560,13 +612,14 @@ export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
 }
 
 /** The hosted economy gateway: auto approval locally, with caps and ask mode enforced by the supervisor's gateway. */
-export function createHostedEconomy(options: HostedEconomyOptions): EconomyGateway {
+export function createHostedEconomy(options: HostedEconomyOptions): HostedEconomy {
   const fetcher = options.fetcher ?? fetch;
   const socket = { socketPath: options.socketPath, runId: options.runId, sessionId: options.sessionId };
   const directory = new ServiceDirectory(fetcher, (options.crowdcodeBase ?? DEFAULT_CROWDCODE_BASE).replace(/\/+$/, ""));
-  return new EconomyGateway({
+  const agentcash = new HostedAgentCashAdapter(directory, socket, fetcher, options.reconcileDelayMs, options.transferWait);
+  const gateway = new EconomyGateway({
     session: options.session,
-    agentcash: new HostedAgentCashAdapter(directory, socket, fetcher, options.reconcileDelayMs, options.transferWait),
+    agentcash,
     crowdcode: new HostedCrowdCodeAdapter(directory, socket),
     approvalMode: "auto",
     hostedSpending: true,
@@ -575,16 +628,45 @@ export function createHostedEconomy(options: HostedEconomyOptions): EconomyGatew
     // Hosted rules live with the agent's session, never in a user config dir.
     approvalRulesPath: join(options.session.sessionDir, "approval-rules.json")
   });
+  return Object.assign(gateway, { planFunding: (args: Record<string, unknown>) => agentcash.planFunding(args) });
 }
+/** The hosted gateway, which can also plan a task's funding. */
+export type HostedEconomy = EconomyGateway & { planFunding?: (args: Record<string, unknown>) => Promise<McpCallResult> };
 
 export { MAX_REVIEW_ATTEMPTS } from "./economy-tools.js";
 export type { EconomyTools as HostedDynamicTools } from "./economy-tools.js";
 /** Cloud exposes the same tools and completion policy; wallet status and bridging get their hosted descriptions. */
-export function hostedDynamicTools(economy: EconomyGateway) {
+export function hostedDynamicTools(economy: HostedEconomy) {
   const tools = economyTools(economy);
-  return { ...tools, definitions: tools.definitions.map(tool => tool.name === "get_wallet_status"
-    ? { ...tool, description: "Read this hosted agent's USDC wallet: the total across networks, each network's balance (Base, Solana, Tempo), and authoritative current-run inference spending, service spending, transfer fees, payment holds and authorized budget. A payment on a network needs that network's balance. Read-only." }
-    : tool.name === "bridge_usdc" ? HOSTED_BRIDGE_TOOL : tool) };
+  const plan = economy.planFunding;
+  const definitions = tools.definitions.map(tool => tool.name === "get_wallet_status"
+    ? { ...tool, description: "Read this hosted agent's USDC wallet: the total across networks, each network's balance (Base, Solana, Tempo), what each can spend after payment holds and (on Base) hosting owed, and authoritative current-run inference spending, service spending, transfer fees, payment holds and authorized budget. A payment on a network needs that network's spendable balance. Read-only." }
+    : tool.name === "bridge_usdc" ? HOSTED_BRIDGE_TOOL : tool);
+  return {
+    ...tools,
+    definitions: plan ? [...definitions, PLAN_FUNDING_TOOL] : definitions,
+    execute: async (name: string, args: Record<string, unknown>, operationId?: string) =>
+      name === "plan_funding" && plan ? plan(args) : tools.execute(name, args, operationId)
+  };
+}
+
+/**
+ * Each network's funds from economy.balance: available (balance less holds),
+ * and hosting owed where it settles. What a plan keeps back is added here: the
+ * hosting reserve and the run's own model allowance, both on Base.
+ */
+function walletFunds(data: unknown): PlanFunds[] {
+  const wallet = objectValue(data);
+  const networks = Array.isArray(wallet?.networks) ? wallet!.networks as unknown[] : [];
+  const owed = numberValue(wallet?.hosting_owed_usd) ?? 0;
+  const reserve = numberValue(wallet?.hosting_reserve_usd) ?? HOSTING_RESERVE_USD;
+  return networks.map(objectValue).flatMap((row) => {
+    const network = networkName(row?.network) ?? networkName(row?.caip2) ?? stringValue(row?.network);
+    const available = numberValue(row?.available_usd ?? row?.balance_usd);
+    if (!network || available === undefined) return [];
+    const base = network === "base";
+    return [{ network, availableUsd: available, hostingOwedUsd: base ? numberValue(row?.hosting_owed_usd) ?? owed : 0, keepUsd: base ? reserve + PLAN_INFERENCE_ALLOWANCE_USD : 0 }];
+  });
 }
 
 /**
@@ -619,7 +701,7 @@ export function planFundingMove(
 /** The hosted counterpart of bridge_usdc: moves between the agent's own networks through the hosted gateway. */
 const HOSTED_BRIDGE_TOOL = {
   name: "bridge_usdc",
-  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, or when a paid call failed with funding_required and no equivalent service is sold on a network you already fund. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending, so aim for about $1 and one fee funds many calls; when the wallet holds less, move what the call needs plus the fee, as long as the fee stays under about a fifth of what moves (roughly $0.15 and up). A move within that rule needs no permission from the owner: the spending guard applies their approval mode to the fee by itself. Below the rule, quote_only first and ask, rather than spending most of the move on its fee. Pass transfer_id alone to check a pending move.",
+  description: "Move your own USDC between your networks (base, solana, tempo); it always arrives at your own address. Use it when the owner asks, when plan_funding lists a move, or when a paid call failed with funding_required and no equivalent service is sold on a network you already fund. A run moves into each network at most once and never back the other way: plan a multi-call task with plan_funding first, then make its one move. quote_only shows the fee and expected amount without moving. Executing re-quotes, applies the owner's approval policy to the fee (it may pause for approval) and waits for the funds to arrive, usually within a minute. Fees are about $0.02-0.03 and count as spending, so aim for about $1 and one fee funds many calls; when the wallet holds less, move what the call needs plus the fee, as long as the fee stays under about a fifth of what moves (roughly $0.15 and up). A move within that rule needs no permission from the owner: the spending guard applies their approval mode to the fee by itself. Below the rule, quote_only first and ask, rather than spending most of the move on its fee. Pass transfer_id alone to check a pending move.",
   parameters: {
     type: "object",
     properties: {

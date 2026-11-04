@@ -86,6 +86,11 @@ export interface AgentCashAdapter {
   checkEndpointSchema(input: { url: string; method?: string; body?: unknown }): Promise<McpCallResult>;
   /** Execute one potentially-paid call. Never auto-retried. */
   fetch(request: PaidFetchRequest): Promise<PaidFetchResult>;
+  /**
+   * The same request without any payment, with extra headers: a seller's
+   * documented follow-up (a re-read token), and its OpenAPI. Never pays.
+   */
+  fetchFree?(request: { url: string; method: string; body?: string; headers?: Record<string, string> }): Promise<PaidFetchResult>;
   /** Explicit USDC bridge between supported networks. */
   bridge(input: BridgeRequest): Promise<McpCallResult>;
 }

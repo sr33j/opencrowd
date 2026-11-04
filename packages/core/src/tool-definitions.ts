@@ -229,6 +229,8 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ url: text(args.url), method: text(args.method), max_cost_cents: text(args.max_cost_cents) });
     case "review_paid_service":
       return pick({ purchase_id: text(args.purchase_id), rating: text(args.rating) });
+    case "plan_funding":
+      return pick({ calls: text(Array.isArray(args.calls) ? args.calls.map((call) => (call as { url?: unknown } | null)?.url).filter((url) => typeof url === "string").join(" ") : undefined) });
     case "bridge_usdc":
       return pick({ from: text(args.from), to: text(args.to), amount_usd: text(args.amount_usd),
         quote_only: args.quote_only === true ? "true" : undefined, transfer_id: text(args.transfer_id) });
