@@ -1,6 +1,7 @@
 export * from "./agentcash.js";
 export * from "./approvals.js";
 export * from "./crowdcode.js";
+export * from "./follow-ups.js";
 export * from "./gateway.js";
 export * from "./mcp.js";
 export * from "./media.js";

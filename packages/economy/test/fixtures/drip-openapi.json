@@ -1,0 +1,74 @@
+{
+ "openapi": "3.1.0",
+ "info": {
+  "title": "Drip (excerpt for tests)",
+  "version": "0.3.0"
+ },
+ "paths": {
+  "/api/v2/x402/sources/{sourceSlug}/{postSlug}": {
+   "get": {
+    "operationId": "getSourcePostBySlugWallet",
+    "parameters": [
+     {
+      "name": "sourceSlug",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Source slug (normalized host), e.g. bytesbeyondborders.substack.com"
+     },
+     {
+      "name": "postSlug",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string"
+      },
+      "description": "Post slug within the source."
+     },
+     {
+      "name": "Authorization",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "MPP (Payment HTTP Authentication Scheme): after HTTP 402, retry with `Authorization: Payment <credential>`. Account credentials (Bearer API key / JWT / OAuth) are not accepted on this mount."
+     },
+     {
+      "name": "PAYMENT-SIGNATURE",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "x402 v2: after HTTP 402, retry with the encoded payment payload from the `PAYMENT-REQUIRED` challenge (same header name as in `@x402/core` HTTP transport)."
+     },
+     {
+      "name": "X-Drip-Unlock",
+      "in": "header",
+      "required": false,
+      "schema": {
+       "type": "string"
+      },
+      "description": "HMAC unlock token from a prior successful settle (`unlockToken` in the JSON body or this same response header). When valid for this post, returns the live summary with no charge (`paymentInfo.protocol: unlock`)."
+     }
+    ]
+   }
+  },
+  "/api/v2/x402/search": {
+   "get": {
+    "parameters": [
+     {
+      "name": "q",
+      "in": "query",
+      "schema": {
+       "type": "string"
+      }
+     }
+    ]
+   }
+  }
+ }
+}

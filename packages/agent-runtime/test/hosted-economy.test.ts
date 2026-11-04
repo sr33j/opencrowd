@@ -507,7 +507,7 @@ describe("hosted economy: worker wiring", () => {
       provider: (_run, _session, extraTools) => { advertised = extraTools.map(t => t.name); return provider; },
       economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
-    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service", "bridge_usdc"]);
+    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service", "bridge_usdc", "plan_funding"]);
     expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallets on Base, Solana and Tempo");
     expect(systemPrompt).toContain("Payable: x402 USDC on Base or Solana and MPP USDC.e on Tempo");
     expect(systemPrompt).toContain("Other networks, including Monad, are not payable here");

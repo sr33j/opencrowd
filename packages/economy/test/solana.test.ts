@@ -107,7 +107,7 @@ describe("discovery across networks", () => {
     advertise([BASE, SOLANA, TEMPO, MONAD]);
     const hosted = (await new BaseServiceDiscovery(vi.fn(), { rails: HOSTED_RAILS, negotiated: true }).inspect({ url: "https://svc.example/f" })).data;
     expect(hosted).toMatchObject({ rail: "x402-base", price_usd: 0.02, payable: true, offers: expect.arrayContaining([{ network: "monad", protocol: "x402", price_usd: 0.01, payable: false }]),
-      note: expect.stringContaining("cheapest of x402 USDC on Base, x402 USDC on Solana, MPP USDC.e on Tempo") });
+      note: expect.stringContaining("Payable on x402 USDC on Base ($0.02), x402 USDC on Solana ($0.01), MPP USDC.e on Tempo ($0.01). The hosted gateway pays the cheapest of them") });
   });
 });
 

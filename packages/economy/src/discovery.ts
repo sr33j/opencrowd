@@ -89,7 +89,8 @@ export class BaseServiceDiscovery {
       ...(offer?.pay_to ? { pay_to: offer.pay_to } : {}),
       price_usd: offer ? ceiling ?? 0 : read ? 0 : undefined,
       ...(offers.length ? { offers: offers.map((candidate) => ({ network: candidate.network_name ?? candidate.network, protocol: candidate.protocol,
-        price_usd: candidate.price_usd, payable: payable.includes(candidate) })) } : {}),
+        price_usd: candidate.price_usd, payable: payable.includes(candidate), ...(candidate.free ? { free: true } : {}) })) } : {}),
+      ...(offer?.free ? { free: true } : {}),
       input_schema: advisory.inputSchema, output_schema: advisory.outputSchema, description: advisory.summary,
       note: read ? "Read with read_service; wallet authentication is automatic. Never resubmit a pending generation job." : this.note(offers, offer) };
     if (input.body === undefined) this.cache.set(key, { until: Date.now() + 60000, data });
@@ -107,13 +108,22 @@ export class BaseServiceDiscovery {
 
   private note(offers: ServiceOffer[], offer: ServiceOffer | undefined): string {
     const quote = "Inspect with sample_body for the exact quote.";
+    // Said first and flatly: on 2026-11-04 an agent read "tempo, $0, payable"
+    // as "needs money on Tempo" and moved a dollar there for a free call.
+    if (offer?.free)
+      return `Free: this endpoint asks only for proof of which wallet is calling (a zero-amount MPP challenge on ${offer.network_name ?? "Tempo"}). Calling it signs that proof; nothing is paid and no balance is needed on ${offer.network_name ?? "that network"} or anywhere else, so never move funds for it. Call it with call_paid_service.`;
     if (!offer) {
       const offered = [...new Set(offers.map(networkLabel))];
       return `${offered.length ? `This service offers ${offered.join(", ")}` : "This service advertises no recognised payment option"}; payable here: ${describeRails(this.rails)}. ${quote}`;
     }
     if (this.options.negotiated) {
-      const networks = payableNetworks(offers, this.rails).map((name) => networkLabel({ ...offer, network_name: name, rail: "x402-base" }));
-      return `The hosted gateway pays the cheapest of ${networks.join(", ")} that your balance on that network covers; price_usd is the ceiling across them. ${quote}`;
+      const payable = offers.filter((candidate) => candidate.rail !== "unsupported" && this.rails.includes(candidate.rail));
+      const networks = payableNetworks(offers, this.rails).map((name) => {
+        const price = payable.filter((candidate) => candidate.network_name === name).map((candidate) => candidate.price_usd ?? 0).sort((a, b) => a - b)[0];
+        return `${networkLabel({ ...offer, network_name: name, rail: "x402-base" })}${price !== undefined ? ` ($${price.toFixed(price < 0.01 ? 4 : 2)})` : ""}`;
+      });
+      const one = networks.length > 1 ? " Any one of these networks covering the price is enough: no move is needed while one of them does." : "";
+      return `Payable on ${networks.join(", ")}. The hosted gateway pays the cheapest of them that your spendable balance on that network covers, Base first on a tie; price_usd is the ceiling across them.${one} ${quote}`;
     }
     const preferred = this.options.paymentNetwork ?? "base";
     const reason = payableNetworks(offers, this.rails).includes(preferred) ? `your ${preferred} balance does not cover it` : `${preferred} is not offered`;
