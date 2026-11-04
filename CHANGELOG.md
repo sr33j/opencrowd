@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.5 — 2026-11-04
+
+- **An agent can find the files it made in its other chats.** Each chat with the owner is its own session with its own `artifacts/`, but the owner's Files view lists every chat's files together. An agent that had made three PDFs in one chat was asked to send them from the next, listed its files, saw none, and told the owner it had no PDFs. `list_files` now takes `scope: "all"`, which returns this chat's files plus `other_chats: [{ session_id, shell_dir, files }]` (newest chats first, at most 300 files), where `shell_dir` is the path `run_shell` reaches that chat's files at. The hosted system prompt says the Files view spans every chat and asks for `scope: "all"` before saying a file the owner mentions does not exist. New core export: `listOtherChatArtifacts`.
+
 ## 0.16.4 — 2026-11-04
 
 One seller, two networks, one task (SRI-88). An agent asked to buy two or three Drip research pieces with $2.00 on Base moved $1.00 Base→Tempo for Drip's search, $0.80 back for the Base-only article it bought, and could not afford the second. Drip's search was free all along: it asks only for a signed wallet-identity proof, priced as a zero-amount MPP charge on Tempo.

@@ -53,6 +53,7 @@ export interface JsonSchema {
   description?: string;
   minimum?: number;
   pattern?: string;
+  enum?: string[];
   properties?: Record<string, JsonSchema>;
   required?: string[];
   additionalProperties?: boolean | JsonSchema;
@@ -88,7 +89,7 @@ function toolDescription(name: ToolName): string {
     case "read_file":
       return "Read a session artifact.";
     case "list_files":
-      return "List session artifacts.";
+      return "List this chat's artifacts. Each chat with the owner has its own artifacts/ directory, but the owner's Files view shows every chat's files together: set scope=\"all\" to also list files from your other chats before you say a file the owner mentions does not exist.";
     case "run_shell":
       return "Run a gated local shell command only when shell access is enabled for the session.";
     case "spawn_subagent":
@@ -113,7 +114,10 @@ function toolParameters(name: ToolName): JsonSchema {
     case "get_budget_status":
       return objectSchema({});
     case "list_files":
-      return objectSchema({ prefix: stringSchema("Optional artifact path prefix.") });
+      return objectSchema({
+        prefix: stringSchema("Optional artifact path prefix (this chat only)."),
+        scope: { type: "string", enum: ["chat", "all"], description: "chat (default): this chat's artifacts. all: also every other chat's files, each with the shell_dir to reach it from run_shell." }
+      });
     case "save_file":
       return objectSchema({
         path: stringSchema("Relative artifact path."),

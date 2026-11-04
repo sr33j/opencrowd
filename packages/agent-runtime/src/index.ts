@@ -182,8 +182,10 @@ export function createMockToolExecutor(): ToolExecutor {
           });
         case "read_file":
           return ok({ content: `Mock file content for ${stringValue(args.path) ?? "unknown path"}.` });
-        case "list_files":
-          return ok(["mock-output.txt"].filter((path) => path.startsWith(stringValue(args.prefix) ?? "")));
+        case "list_files": {
+          const files = ["mock-output.txt"].filter((path) => path.startsWith(stringValue(args.prefix) ?? ""));
+          return ok(args.scope === "all" ? { files, other_chats: [], note: "No other chat of this agent has files." } : files);
+        }
         case "run_shell":
           context.onProgress?.({ type: "running_shell", message: "Mock running gated shell command" });
           return ok({
@@ -828,7 +830,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   );
   if (options.hosted) systemPromptParts.push(
     "Files the owner sends you: an attached file is saved in this session under uploads/ before its message reaches you, and the message names each one with its path, size and type. Read a text file with read_file at uploads/<name>, and any file with run_shell at artifacts/uploads/<name> from the session directory. Those files are already the owner's and already in their file list: work from them, and never copy or re-save one under artifacts/ to hand it back. Write your own outputs elsewhere under artifacts/; uploads/ is the owner's directory and nothing you write there is delivered. If a file the message names is missing, say so and ask the owner to send it again rather than guessing at its contents.",
-    "Files you produce: only the artifacts/ directory of this session reaches the owner. save_file writes there; anything you write elsewhere is scratch they never see. The owner sees each file at its path without that prefix, so artifacts/generated/report.pdf is generated/report.pdf to them. Name a produced file in your final message by exactly that path as plain text and nothing else — the owner's interface turns it into a working download and preview link. Never invent a download URL, a sandbox: link, a /mnt/data path, or any other path the owner cannot open, and never claim a file exists before you have verified it."
+    "Files you produce: only the artifacts/ directory of this session reaches the owner. save_file writes there; anything you write elsewhere is scratch they never see. The owner sees each file at its path without that prefix, so artifacts/generated/report.pdf is generated/report.pdf to them. Name a produced file in your final message by exactly that path as plain text and nothing else — the owner's interface turns it into a working download and preview link. Never invent a download URL, a sandbox: link, a /mnt/data path, or any other path the owner cannot open, and never claim a file exists before you have verified it.",
+    "Files from your other chats: each chat with the owner is its own session with its own artifacts/, so list_files and read_file see only this one, while the owner's Files view shows every chat's files together. When the owner mentions a file, PDF or report you do not see here, call list_files with scope=\"all\" before you say it does not exist; it lists each other chat's files with the shell_dir that run_shell reaches them at."
   );
   if (options.dynamicTools) {
     systemPromptParts.push(

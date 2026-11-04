@@ -1,5 +1,5 @@
 import { budgetStatus, createSession } from "./session.js";
-import { listArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
+import { listArtifacts, listOtherChatArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
 import { readLedger, appendLedgerEntry } from "./ledger.js";
 import { maxShellTimeoutMs, runShell } from "./shell.js";
 import type { ToolName } from "./tool-definitions.js";
@@ -22,8 +22,21 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         return ok(await saveArtifact(context.session, requiredString(args.path, "path"), requiredString(args.content, "content"), objectValue(args.metadata)));
       case "read_file":
         return ok({ content: await readArtifact(context.session, requiredString(args.path, "path")) });
-      case "list_files":
-        return ok(await listArtifacts(context.session, optionalString(args.prefix, "prefix") ?? ""));
+      case "list_files": {
+        const files = await listArtifacts(context.session, optionalString(args.prefix, "prefix") ?? "");
+        const scope = optionalString(args.scope, "scope") ?? "chat";
+        if (scope !== "chat" && scope !== "all") throw new Error("scope must be chat or all");
+        if (scope === "chat") return ok(files);
+        const other = await listOtherChatArtifacts(context.session);
+        return ok({
+          files,
+          other_chats: other.chats,
+          ...(other.truncated ? { truncated: true } : {}),
+          note: other.chats.length
+            ? "Files from other chats are already the owner's and already in their Files view. Read one with run_shell at <shell_dir>/<file> (run_shell starts in this chat's session directory). To attach or upload one from this chat, copy it into artifacts/ first; never re-buy or regenerate a file you already hold."
+            : "No other chat of this agent has files."
+        });
+      }
       case "run_shell": {
         context.onProgress?.({ type: "running_shell", message: "Running gated shell command" });
         const result = await runShell(
