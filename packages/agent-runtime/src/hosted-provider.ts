@@ -5,6 +5,7 @@ import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core
 import { boundResponse } from "@opencrowd/economy";
 import type { DynamicToolDefinition, LlmProvider, LlmResponse } from "./index.js";
 import { RuntimePause, type HostedToolExecutor } from "./worker.js";
+import { chatOnlyMessages } from "./chat-only.js";
 
 /** A definitive request failure with resolved payment state; fail with the
  * gateway's message instead of pausing for reconciliation. */
@@ -25,15 +26,17 @@ export class HostedRequestError extends Error {
  * model code nor the agent subprocess receives wallet or gateway credentials.
  * `extraTools` are the run's dynamic (economy gateway) definitions, advertised
  * to the hosted model alongside the built-in tools. */
-export function createHostedProvider(options: { socketPath: string; runId: string; sessionId: string; extraTools?: DynamicToolDefinition[] }): LlmProvider {
+export function createHostedProvider(options: { socketPath: string; runId: string; sessionId: string; extraTools?: DynamicToolDefinition[];
+  /** A chat-only model is sent no tools, and a history without tool calls (`chat-only.ts`). */
+  chatOnly?: boolean }): LlmProvider {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
-  const tools = [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
+  const tools = options.chatOnly ? [] : [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
     ? { ...tool, description: "Read authoritative hosted finances: live USDC wallet balance, settled inference and service spending, pending holds, and remaining authorized budget for this run." } : tool), ...(options.extraTools ?? [])];
   return {
     async complete(messages, context) {
       const operationId = context?.operationId;
       if (!operationId?.startsWith(`${options.runId}:llm:`)) throw new Error("Hosted model operation scope is missing");
-      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: messages.map(({ contextArchive: _archive, ...message }) => message), tools });
+      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: (options.chatOnly ? chatOnlyMessages(messages) : messages).map(({ contextArchive: _archive, ...message }) => message), tools });
       // Too big for the seller is a conversation to compact, not a run to end:
       // the shared loop trims and asks again rather than failing here.
       if (Buffer.byteLength(body) > MODEL_SELLER_REQUEST_MAX_BYTES)

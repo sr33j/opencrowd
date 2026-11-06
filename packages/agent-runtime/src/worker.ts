@@ -244,11 +244,14 @@ export class MachineWorker {
       await beginQuery(session, runId);
       await this.emit("run.state", { sessionId: session.sessionId, state: "running" }, runId, run.commandId);
       const local = this.options.toolExecutor ?? executeTool;
-      const hosted = this.options.hostedTools?.(run.start, session);
-      const economy = this.options.economy?.(run.start, session);
+      // A chat-only model is given no tools of any kind (`chat-only.ts`), so
+      // none of the hosted tool surfaces is even built for its run.
+      const chatOnly = run.start.payload.modelPolicy.chatOnly === true;
+      const hosted = chatOnly ? undefined : this.options.hostedTools?.(run.start, session);
+      const economy = chatOnly ? undefined : this.options.economy?.(run.start, session);
       const dynamicTools = economy ? hostedDynamicTools(economy) : undefined;
       let latestFinancialState: import("@opencrowd/protocol").FinancialState = { status: "unavailable", reason: "Hosted financial state has not been read." };
-      const financialState = this.options.financialState ? async () => {
+      const financialState = this.options.financialState && !chatOnly ? async () => {
         try { latestFinancialState = await this.options.financialState!(run.start, session); }
         catch { latestFinancialState = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
         return latestFinancialState;
@@ -339,6 +342,7 @@ export class MachineWorker {
           }
         },
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
+        ...(chatOnly ? { chatOnly: true } : {}),
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
         prices: {

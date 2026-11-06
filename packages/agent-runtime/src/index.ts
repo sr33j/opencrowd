@@ -46,6 +46,8 @@ export * from "./hosted-economy.js";
 export * from "./inbox.js";
 import type { SteeringInbox } from "./inbox.js";
 export * from "./x402-proxy.js";
+export * from "./chat-only.js";
+import { CHAT_ONLY_SYSTEM_PROMPT } from "./chat-only.js";
 export * from "./knowledge.js";
 export * from "./context.js";
 export * from "./tool-deadlines.js";
@@ -716,6 +718,13 @@ export interface AgentRunOptions {
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
   promptSections?: string[];
   /**
+   * A chat-only model (`modelPolicy.chatOnly`): no tools are advertised, the
+   * system prompt is `CHAT_ONLY_SYSTEM_PROMPT`, and a tool call the seller
+   * returns anyway is never executed. Dynamic tools and the knowledge tree
+   * are ignored.
+   */
+  chatOnly?: boolean;
+  /**
    * Replaces the built-in one-line paid-capability index with an explicit
    * text block (evals). When absent, the knowledge tree is loaded per
    * `knowledge` and rendered into this slot.
@@ -785,10 +794,10 @@ export async function runAgentTask(session: SessionState, task: string, options:
 }
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
-  const enabledTools = options.tools
+  const enabledTools: ToolName[] = options.chatOnly ? [] : options.tools
     ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status"].includes(name))
       : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));
-  const dynamicDefinitions = options.dynamicTools?.definitions ?? [];
+  const dynamicDefinitions = options.chatOnly ? [] : options.dynamicTools?.definitions ?? [];
   const model = options.llm?.catalog?.find((m) => m.id === options.llm?.model);
   const limits = contextLimits(options.contextWindowTokens ?? model?.contextWindowTokens, options.maxOutputTokens ?? model?.maxOutputTokens);
   const contextState: ContextState = { ...options.resume?.context };
@@ -811,7 +820,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     throw new Error("no LLM provider configured: pass an explicit provider (tests/demo) or a typed llm runtime");
   }
   const toolExecutor = options.toolExecutor ?? executeTool;
-  const knowledge = options.capabilityIndex === undefined && options.knowledge !== false && options.dynamicTools
+  const knowledge = !options.chatOnly && options.capabilityIndex === undefined && options.knowledge !== false && options.dynamicTools
     ? await loadKnowledgeTree(session, options.knowledge ?? {})
     : undefined;
   const capabilityIndex = options.capabilityIndex ?? (knowledge ? renderCapabilityIndex(knowledge.l0) : undefined);
@@ -899,7 +908,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     );
   }
   const messages: LlmMessage[] = options.resume?.messages ?? [
-    { role: "system", content: systemPromptParts.join(" ") },
+    { role: "system", content: options.chatOnly ? CHAT_ONLY_SYSTEM_PROMPT : systemPromptParts.join(" ") },
     ...(options.history ?? []),
     { role: "user", content: task }
   ];
@@ -1058,6 +1067,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       }
       throw error;
     }
+    // A chat-only run executes nothing: a seller that answers with a tool call
+    // anyway gets its words delivered and its call dropped.
+    if (options.chatOnly && response.toolCalls.length) response = { ...response, toolCalls: [] };
     if (!restored?.response && (response.content || response.toolCalls.length > 0)) {
       // Tool calls cut off by the provider's output limit are incomplete and
       // must never execute. Preserve only the partial prose for continuation.
@@ -1085,7 +1097,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       outputContinuationNudges += 1;
       const nudge: LlmMessage = {
         role: "user",
-        content: "Your previous response hit the provider output limit. Any tool calls in that response were discarded and did not execute. If you were calling a tool, issue a complete, shorter tool call. Otherwise continue the answer exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
+        content: options.chatOnly
+          ? "Your previous response hit the provider output limit. Continue the answer exactly where it stopped, without repeating what you already wrote."
+          : "Your previous response hit the provider output limit. Any tool calls in that response were discarded and did not execute. If you were calling a tool, issue a complete, shorter tool call. Otherwise continue the answer exactly where it stopped. Put only the remaining suffix in complete_session.final_message; OpenCrowd will prepend the saved prefix. Do not repeat completed material."
       };
       messages.push(nudge);
       await options.onMessage?.(nudge);
@@ -1096,7 +1110,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const finalMessage = response.content.trim()
         ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
       recordFinalMessage(finalMessage);
-      const blocker = await options.completionGate?.(completionNudges > 0);
+      const blocker = options.chatOnly ? undefined : await options.completionGate?.(completionNudges > 0);
       const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {
