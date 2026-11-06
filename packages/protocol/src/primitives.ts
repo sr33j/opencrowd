@@ -59,6 +59,12 @@ export const ModelPolicySchema = z.looseObject({
    */
   inputPriceUsdPerMillion: z.number().nonnegative().max(10_000).optional(),
   cachedInputPriceUsdPerMillion: z.number().nonnegative().max(10_000).optional(),
+  /**
+   * The host offers this model for conversation only: the run advertises no
+   * tools, sends no tool-use instructions, and executes no tool call. For a
+   * model that writes its tool calls as text and makes up their results.
+   */
+  chatOnly: z.boolean().optional(),
   submodel: z.string().min(1).optional()
 });
 export type ModelPolicy = z.infer<typeof ModelPolicySchema>;

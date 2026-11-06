@@ -8,7 +8,8 @@ export async function workerCommand(args: string[]): Promise<void> {
   const socketPath = readOption(args, "--bridge-socket");
   if (args.includes("--demo") === !!socketPath) throw new Error("worker requires exactly one of --demo or --bridge-socket <path>");
   const worker = new MachineWorker({ agentHome: home, provider: (run, session, extraTools) => socketPath
-    ? createHostedProvider({ socketPath, runId: run.runId, sessionId: session.sessionId, extraTools }) : createWorkerDemoProvider(),
+    ? createHostedProvider({ socketPath, runId: run.runId, sessionId: session.sessionId, extraTools,
+      chatOnly: run.payload.modelPolicy.chatOnly === true }) : createWorkerDemoProvider(),
     hostedTools: socketPath ? (run, session) => createHostedToolExecutor({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,
     economy: socketPath ? (run, session) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session }) : undefined,
     financialState: socketPath ? (run, session) => readHostedFinancialState({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,

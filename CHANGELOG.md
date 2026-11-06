@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.6 — 2026-11-06
+
+- **Chat-only models (SRI-91).** A hosted run whose `modelPolicy.chatOnly` is true is a conversation and nothing else. It is sent no tool definitions and no tool-use instructions: it opens with `CHAT_ONLY_SYSTEM_PROMPT`, which tells the model it cannot run commands, read or send files, browse, buy services, send messages, schedule or move money, and that when it is asked to, it should say plainly that the agent is on a chat-only model and suggest switching models instead of pretending. No hosted tools, economy gateway, knowledge index or financial snapshot is built for it; the conversation history it is sent leaves out tool calls and tool results (the stored history keeps them, so switching back loses nothing); and a tool call a seller returns anyway is dropped, never executed. CrowdCode uses it for models that wrote their tool calls out as text and invented the results. New exports: `CHAT_ONLY_SYSTEM_PROMPT`, `chatOnlyMessages`; `ModelPolicySchema` accepts `chatOnly`, `createHostedProvider` and `runAgentTaskDetailed` take `chatOnly`.
+
 ## 0.16.5 — 2026-11-04
 
 - **An agent can find the files it made in its other chats.** Each chat with the owner is its own session with its own `artifacts/`, but the owner's Files view lists every chat's files together. An agent that had made three PDFs in one chat was asked to send them from the next, listed its files, saw none, and told the owner it had no PDFs. `list_files` now takes `scope: "all"`, which returns this chat's files plus `other_chats: [{ session_id, shell_dir, files }]` (newest chats first, at most 300 files), where `shell_dir` is the path `run_shell` reaches that chat's files at. The hosted system prompt says the Files view spans every chat and asks for `scope: "all"` before saying a file the owner mentions does not exist. New core export: `listOtherChatArtifacts`.
