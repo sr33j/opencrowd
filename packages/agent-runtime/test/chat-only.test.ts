@@ -43,6 +43,8 @@ describe("chat-only runs", () => {
     expect(seen[0][0]).toEqual({ role: "system", content: CHAT_ONLY_SYSTEM_PROMPT });
     expect(seen[0][0].content).not.toMatch(TOOL_WORDS);
     expect(seen[0][0].content).toMatch(/chat-only model/);
+    // Its last rule is the one venice-uncensored-role-play broke: a "first 12 characters" of a hash it could not compute.
+    expect(seen[0][0].content.split("\n\n").at(-1)).toMatch(/^Most important rule: you cannot compute a hash/);
   });
 
   it("strips tool calls and tool results from the history it sends, and leaves what was said", () => {
