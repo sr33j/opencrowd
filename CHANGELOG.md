@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.7 — 2026-11-06
+
+- **A chat-only model is told never to write down a value it could not have computed (SRI-91).** Asked for a SHA-256 under 0.16.6's chat-only prompt, `venice-uncensored-role-play` said it could not compute one and then gave "the first 12 characters" anyway, in 3 of 12 tries. `CHAT_ONLY_SYSTEM_PROMPT` now ends with that rule on its own: no hash, checksum, encoding, command output, file contents or live value, not even as a guess or an example; ordinary arithmetic and known facts are still answered. Measured against Venice: 0 of 24 made-up digests for that model and 0 of 9 for `venice-uncensored-1-2`, with role-play and plain questions unchanged.
+
 ## 0.16.6 — 2026-11-06
 
 - **Chat-only models (SRI-91).** A hosted run whose `modelPolicy.chatOnly` is true is a conversation and nothing else. It is sent no tool definitions and no tool-use instructions: it opens with `CHAT_ONLY_SYSTEM_PROMPT`, which tells the model it cannot run commands, read or send files, browse, buy services, send messages, schedule or move money, and that when it is asked to, it should say plainly that the agent is on a chat-only model and suggest switching models instead of pretending. No hosted tools, economy gateway, knowledge index or financial snapshot is built for it; the conversation history it is sent leaves out tool calls and tool results (the stored history keeps them, so switching back loses nothing); and a tool call a seller returns anyway is dropped, never executed. CrowdCode uses it for models that wrote their tool calls out as text and invented the results. New exports: `CHAT_ONLY_SYSTEM_PROMPT`, `chatOnlyMessages`; `ModelPolicySchema` accepts `chatOnly`, `createHostedProvider` and `runAgentTaskDetailed` take `chatOnly`.
