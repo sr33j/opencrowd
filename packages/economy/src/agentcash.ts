@@ -23,6 +23,12 @@ export interface PaidFetchRequest {
   /** Restrict payment to a CrowdCode-verifiable rail. */
   rail: PaymentRail;
   timeoutMs?: number;
+  /**
+   * False when the owner turned CrowdCode off: the hosted gateway, which
+   * judges and reviews every settled purchase by itself, must not review this
+   * one. Absent means reviews are on.
+   */
+  review?: false;
 }
 
 /**

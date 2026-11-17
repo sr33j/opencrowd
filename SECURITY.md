@@ -24,9 +24,9 @@ the model asks for:
 - **The enforced purchase lifecycle** runs for every potentially paid call:
   inspect → CrowdCode reputation pre-check → approval policy → local budget
   reservation → AgentCash execution → outcome reconciliation → immutable
-  receipt → required review → audit entry. A CrowdCode outage blocks new
-  payments. Only rails CrowdCode verifies end-to-end (x402 USDC on Base,
-  MPP USDC on Tempo) may pay automatically.
+  receipt → audit entry. A review is optional and never blocks. A CrowdCode
+  outage blocks new payments. Only rails CrowdCode verifies end-to-end (x402
+  USDC on Base, MPP USDC on Tempo) may pay automatically.
 - **Spending approval** permits up to $1 per model/paid-tool call and $10 per
   query by default. Calls above either threshold pause before payment for
   approval, a query-only budget increase, or decline. Wallet settings change

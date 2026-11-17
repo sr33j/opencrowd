@@ -322,7 +322,7 @@ describe("Monad purchase lifecycle through the gateway", () => {
     expect(inspected).toMatchObject({ ok: true, data: { rail: "x402-monad", price_ceiling_cents: 20 } });
 
     const result = await gateway.execute("call_paid_service", { url: svc.url, method: "POST", body: { prompt: "a cat" } });
-    expect(result).toMatchObject({ ok: true, data: { outcome: "paid_success", charged_cost_cents: 20, review_required: true } });
+    expect(result).toMatchObject({ ok: true, data: { outcome: "paid_success", charged_cost_cents: 20, review: "optional" } });
     // Settlement evidence never reaches the model.
     expect(JSON.stringify(result)).not.toContain(TX.slice(2));
     expect(crowdcode.scoreQueries.some((query) => query.apiEndpoint === svc.url)).toBe(true);
@@ -331,8 +331,8 @@ describe("Monad purchase lifecycle through the gateway", () => {
     expect(purchase.record).toMatchObject({ rail: "x402-monad", outcome: "paid_success", charged_cost_cents: 20 });
     expect(purchase.record.evidence).toMatchObject({ reference: `x402:monad:${TX}`, payTo: PAY_TO });
 
-    // A pending required review blocks the next purchase until it is submitted.
-    expect((await gateway.execute("call_paid_service", { url: svc.url, method: "POST", body: {} })).error).toMatch(/requires its CrowdCode review/);
+    // No review is owed: the next purchase goes straight through.
+    expect(await gateway.execute("call_paid_service", { url: svc.url, method: "POST", body: { prompt: "a dog" } })).toMatchObject({ ok: true, data: { outcome: "paid_success" } });
 
     const review = await gateway.execute("review_paid_service", { purchase_id: (result.data as any).purchase_id, rating: 5, reason: "clip delivered" });
     expect(review.ok).toBe(true);
@@ -347,10 +347,11 @@ describe("Monad purchase lifecycle through the gateway", () => {
 
     const failed = await gateway.execute("call_paid_service", { url: svc.url, method: "POST", body: { aspect_ratio: "16:9" } });
     expect(failed.ok).toBe(false);
-    expect(failed.data).toMatchObject({ outcome: "free", charged_cost_cents: 0, review_required: false, data: { error: "\"prompt\" is required" } });
+    expect(failed.data).toMatchObject({ outcome: "free", charged_cost_cents: 0, data: { error: "\"prompt\" is required" } });
+    expect(failed.data).not.toHaveProperty("review");
     expect(session.spentCents).toBe(0);
     const [rejected] = await listPurchases(session);
-    expect(rejected.record).toMatchObject({ outcome: "free", charged_cost_cents: 0, review_required: false });
+    expect(rejected.record).toMatchObject({ outcome: "free", charged_cost_cents: 0 });
     expect(rejected.record.notes).toMatch(/not charged.*stays valid until/);
 
     const fixed = await gateway.execute("call_paid_service", { url: svc.url, method: "POST", body: JSON.stringify({ prompt: "a cat", aspect_ratio: "16:9" }) });

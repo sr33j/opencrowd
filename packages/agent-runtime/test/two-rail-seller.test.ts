@@ -134,8 +134,8 @@ async function task(start: { base: number; solana: number; tempo: number }, owed
   for (const move of (plan.data as any)?.moves ?? []) await step("bridge_usdc", move);
   for (const url of [SEARCH, post("a"), post("b")]) {
     await step("inspect_paid_service", { url, method: "GET" });
-    const call = await step("call_paid_service", { url, method: "GET" });
-    if ((call.data as any)?.review_required) await step("review_paid_service", { purchase_id: (call.data as any).purchase_id, rating: 4, reason: "a summary as described" });
+    // No review is owed after a purchase (SRI-115): straight on to the next one.
+    await step("call_paid_service", { url, method: "GET" });
   }
   // The owner asks for the first piece again: it was bought, so it is free.
   const reread = await step("call_paid_service", { url: post("a"), method: "GET" });
@@ -153,8 +153,12 @@ describe("one seller, two networks, one task (SRI-88)", () => {
     const inspected = log.find((l) => l.tool === "inspect_paid_service")!.data;
     expect(inspected).toMatchObject({ free: true, price_ceiling_cents: 0, note: expect.stringContaining("never move funds for it"), schema: { price_usd: 0 } });
     const search = log.find((l) => l.tool === "call_paid_service")!.data;
-    expect(search).toMatchObject({ outcome: "free", charged_cost_cents: 0, review_required: false });
+    expect(search).toMatchObject({ outcome: "free", charged_cost_cents: 0 });
+    expect(search).not.toHaveProperty("review");
     const first = log.filter((l) => l.tool === "call_paid_service")[1].data;
+    expect(first).toMatchObject({ outcome: "paid_success", review: "automatic" });
+    expect(log.filter((l) => l.tool === "call_paid_service").map((l) => l.ok)).toEqual([true, true, true, true]);
+    expect(log.some((l) => l.tool === "review_paid_service")).toBe(false);
     expect(first.follow_up).toMatchObject({ header: "X-Drip-Unlock", token_field: "paymentInfo.unlockToken", saved: true });
     expect(reread.data).toMatchObject({ outcome: "free", charged_cost_cents: 0, note: expect.stringContaining("Free re-read") });
     expect(calls.filter((c) => c.unlock)).toEqual([{ url: post("a"), unlock: "tok-1" }]);

@@ -21,7 +21,6 @@ import {
   matchCommands,
   renderCommandHelp,
   runSlashCommand,
-  sessionHasPendingReviews,
   type CommandResult
 } from "../registry.js";
 import { envFlag, parseUsd, formatCents, shortUrl, truncateMiddle } from "../shared.js";
@@ -74,7 +73,6 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
 
   const [session, setSession] = useState(initialSession);
   const stateRef = useRef<ReplState>({ testMode: initialTestMode, testSeed: initialTestSeed });
-  const forceQuitRef = useRef(false);
   const historyRef = useRef<string[]>([]);
   const lastServiceUrlRef = useRef<string>("");
   const ctrlCArmedRef = useRef(false);
@@ -205,14 +203,6 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
 
   const finalize = useCallback(async (reason: string) => {
     if (exiting) {
-      return;
-    }
-    if (!forceQuitRef.current && await sessionHasPendingReviews(session).catch(() => false)) {
-      forceQuitRef.current = true;
-      push({
-        kind: "note",
-        text: "a confirmed paid purchase still needs its CrowdCode review — ask the agent to submit it, or /quit again to exit with the review pending"
-      });
       return;
     }
     setExiting(true);
@@ -367,7 +357,6 @@ function App({ session: initialSession, initialTestMode, initialTestSeed, defaul
       case "new-session": {
         const next = await createOpenCrowdSession({ workspaceRoot: process.cwd() });
         setSession(next);
-        forceQuitRef.current = false;
         stdout?.write("\x1b[2J\x1b[3J\x1b[H");
         push({ kind: "banner", text: "" });
         push({ kind: "note", text: `new session ${next.sessionId}` });

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.8 — 2026-11-17
+
+- **No review is owed after a purchase (SRI-115).** A paid call no longer blocks the next one, or the run's completion, until the agent reviews it. The gate cost an extra model turn per purchase — more than the $0.007 search it reviewed — and caused 8 of 25 failed paid calls in the fortnight before it went. CrowdCode's hosted gateway now judges every settled purchase itself, from its own record of the request, the response and the payment, and submits the review signed by the agent's wallet as before. `review_paid_service` stays, as optional notes for what that record cannot show; notes that arrive after the automatic review are not used. A failed review is never presented as something to retry.
+- A hosted `call_paid_service` result says `review: "automatic"` instead of `review_required: true`; locally it says `review: "optional"`. With CrowdCode turned off, the paid call tells the hosted gateway not to review that purchase (`economy.pay` carries `crowdcode_review: false`).
+- The completion gate asks only for the one-time CrowdCode reflection. Removed: `EconomyGateway.hasPendingRequiredReviews`, `pendingRequiredReviews`, `skipPendingReviews`, `MAX_REVIEW_ATTEMPTS`, `EconomyPort.hasPendingRequiredReviews`, and the CLI's pending-review guard on `/quit`. Old sessions' `review_required` records are read and ignored.
+
 ## 0.16.7 — 2026-11-06
 
 - **A chat-only model is told never to write down a value it could not have computed (SRI-91).** Asked for a SHA-256 under 0.16.6's chat-only prompt, `venice-uncensored-role-play` said it could not compute one and then gave "the first 12 characters" anyway, in 3 of 12 tries. `CHAT_ONLY_SYSTEM_PROMPT` now ends with that rule on its own: no hash, checksum, encoding, command output, file contents or live value, not even as a guess or an example; ordinary arithmetic and known facts are still answered. Measured against Venice: 0 of 24 made-up digests for that model and 0 of 9 for `venice-uncensored-1-2`, with role-play and plain questions unchanged.

@@ -36,7 +36,8 @@ AgentCash owns:
 CrowdCode owns:
 
 - the pre-payment service reputation check;
-- signed reviews after every confirmed paid use, including paid failures.
+- reviews of paid uses, including paid failures: automatic on hosted agents,
+  optional notes from the agent otherwise.
 
 Venice and OpenRouter own inference. OpenCrowd must not implement another
 wallet, service marketplace, reputation system, or payment protocol. Vendor
@@ -309,7 +310,6 @@ find/discover
   -> reconcile free/SIWX/paid/unknown outcome
   -> persist artifact and immutable receipt
   -> finalize/release budget reservation
-  -> submit CrowdCode review for confirmed paid result
   -> append audit entry
 ```
 
@@ -318,11 +318,14 @@ Invariants (each is runtime-enforced and tested):
 - A CrowdCode outage or rejected check prevents a new payment.
 - `unproven` evidence alone does not automatically reject a service.
 - Free or SIWX-authenticated results create no paid receipt/review.
-- Confirmed paid successes and paid failures create receipts and reviews.
+- Confirmed paid successes and paid failures create receipts; a review of one
+  is optional (hosted agents get CrowdCode's automatic review).
 - Ambiguous state-changing calls are recorded unknown and never auto-retried.
-- A second purchase and session completion are blocked while a confirmed paid
-  purchase has a pending required review.
-- Pending reviews survive restart.
+- No review is ever owed: an unreviewed purchase blocks neither a second
+  purchase nor session completion.
+- With CrowdCode off, the hosted gateway is told not to review a purchase.
+- A review CrowdCode refused for a reason a retry cannot change is not
+  accepted again for that purchase.
 - Raw payment proof is stored for review but omitted from the model and normal
   CLI rendering.
 - Only rails CrowdCode verifies end-to-end, and the payer can settle, are
@@ -390,7 +393,7 @@ command, which affects future sessions, never a running one.
 | `/clear` | Archive and clear conversation context only; retain the session, spend, provider, models, and policy. |
 | `/new` | Start a new session with configured defaults. |
 | `/help` | Render the canonical command registry. |
-| `/quit` | Finalize and exit after required reviews are resolved. |
+| `/quit` | Finalize and exit. |
 
 Removed from the interactive UI: `/run` (plain text runs a task), `/search`,
 `/permissions` and old modes, `/models set`, `/test-mode`, `/test-seed`,
@@ -477,7 +480,7 @@ Economic safety is enforced by the runtime, not by prompt trust:
 - The model sees only the stable gateway tools; adapters hold vendor access.
 - Payment proof, payer identity, and signatures never enter prompts, normal
   tool results, or logs.
-- Approval, budget, reputation, rail, and review gates run in code on every
+- Approval, budget, reputation, and rail gates run in code on every
   paid call regardless of what the model requests.
 - Subagents structurally cannot pay, approve, or spawn deeper subagents.
 

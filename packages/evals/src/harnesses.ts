@@ -166,11 +166,6 @@ const openCrowdHarness: GaiaHarness = {
       dynamicTools: gateway
         ? { definitions: gateway.definitions(), execute: (name, args) => gateway.execute(name, args) }
         : undefined,
-      completionGate: gateway
-        ? async () => (await gateway.hasPendingRequiredReviews())
-          ? "a confirmed paid purchase still needs its required review; submit it with review_paid_service"
-          : undefined
-        : undefined,
       onMessage: (message) => appendConversationMessage(session, message as ConversationMessage)
     });
     const budget = asRecord(result.summary.budget);

@@ -30,7 +30,7 @@ it("resumes a saved query after approval without repeating a completed model or 
   } };
   const runtime = createOpenCrowdRuntime({ workspace: root,
     llmProvider: async () => ({ kind: "typed", main: { provider, model: "test", maxCostCentsPerCall: 100 } }),
-    economy: async () => ({ definitions: () => [{ name: "test_tool", description: "test", parameters: {} }], execute: async () => { toolCalls++; return { ok: true }; }, hasPendingRequiredReviews: async () => false }) });
+    economy: async () => ({ definitions: () => [{ name: "test_tool", description: "test", parameters: {} }], execute: async () => { toolCalls++; return { ok: true }; } }) });
   const result = await runtime.runTask(session, "Do the task");
   expect(result.outcome).toBe("waiting_for_approval"); expect(paid).toBe(1); expect(toolCalls).toBe(1);
   const restored = await loadSession(root, session.sessionId);

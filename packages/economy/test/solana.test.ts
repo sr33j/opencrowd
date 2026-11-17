@@ -167,7 +167,7 @@ describe("Solana purchase lifecycle through AgentCash", () => {
     const inspected = await gateway.execute("inspect_paid_service", { url: "https://svc.example/img", method: "POST" });
     expect(inspected).toMatchObject({ ok: true, data: { rail: "x402-solana", price_ceiling_cents: 1 } });
     const result = await gateway.execute("call_paid_service", { url: "https://svc.example/img", method: "POST", body: { prompt: "a cat" } });
-    expect(result).toMatchObject({ ok: true, data: { outcome: "paid_success", charged_cost_cents: 1, review_required: true, data: { image: "a cat" } } });
+    expect(result).toMatchObject({ ok: true, data: { outcome: "paid_success", charged_cost_cents: 1, review: "optional", data: { image: "a cat" } } });
     expect(fetches[0]).toMatchObject({ url: "https://svc.example/img", paymentNetwork: "solana", paymentProtocol: "x402", maxAmount: 0.01 });
     expect(JSON.stringify(result)).not.toContain(SIG);
     const [purchase] = await listPurchases(session);

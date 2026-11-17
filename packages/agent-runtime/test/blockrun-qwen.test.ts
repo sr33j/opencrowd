@@ -187,8 +187,7 @@ describe("qwen/qwen3.8-max on BlockRun", () => {
       llmProvider: async () => ({ kind: "typed", main: { provider, model: QWEN, maxCostCentsPerCall: 100 } }),
       economy: async () => ({
         definitions: () => [{ name: "budget_tool", description: "Budget", parameters: { type: "object", properties: { scope: { type: "string" } } } }],
-        execute: async (_name: string, args: unknown) => { executed.push(args); return { ok: true }; },
-        hasPendingRequiredReviews: async () => false
+        execute: async (_name: string, args: unknown) => { executed.push(args); return { ok: true }; }
       })
     });
 

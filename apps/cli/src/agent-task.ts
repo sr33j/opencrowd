@@ -353,7 +353,7 @@ export function createDemoLlmProvider(): LlmProvider {
             };
           }
           return {
-            content: "Submitting the required CrowdCode review for the purchase.",
+            content: "Adding an optional CrowdCode review of the purchase.",
             toolCalls: [{
               id: "demo_4",
               name: "review_paid_service",

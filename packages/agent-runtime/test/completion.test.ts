@@ -17,11 +17,10 @@ async function session() {
 const answer = "Target neural decoding roles. Build a streaming decoder and seek feedback from BCI engineers.";
 const complete = (text = answer): LlmResponse => ({ content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: text } }] });
 const empty: LlmResponse = { content: "", toolCalls: [] };
-function reflection(pendingReview = false) {
+function reflection(enabled = true, definitions = ["request_service"]) {
   return economyTools({
-    definitions: () => [{ name: "request_service", description: "Request a missing service", parameters: { type: "object" } }],
-    execute: async () => ({ ok: true, data: { enabled: true } }),
-    hasPendingRequiredReviews: async () => pendingReview
+    definitions: () => definitions.map(name => ({ name, description: name, parameters: { type: "object" } })),
+    execute: async () => ({ ok: true, data: { enabled } })
   });
 }
 
@@ -83,8 +82,8 @@ it.each(["tool", "text"])("keeps the delivered answer when reflection closes wit
     .toContain("already saved");
 });
 
-it("keeps the answer while the model files a required review after completing", async () => {
-  const tools = reflection(true);
+it("keeps the answer while the model files an optional review after completing", async () => {
+  const tools = reflection();
   await tools.execute("request_service", {});
   const provider = { complete: vi.fn().mockResolvedValueOnce(complete())
     .mockResolvedValueOnce(complete("Review submitted.")) };
@@ -98,7 +97,7 @@ it("does not hold an answer the gate blocked before one existed", async () => {
     .mockResolvedValueOnce({ content: " ", toolCalls: [] })
     .mockResolvedValueOnce(complete()) };
   const result = await runAgentTaskDetailed(await session(), "Find a role", { provider,
-    completionGate: async () => (blocked ? undefined : ((blocked = true), "A paid purchase still needs its required review.")) });
+    completionGate: async () => (blocked ? undefined : ((blocked = true), "Reflect once before finishing.")) });
   expect(result.summary.final_message).toBe(answer);
 });
 
@@ -148,11 +147,37 @@ it("does not reuse a saved answer after the user changes the task", async () => 
   expect(calls).toBe(3);
 });
 
-it("keeps required reviews blocking even after a service request or a restored nudge", async () => {
-  const tools = reflection(true);
-  await tools.execute("request_service", {});
-  expect(await tools.completionGate()).toContain("required review");
-  expect(await reflection(true).completionGate(true)).toContain("required review");
+it("asks only for the one-time reflection, never for a review (SRI-115)", async () => {
+  const tools = reflection(true, ["request_service", "call_paid_service", "review_paid_service"]);
+  const prompt = await tools.completionGate();
+  expect(prompt).toContain("reflect once");
+  expect(prompt).not.toMatch(/review_paid_service|required review/);
+  // Once asked, or once restored as already nudged, nothing holds the run open.
+  expect(await tools.completionGate()).toBeUndefined();
+  expect(await reflection().completionGate(true)).toBeUndefined();
+  // A service request already made counts as the reflection.
+  const requested = reflection();
+  await requested.execute("request_service", {});
+  expect(await requested.completionGate()).toBeUndefined();
+  // CrowdCode off, or no request_service tool: no gate at all.
+  expect(await reflection(false).completionGate()).toBeUndefined();
+  expect(await reflection(true, ["call_paid_service", "review_paid_service"]).completionGate()).toBeUndefined();
+});
+
+it("completes straight after an unreviewed paid purchase", async () => {
+  const purchases: string[] = [];
+  const tools = economyTools({
+    definitions: () => ["call_paid_service", "review_paid_service"].map(name => ({ name, description: name, parameters: { type: "object" } })),
+    execute: async name => { purchases.push(name); return { ok: true, data: { outcome: "paid_success", purchase_id: "pur_1", review: "automatic" } }; }
+  });
+  const provider = { complete: vi.fn()
+    .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "buy", name: "call_paid_service", arguments: { url: "https://svc.example" } }] })
+    .mockResolvedValueOnce(complete())
+    .mockResolvedValue(empty) };
+  const result = await runAgentTaskDetailed(await session(), "Find a role", { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
+  expect(result).toMatchObject({ outcome: "completed", summary: { final_message: answer } });
+  expect(provider.complete).toHaveBeenCalledTimes(2);
+  expect(purchases).toEqual(["call_paid_service"]);
 });
 
 it("allows a malformed completion tool call to be corrected", async () => {

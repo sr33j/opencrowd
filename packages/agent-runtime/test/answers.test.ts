@@ -34,7 +34,6 @@ function reflection(extra: Partial<EconomyGateway> = {}) {
   return economyTools({
     definitions: () => [{ name: "request_service", description: "Request a missing service", parameters: { type: "object" } }],
     execute: async () => ({ ok: true, data: { enabled: true } }),
-    hasPendingRequiredReviews: async () => false,
     ...extra,
   });
 }
@@ -213,16 +212,14 @@ describe("SRI-63: a malformed tool call is a tool error, not a failed run", () =
 describe("SRI-79: a placeholder or an acknowledgement is not the answer", () => {
   const search = { id: "s", name: "call_paid_service", arguments: { url: "https://api.exa.ai/search", method: "POST", body: { query: "US stablecoin regulation" } } };
   const sourced = "The two biggest developments were the GENIUS Act (https://www.congress.gov/bill/119th-congress/senate-bill/1582) and the OCC's interpretive letter 1183 (https://www.occ.gov/news-issuances/news-releases/2025/nr-occ-2025-16.html).";
-  /** Hosted economy tools: a paid search that returns sources, a review, and the reflection gate. */
-  function economy(pendingReview = { value: true }) {
+  /** Hosted economy tools: a paid search that returns sources, an optional review, and the reflection gate. */
+  function economy() {
     return reflection({
       definitions: () => ["request_service", "call_paid_service", "review_paid_service"].map(name => ({ name, description: name, parameters: { type: "object" } })),
       execute: async (name: string) => {
         if (name === "call_paid_service") return { ok: true, data: { status: 200, body: { results: [{ url: "https://www.congress.gov/bill/119th-congress/senate-bill/1582" }] } } };
-        if (name === "review_paid_service") pendingReview.value = false;
         return { ok: true, data: { enabled: true } };
       },
-      hasPendingRequiredReviews: async () => pendingReview.value,
     });
   }
 
@@ -278,7 +275,7 @@ describe("SRI-79: a placeholder or an acknowledgement is not the answer", () => 
   });
 
   it("still holds a real answer, and the reflection's acknowledgement does not replace it", async () => {
-    const tools = economy({ value: false });
+    const tools = economy();
     const provider = { complete: vi.fn()
       .mockResolvedValueOnce({ content: "", toolCalls: [search] })
       .mockResolvedValueOnce(complete(sourced))
@@ -315,7 +312,6 @@ async function hostedRun(steps: Step[], options: { gate?: boolean } = {}) {
   const economy = {
     definitions: () => [{ name: "request_service", description: "Request a missing service", parameters: { type: "object" } }],
     execute: async () => ({ ok: true, data: { enabled: true } }),
-    hasPendingRequiredReviews: async () => false,
   } as unknown as EconomyGateway;
   const worker = new MachineWorker({ agentHome: await tempRoot(), output: (line: string) => { events.push(JSON.parse(line)); },
     provider: () => ({ complete: async (messages, context) => steps[Math.min(call++, steps.length - 1)](messages, context) }),

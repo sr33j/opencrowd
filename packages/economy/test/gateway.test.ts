@@ -15,7 +15,6 @@ import {
   McpConnection,
   MockAgentCashAdapter,
   MockCrowdCodeAdapter,
-  pendingRequiredReviews,
   redactPurchase,
   summarizeEvidence,
   type ApprovalAnswer,
@@ -108,7 +107,9 @@ describe("purchase lifecycle", () => {
     expect(agentcash.fetchCalls).toHaveLength(1);
     const data = result.data as Record<string, unknown>;
     expect(data.outcome).toBe("paid_success");
-    expect(data.review_required).toBe(true);
+    // Nothing is owed: outside hosted spending a review is the agent's choice.
+    expect(data.review).toBe("optional");
+    expect(data).not.toHaveProperty("review_required");
     // Receipt evidence comes from the adapter, never the model.
     const purchases = await listPurchases(session);
     expect(purchases[0].record.evidence?.reference).toMatch(/^0xmock/);
@@ -154,7 +155,8 @@ describe("purchase lifecycle", () => {
     expect(result.error).toContain("without a verifiable settlement receipt");
     expect(result.error).toContain("NOT retried");
     const purchases = await listPurchases(session);
-    expect(purchases[0].record).toMatchObject({ outcome: "unknown", review_required: false });
+    expect(purchases[0].record).toMatchObject({ outcome: "unknown" });
+    expect(purchases[0].record).not.toHaveProperty("review_required");
     expect(purchases[0].record.artifact_path).toBeTruthy();
   });
 
@@ -236,10 +238,10 @@ describe("outcome reconciliation", () => {
 
     expect(result.ok).toBe(true);
     expect((result.data as Record<string, unknown>).outcome).toBe("free");
-    expect((result.data as Record<string, unknown>).review_required).toBe(false);
+    expect(result.data).not.toHaveProperty("review");
     expect(session.spentCents).toBe(0);
     expect(session.reservedCents).toBe(0);
-    await expect(pendingRequiredReviews(session)).resolves.toHaveLength(0);
+    expect((await listPurchases(session))[0].reviewStatus).toBe("not_required");
   });
 
   it("creates no paid receipt for SIWX-authenticated results", async () => {
@@ -249,8 +251,9 @@ describe("outcome reconciliation", () => {
     const result = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
 
     expect((result.data as Record<string, unknown>).outcome).toBe("siwx");
+    expect(result.data).not.toHaveProperty("review");
     expect(session.spentCents).toBe(0);
-    await expect(pendingRequiredReviews(session)).resolves.toHaveLength(0);
+    expect((await listPurchases(session))[0].reviewStatus).toBe("not_required");
   });
 
   it("records paid failures as reviewable receipts", async () => {
@@ -268,10 +271,15 @@ describe("outcome reconciliation", () => {
     const result = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
 
     expect(result.ok).toBe(false);
+    expect(result.data).toMatchObject({ outcome: "paid_failure", review: "optional" });
     const purchases = await listPurchases(session);
     expect(purchases[0].record.outcome).toBe("paid_failure");
-    expect(purchases[0].reviewStatus).toBe("pending");
+    expect(purchases[0].reviewStatus).toBe("not_required");
     expect(session.spentCents).toBe(5);
+    // A paid failure is reviewable on request, and the review reaches CrowdCode.
+    const review = await gateway.execute("review_paid_service", { purchase_id: purchases[0].record.purchase_id, rating: 1, reason: "HTTP 500 after payment" });
+    expect(review.ok).toBe(true);
+    expect((await listPurchases(session))[0].reviewStatus).toBe("submitted");
   });
 
   it("records ambiguous transport failures as unknown, finalizes conservatively, and never auto-retries", async () => {
@@ -425,7 +433,7 @@ describe("approval policy", () => {
   });
 });
 
-describe("required reviews", () => {
+describe("optional reviews", () => {
   it("reviews an unpaid failure with a stable identifier across retries", async () => {
     const crowdcode = new MockCrowdCodeAdapter();
     const agentcash = new MockAgentCashAdapter({ defaultFetchResult: {
@@ -436,7 +444,8 @@ describe("required reviews", () => {
     const call = await gateway.execute("call_paid_service", { url: ENDPOINT });
     const purchaseId = (call.data as Record<string, unknown>).purchase_id;
     expect(call.ok).toBe(false);
-    expect(call.data).toMatchObject({ review_available: true, review_required: false });
+    // An unpaid failure is never flagged for review, but can still be reviewed.
+    expect(call.data).not.toHaveProperty("review");
     const submit = crowdcode.reviewService.bind(crowdcode);
     let attempts = 0;
     const nonces: (string | undefined)[] = [];
@@ -500,16 +509,19 @@ describe("required reviews", () => {
     expect(crowdcode.reviews[0]).toMatchObject({ reviewNonce: "pur_legacy", paymentReference: undefined });
   });
 
-  it("blocks a second purchase until the pending review is submitted, using stored evidence", async () => {
-    const { session, gateway, crowdcode } = await setup();
+  it("lets a second paid purchase go through without a review, and reviews later with stored evidence", async () => {
+    const { session, gateway, agentcash, crowdcode } = await setup();
     await inspect(gateway);
 
     const first = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    expect(first).toMatchObject({ ok: true, data: { outcome: "paid_success", review: "optional" } });
     const purchaseId = (first.data as Record<string, unknown>).purchase_id as string;
 
-    const secondBlocked = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
-    expect(secondBlocked.ok).toBe(false);
-    expect(secondBlocked.error).toContain("requires its CrowdCode review");
+    // SRI-115: no review is owed, so nothing stands between one purchase and the next.
+    const second = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    expect(second).toMatchObject({ ok: true, data: { outcome: "paid_success", review: "optional" } });
+    expect(agentcash.fetchCalls).toHaveLength(2);
+    expect(crowdcode.reviews).toHaveLength(0);
 
     const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 4, reason: "good but slow" });
     expect(review.ok).toBe(true);
@@ -520,16 +532,14 @@ describe("required reviews", () => {
       paymentProof: "bW9jay1wcm9vZg==",
       paymentProvider: "x402"
     });
-
-    const secondAllowed = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
-    expect(secondAllowed.ok).toBe(true);
     expect(session.spentCents).toBeGreaterThan(0);
   });
 
-  it("keeps reviews pending across restarts (new gateway over the same session)", async () => {
+  it("keeps an unreviewed purchase reviewable across restarts (new gateway over the same session)", async () => {
     const { session, gateway, agentcash, crowdcode } = await setup();
     await inspect(gateway);
-    await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    const first = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    const purchaseId = (first.data as Record<string, unknown>).purchase_id as string;
 
     const restarted = new EconomyGateway({
       session,
@@ -538,23 +548,27 @@ describe("required reviews", () => {
       approvalMode: "auto",
       approvalRulesPath: join(session.workspaceRoot, "approvals.json")
     });
-    await expect(restarted.hasPendingRequiredReviews()).resolves.toBe(true);
     await inspect(restarted);
-    const blocked = await restarted.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
-    expect(blocked.ok).toBe(false);
-    expect(blocked.error).toContain("review");
+    expect((await restarted.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
+    expect((await restarted.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "ok" })).ok).toBe(true);
+    expect(crowdcode.reviews[0]).toMatchObject({ paymentReference: "0xmock1", paymentProof: "bW9jay1wcm9vZg==" });
   });
 
-  it("keeps the review pending when CrowdCode rejects the submission", async () => {
-    const { gateway } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: true }) });
+  it("tells the agent to carry on when CrowdCode does not take an optional review", async () => {
+    const { session, gateway } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: true }) });
     await inspect(gateway);
     const first = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
     const purchaseId = (first.data as Record<string, unknown>).purchase_id as string;
 
     const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "ok" });
     expect(review.ok).toBe(false);
-    expect(review.error).toContain("stays pending");
-    await expect(gateway.hasPendingRequiredReviews()).resolves.toBe(true);
+    expect(review.error).toContain("CrowdCode did not take this review");
+    expect(review.error).toContain("nothing waits on it; carry on with the task");
+    expect(review.error).not.toMatch(/stays pending|retry/);
+    // A transient failure is not a refusal: the purchase stays reviewable.
+    expect((await listPurchases(session))[0]).toMatchObject({ reviewStatus: "not_required" });
+    expect((await listPurchases(session))[0].reviewRejected).toBeUndefined();
+    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
   });
 
   /**
@@ -583,7 +597,8 @@ describe("required reviews", () => {
     const purchaseId = (call.data as Record<string, unknown>).purchase_id as string;
     const [purchase] = await listPurchases(session);
     // Recorded so the agent can see what it tried, and not reviewable.
-    expect(purchase.record).toMatchObject({ caller_error: true, review_required: false });
+    expect(purchase.record).toMatchObject({ caller_error: true });
+    expect(call.data).not.toHaveProperty("review");
 
     const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 1, reason: "it would not take my money" });
     expect(review.ok).toBe(false);
@@ -591,26 +606,20 @@ describe("required reviews", () => {
     expect(review.error).toContain("nothing to review");
     // Nothing reached CrowdCode, so the provider's score is untouched.
     expect(crowdcode.reviews).toHaveLength(0);
-    // And it never blocked the agent's next purchase either.
-    await expect(gateway.hasPendingRequiredReviews()).resolves.toBe(false);
   });
 
   /**
    * 2026-10-27: an agent bought a web search, submitted its review, and was
    * told `service identity conflict` — CrowdCode had the endpoint registered
    * in a way the review could not be attached to. The message ended "retry
-   * review_paid_service", so the agent did, got the same answer, and in
-   * between was refused the next purchase it had been asked to make, because
-   * a paid purchase with a pending review blocks one. Two turns and two model
-   * calls to learn nothing.
+   * review_paid_service", so the agent did and got the same answer. Two turns
+   * and two model calls to learn nothing.
    */
-  it("stops blocking purchases at once when CrowdCode's rejection cannot change", async () => {
-    const { session, gateway } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: "service identity conflict" }) });
+  it("says plainly when CrowdCode's rejection cannot change, and refuses a second attempt", async () => {
+    const { session, gateway, crowdcode } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: "service identity conflict" }) });
     await inspect(gateway);
     const first = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
     const purchaseId = (first.data as Record<string, unknown>).purchase_id as string;
-    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).error)
-      .toContain("requires its CrowdCode review");
 
     const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "fast and accurate" });
     expect(review.ok).toBe(false);
@@ -618,15 +627,20 @@ describe("required reviews", () => {
     expect(review.error).toContain("will not change on a retry");
     expect(review.error).toContain("service identity conflict");
     expect(review.error).not.toContain("retry review_paid_service");
-
-    // One attempt was enough: the agent gets on with the work it was given.
-    await expect(gateway.hasPendingRequiredReviews()).resolves.toBe(false);
-    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
-    // The purchase is still on record as reviewable, for an operator who fixes
-    // the registration; it simply no longer holds the agent up.
+    expect(review.error).toContain(`Do not call review_paid_service for ${purchaseId} again`);
     const [purchase] = await listPurchases(session);
-    expect(purchase.record.review_required).toBe(true);
-    expect(purchase.reviewStatus).toBe("pending");
+    expect(purchase).toMatchObject({ reviewStatus: "not_required", reviewRejected: true });
+
+    // A second attempt is refused locally, without asking CrowdCode again.
+    const reviewCalls = crowdcode.reviewService.bind(crowdcode);
+    let asked = 0;
+    crowdcode.reviewService = async r => { asked++; return reviewCalls(r); };
+    const again = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "fast and accurate" });
+    expect(again.ok).toBe(false);
+    expect(again.error).toContain("CrowdCode already refused a review");
+    expect(asked).toBe(0);
+    // And the agent was never held up: the next purchase goes straight through.
+    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
   });
 });
 
@@ -659,7 +673,7 @@ describe("x402 settlement through the real MCP adapter (field note 001)", () => 
   // The 402 challenge settles on-chain but the final HTTP response is a
   // plain 200 whose receipt arrives in a second MCP content block. The
   // purchase must be recorded as paid at the actual amount with the
-  // settlement evidence retained and its review required.
+  // settlement evidence retained for an optional review.
   const TX = "0x3cab25e6f1349f8ae7b5c7f48d79e40bef53e9377fecc395bc176520b866f6c1";
   const RECEIPT = Buffer.from(
     JSON.stringify({ success: true, payer: "0xF5a65ae916474Da7fB", transaction: TX, network: "base" })
@@ -688,7 +702,7 @@ describe("x402 settlement through the real MCP adapter (field note 001)", () => 
     return server;
   }
 
-  it("records a paid purchase with receipt evidence and submits the required review", async () => {
+  it("records a paid purchase with receipt evidence and submits an optional review", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 100 });
     const mcp = new McpConnection("agentcash", { command: "unused", args: [] }, {
@@ -714,7 +728,7 @@ describe("x402 settlement through the real MCP adapter (field note 001)", () => 
     const data = result.data as Record<string, unknown>;
     expect(data.outcome).toBe("paid_success");
     expect(data.charged_cost_cents).toBe(1);
-    expect(data.review_required).toBe(true);
+    expect(data.review).toBe("optional");
     // No settlement details leak into the model-visible result.
     expect(JSON.stringify(result)).not.toContain(TX.slice(2));
     expect(JSON.stringify(result)).not.toContain(RECEIPT);
@@ -739,51 +753,56 @@ describe("x402 settlement through the real MCP adapter (field note 001)", () => 
   });
 });
 
-describe("durable review deferral", () => {
-  it("retains receipts but does not let repeated registry rejections block a restarted gateway", async () => {
-    const { session, gateway, agentcash, crowdcode } = await setup({ crowdcode: new MockCrowdCodeAdapter({ failReviews: true }) });
+describe("legacy sessions", () => {
+  it("reads review_required and review_skipped from old sessions without acting on them", async () => {
+    const { session, gateway, crowdcode } = await setup();
+    const { appendFile, mkdir } = await import("node:fs/promises");
+    const { dirname } = await import("node:path");
+    const { purchasesPath } = await import("../src/purchases.js");
+    const legacy = (id: string) => ({
+      purchase_id: id, session_id: session.sessionId, created_at: new Date().toISOString(), endpoint: ENDPOINT, method: "POST",
+      rail: "x402-base", quoted_cost_cents: 10, charged_cost_cents: 10, outcome: "paid_success", review_required: true,
+      evidence: { paidUsd: 0.1, rail: "x402-base", reference: "0xold" }
+    });
+    await mkdir(dirname(purchasesPath(session)), { recursive: true });
+    await appendFile(purchasesPath(session), [
+      { type: "purchase", record: legacy("pur_old_pending") },
+      { type: "purchase", record: legacy("pur_old_skipped") },
+      { type: "review_skipped", purchase_id: "pur_old_skipped" }
+    ].map(e => JSON.stringify(e)).join("\n") + "\n");
+
+    const states = await listPurchases(session);
+    expect(states.map(s => s.reviewStatus)).toEqual(["not_required", "not_required"]);
+    expect(redactPurchase(states[0])).not.toHaveProperty("review_deferred");
+    // An old pending review blocks nothing.
     await inspect(gateway);
-    const paid = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
-    const purchaseId = (paid.data as any).purchase_id;
-    for (let i=0; i<2; i++) await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "Useful result" });
-    const restarted = new EconomyGateway({ session, agentcash, crowdcode, approvalMode: "auto", approvalRulesPath: join(session.workspaceRoot, "approvals.json") });
-    expect(await restarted.hasPendingRequiredReviews()).toBe(false);
-    expect((await listPurchases(session))[0]).toMatchObject({ reviewStatus: "pending", reviewAttempts: 2, record: { evidence: { reference: "0xmock1" } } });
-    await inspect(restarted);
-    expect((await restarted.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
-  });
-  it("keeps a previous query's reviews available without blocking a new query, including legacy receipts", async () => {
-    const { session, gateway } = await setup();
-    await inspect(gateway);
-    await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
-    const { beginQuery } = await import("@opencrowd/core");
-    await beginQuery(session, "new-query");
-    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
-    expect((await listPurchases(session))[0].reviewStatus).toBe("pending");
-    await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
-    expect(await gateway.hasPendingRequiredReviews()).toBe(true);
-    expect((await listPurchases(session))[1].record.query_id).toBe("new-query");
-    await beginQuery(session, "next-query");
-    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+    expect((await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
+    // And can still be reviewed if the agent chooses to.
+    expect((await gateway.execute("review_paid_service", { purchase_id: "pur_old_pending", rating: 4, reason: "fine" })).ok).toBe(true);
+    expect(crowdcode.reviews[0]).toMatchObject({ paymentReference: "0xold", apiEndpoint: ENDPOINT });
   });
 });
 
-it("disabling CrowdCode drops pending review gates without changing spending policy", async () => {
+it("disabling CrowdCode tells the hosted gateway not to review, without changing spending policy", async () => {
   const { session, agentcash, crowdcode } = await setup();
   const gateway = new EconomyGateway({ session, agentcash, crowdcode, hostedSpending: true, approvalMode: "auto" });
   await inspect(gateway);
   const paid = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 });
-  expect(paid.ok).toBe(true);
-  expect(await gateway.hasPendingRequiredReviews()).toBe(true);
+  // Hosted: CrowdCode's judge reviews the purchase itself.
+  expect(paid).toMatchObject({ ok: true, data: { outcome: "paid_success", review: "automatic" } });
+  expect(agentcash.fetchCalls[0]).not.toHaveProperty("review");
   await gateway.execute("set_crowdcode_enabled", { enabled: false });
-  expect(await gateway.hasPendingRequiredReviews()).toBe(false);
   const before = crowdcode.scoreQueries.length;
   await inspect(gateway);
   const off = await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 });
-  expect(off).toMatchObject({ ok: true, data: { review_required: false } });
+  expect(off).toMatchObject({ ok: true, data: { outcome: "paid_success" } });
+  expect(off.data).not.toHaveProperty("review");
+  expect(agentcash.fetchCalls[1]).toMatchObject({ review: false });
   expect(crowdcode.scoreQueries).toHaveLength(before);
   await gateway.execute("set_crowdcode_enabled", { enabled: true });
-  expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+  await inspect(gateway);
+  expect(await gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 })).toMatchObject({ ok: true, data: { review: "automatic" } });
+  expect(agentcash.fetchCalls[2]).not.toHaveProperty("review");
   const blocked = new EconomyGateway({ session, agentcash, crowdcode, hostedSpending: true, approvalMode: "off" });
   await blocked.execute("set_crowdcode_enabled", { enabled: false });
   expect(await blocked.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 5 })).toMatchObject({ ok: false, error: expect.stringMatching(/purchases are disabled/) });

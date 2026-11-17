@@ -245,7 +245,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       url: request.url,
       method,
       body,
-      max_cost_cents: Math.ceil(request.maxAmountUsd * 100)
+      max_cost_cents: Math.ceil(request.maxAmountUsd * 100),
+      // The owner turned CrowdCode off: no automatic review of this purchase.
+      ...(request.review === false ? { crowdcode_review: false } : {})
     };
     const timeoutMs = Math.min(request.timeoutMs ?? PAY_TIMEOUT_MS, PAY_TIMEOUT_MS);
     let reply, timedOut = false;
@@ -633,7 +635,6 @@ export function createHostedEconomy(options: HostedEconomyOptions): HostedEconom
 /** The hosted gateway, which can also plan a task's funding. */
 export type HostedEconomy = EconomyGateway & { planFunding?: (args: Record<string, unknown>) => Promise<McpCallResult> };
 
-export { MAX_REVIEW_ATTEMPTS } from "./economy-tools.js";
 export type { EconomyTools as HostedDynamicTools } from "./economy-tools.js";
 /** Cloud exposes the same tools and completion policy; wallet status and bridging get their hosted descriptions. */
 export function hostedDynamicTools(economy: HostedEconomy) {

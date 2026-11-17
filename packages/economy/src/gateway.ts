@@ -25,11 +25,10 @@ import {
   type ApprovalMode
 } from "./approvals.js";
 import {
-  appendPurchase, skipPendingReviews,
+  appendPurchase,
   listPurchases,
   newPurchaseId,
-  pendingRequiredReviews,
-  recordReviewSubmitted, recordReviewFailed, MAX_REVIEW_ATTEMPTS,
+  recordReviewSubmitted, recordReviewFailed,
   redactPurchase,
   type PurchaseOutcome,
   type PurchaseRecord
@@ -42,8 +41,10 @@ import {
  *
  *   find/discover -> inspect -> CrowdCode pre-check -> approval ->
  *   budget reservation -> AgentCash execution -> outcome reconciliation ->
- *   artifact + immutable receipt -> finalize/release -> required review ->
- *   audit entry
+ *   artifact + immutable receipt -> finalize/release -> audit entry
+ *
+ * No review step: on hosted agents CrowdCode's gateway judges every settled
+ * purchase on its own, and `review_paid_service` is optional notes.
  */
 
 export const GATEWAY_TOOL_NAMES = [
@@ -152,11 +153,6 @@ export class EconomyGateway {
     return (GATEWAY_TOOL_NAMES as readonly string[]).includes(name);
   }
 
-  /** True while a confirmed paid purchase still needs its required review. */
-  async hasPendingRequiredReviews(): Promise<boolean> {
-    return await this.crowdcodeEnabled() && (await pendingRequiredReviews(this.options.session)).length > 0;
-  }
-
   async execute(name: string, args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
     try {
       switch (name as GatewayToolName) {
@@ -204,14 +200,11 @@ export class EconomyGateway {
     if (this.options.hostedSpending && (name === "crowdcode_status" || name === "set_crowdcode_enabled")) {
       const preferences = new CrowdCodePreferences(this.options.session);
       const data = name === "crowdcode_status" ? await preferences.status() : await preferences.set(args.enabled as boolean, (args.scope ?? "session") as "session" | "default");
-      if (name === "set_crowdcode_enabled" && args.enabled === false) await skipPendingReviews(this.options.session);
       return { ok: true, data };
     }
     if (name === "request_service" && !(await this.crowdcodeEnabled())) return { ok: false, error: "CrowdCode is off. Turn it on to submit service requests." };
     if (!this.options.crowdcode.manage) return { ok: false, error: "CrowdCode management is unavailable" };
-    const result = await this.options.crowdcode.manage(name, args);
-    if (result.ok && name === "set_crowdcode_enabled" && args.enabled === false) await skipPendingReviews(this.options.session);
-    return result;
+    return await this.options.crowdcode.manage(name, args);
   }
 
   private async serviceEvidence(endpoint: string): Promise<ServiceEvidence> {
@@ -315,14 +308,6 @@ export class EconomyGateway {
         error: "external-service purchases are disabled (approval mode `off`). Local tools and LLM inference remain available; switch with /approval ask|auto."
       };
     }
-    // A confirmed paid purchase with a pending required review blocks further purchases.
-    const pending = await this.crowdcodeEnabled() ? await pendingRequiredReviews(session) : [];
-    if (pending.length > 0) {
-      return {
-        ok: false,
-        error: `a paid purchase requires its CrowdCode review before another purchase: review_paid_service purchase_id=${pending[0].record.purchase_id}`
-      };
-    }
     const endpoint = stringArg(args.url);
     if (!endpoint) {
       return { ok: false, error: "call_paid_service requires `url`" };
@@ -387,6 +372,9 @@ export class EconomyGateway {
     const reservation = this.options.hostedSpending ? { id: "hosted", amountCents: 0 } : await reserveBudget(session, quotedCostCents,
       { description: `Paid tool · ${endpoint}`, identity: JSON.stringify({ operationId, endpoint: target, method, body, quoteIdentity }), forceApproval: requestedCostCents !== undefined && quotedCostCents > requestedCostCents });
 
+    // With CrowdCode off the owner has asked for no reviews at all, and the
+    // hosted gateway, which now judges every purchase by itself, is told so.
+    const crowdcode = await this.crowdcodeEnabled();
     let result: PaidFetchResult;
     try {
       this.options.onProgress?.({ type: "calling_service", message: `Calling ${endpoint}` });
@@ -396,7 +384,8 @@ export class EconomyGateway {
         method,
         body,
         maxAmountUsd: quotedCostCents / 100,
-        rail: inspection.rail
+        rail: inspection.rail,
+        ...(crowdcode ? {} : { review: false })
       });
     } catch (error) {
       if (reservation) await releaseReservation(session, reservation);
@@ -448,9 +437,6 @@ export class EconomyGateway {
       charged_cost_cents: chargedCents,
       outcome,
       artifact_path: artifact?.path,
-      // Confirmed paid successes AND paid failures require reviews; free,
-      // SIWX, and unknown outcomes create no paid receipt to review.
-      review_required: paid && supportedRail && await this.crowdcodeEnabled(),
       // Our own failure, not the seller's: recorded, never reviewable.
       ...(result.callerError ? { caller_error: true } : {}),
       // x402 Solana receipts carry no payee; CrowdCode needs it to verify a new
@@ -513,8 +499,12 @@ export class EconomyGateway {
         status: result.status,
         charged_cost_cents: record.charged_cost_cents,
         artifact_path: artifact?.path,
-        review_required: record.review_required,
-        review_available: true,
+        // Nothing is owed. Hosted: CrowdCode's judge reviews a settled
+        // purchase from the platform's own record, with no call from the
+        // agent. Elsewhere a review is the agent's choice.
+        ...(paid && supportedRail && !result.callerError && crowdcode
+          ? { review: this.options.hostedSpending ? "automatic" : "optional" }
+          : {}),
         ...(result.note ? { note: result.note } : {}),
         ...(followUp ? { follow_up: followUp } : {}),
         data: result.data,
@@ -566,7 +556,7 @@ export class EconomyGateway {
       artifact_path: artifact?.path, notes: `free follow-up with ${credential.header} from purchase ${credential.purchaseId ?? "?"}`
     });
     return { ok: true, data: {
-      outcome: "free", status: result.status, charged_cost_cents: 0, artifact_path: artifact?.path, review_required: false,
+      outcome: "free", status: result.status, charged_cost_cents: 0, artifact_path: artifact?.path,
       note: `Free re-read: sent the ${credential.header} token this seller issued with your earlier purchase${credential.purchaseId ? ` ${credential.purchaseId}` : ""}; nothing was paid. This is the same content that purchase bought.`,
       data
     } };
@@ -669,6 +659,9 @@ export class EconomyGateway {
     if (state.reviewStatus === "submitted") {
       return { ok: false, error: `purchase ${purchaseId} is already reviewed` };
     }
+    if (state.reviewRejected) {
+      return { ok: false, error: `CrowdCode already refused a review of purchase ${purchaseId} for a reason a retry cannot change. Nothing more is needed for it.` };
+    }
     // A call that never reached the seller says nothing about the seller. On
     // 2026-10-28 an agent that could not pay — its USDC was on a network this
     // service does not accept — gave the provider one star for it, which is a
@@ -698,20 +691,18 @@ export class EconomyGateway {
       // A rejection CrowdCode decided from what is already registered will be
       // decided the same way next time. On 2026-10-27 an agent was told to
       // "retry review_paid_service" after a `service identity conflict`, spent
-      // a turn and a model call doing exactly that, got the same answer — and
-      // in between was refused the next purchase it had been asked to make,
-      // because a paid purchase with a pending review blocks one. So a
-      // rejection that cannot change is never presented as retryable.
+      // a turn and a model call doing exactly that and got the same answer. So
+      // a rejection that cannot change is never presented as retryable.
       const permanent = isPermanentReviewRejection(result.error);
       await recordReviewFailed(this.options.session, purchaseId, { permanent });
       if (permanent) {
         return {
           ok: false,
-          error: `CrowdCode could not attach this review to a registered service (${result.error}). This will not change on a retry, so the review is recorded as unsendable; it no longer blocks later purchases. Do not call review_paid_service for ${purchaseId} again.`
+          error: `CrowdCode could not attach this review to a registered service (${result.error}). This will not change on a retry. Do not call review_paid_service for ${purchaseId} again.`
         };
       }
-      const deferred = (state.reviewAttempts ?? 0) + 1 >= MAX_REVIEW_ATTEMPTS;
-      return { ok: false, error: `CrowdCode review failed (${result.error}); the review stays pending${deferred ? " for manual retry, without blocking completion or later purchases" : " — retry review_paid_service"}` };
+      // Optional notes: nothing waits on them, so never spend turns retrying.
+      return { ok: false, error: `CrowdCode did not take this review (${result.error}). The review is optional and nothing waits on it; carry on with the task.` };
     }
     await recordReviewSubmitted(this.options.session, purchaseId, rating);
     return { ok: true, data: { purchase_id: purchaseId, review: "submitted", rating } };
@@ -957,7 +948,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "review_paid_service",
-    description: "Review a stored service interaction, paid or unpaid, using the same CrowdCode review flow. Payment evidence is attached when available; otherwise payment is marked unverified. Required after confirmed paid calls, optional for unpaid outcomes. On hosted agents a paid purchase is scored by CrowdCode's platform judge, which reads the actual request, response and payment outcome from the platform's own record and writes the public review text; your rating and notes are inputs it weighs, not the published verdict, so report what you observed accurately rather than arguing for a score. Distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
+    description: "Optional. Add notes about a stored service interaction to CrowdCode. Never required: on hosted agents CrowdCode's platform judge already reviews every paid purchase by itself, from the platform's own record of the request, the response and the payment, within a minute or two of the call. Use this only when you observed something that record cannot show — the answer was wrong for the task, stale, or in the wrong units — and call it right after the purchase, because notes that arrive after the automatic review are not used. Your rating and notes are evidence the judge weighs, not the published verdict, so report what you observed rather than arguing for a score. Unpaid interactions are reviewed as unverified community evidence. Distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
     parameters: {
       type: "object",
       properties: {

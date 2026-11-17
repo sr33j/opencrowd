@@ -17,7 +17,7 @@ npx opencrowd --demo
 ```
 
 Demo mode runs the real enforced lifecycle — discovery, inspection,
-reputation check, approval, payment, receipt, required review — over
+reputation check, approval, payment, receipt, review — over
 in-memory mock adapters. No real money moves and nothing touches the
 network.
 
@@ -148,8 +148,9 @@ Legacy `ask` adds service confirmations; `off` disables external-service
 purchases in the CLI. Stored rules remain available through `/approvals`;
 old monetary service/session caps are replaced by query spending limits.
 
-Every confirmed paid service call requires a signed CrowdCode review before
-the next purchase; pending reviews survive restarts.
+No paid service call waits on a review. On hosted agents CrowdCode reviews
+every settled purchase by itself; `review_paid_service` is optional notes the
+agent can add, and never blocks the next purchase or the end of a task.
 
 ## Commands
 
