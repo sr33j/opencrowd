@@ -754,8 +754,52 @@ export interface AgentRunOptions {
    * reflection) or undefined. The loop refuses to complete while it
    * blocks, nudging the model once before stopping deterministically.
    * alreadyNudged survives checkpoint replay so optional reflection is not repeated.
+   * run describes this run so far, so a gate can ask only when it is worth a turn.
    */
-  completionGate?: (alreadyNudged?: boolean) => Promise<string | undefined>;
+  completionGate?: (alreadyNudged?: boolean, run?: CompletionSignals) => Promise<string | undefined>;
+}
+
+/**
+ * What a completion gate may know about the run it is about to let finish,
+ * derived from the run's own messages so it survives checkpoint replay.
+ */
+export interface CompletionSignals {
+  /** Model calls this run has made, including the current one. */
+  turns: number;
+  /** Tool results in this run that came back `ok: false`. */
+  failedTools: number;
+  /** `call_paid_service` results in this run that came back `ok: true`. */
+  paidCalls: number;
+  /** The answer the run is about to deliver. */
+  finalMessage?: string;
+}
+
+/** Signals for the run that began at the last user message equal to `task`. */
+export function completionSignals(messages: readonly LlmMessage[], task: string, turns: number, finalMessage?: string): CompletionSignals {
+  let start = -1;
+  messages.forEach((message, index) => { if (message.role === "user" && message.content === task) start = index; });
+  const own = messages.slice(start + 1);
+  const names = new Map<string, string>();
+  let failedTools = 0;
+  let paidCalls = 0;
+  for (const message of own) {
+    for (const call of message.toolCalls ?? []) names.set(call.id, call.name);
+    if (message.role !== "tool") continue;
+    const ok = toolResultOk(message.content);
+    if (ok === false) failedTools += 1;
+    else if (ok === true && names.get(message.toolCallId ?? "") === "call_paid_service") paidCalls += 1;
+  }
+  return { turns, failedTools, paidCalls, ...(finalMessage ? { finalMessage } : {}) };
+}
+
+function toolResultOk(content: unknown): boolean | undefined {
+  if (typeof content !== "string") return undefined;
+  try {
+    const parsed = JSON.parse(content) as { result?: { ok?: unknown } };
+    if (typeof parsed?.result?.ok === "boolean") return parsed.result.ok;
+  } catch { /* a truncated payload */ }
+  const match = /"result"\s*:\s*\{\s*"ok"\s*:\s*(true|false)/.exec(content);
+  return match ? match[1] === "true" : undefined;
 }
 
 export interface SubagentOptions {
@@ -855,7 +899,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       capabilityIndex ?? DEFAULT_CAPABILITY_INDEX,
       "When a task needs current web facts, search results, or unfamiliar page content, make one paid web search your FIRST move — do not serially guess URLs with curl; one paid search replaces minutes of blind fetching and costs less than the LLM turns it saves.",
       "Approval, budget, reputation, and payment rails are enforced in code — you cannot bypass them, so state costs plainly and never invent payment details.",
-      "When the user says CrowdCode on/off, call set_crowdcode_enabled; default to session scope unless they ask for a persistent default. Use list_my_reviews and delete_my_review for user-directed review management, including while off. Before finishing a substantive task, consider concrete paid services that would fix real shortcomings and submit qualifying demand with request_service (input, output, problem, price_per_call), unless CrowdCode is off. Never invent a purchase or demand.",
+      "When the user says CrowdCode on/off, call set_crowdcode_enabled; default to session scope unless they ask for a persistent default. Use list_my_reviews and delete_my_review for user-directed review management, including while off. When a run bought something, hit a failure or took many steps, consider before finishing one gap (a step that failed or cost too much) or leverage service (one that would have let you act, reach data, persist or verify for the owner) and submit it with request_service (kind, input, output, problem, builds_on, unlocks, frequency, price_per_call), unless CrowdCode is off. Never restate the task as a service, and never invent a purchase or demand.",
       "Generated media never reaches you as base64 you can read: when a service returns audio, an image, video or a PDF, the runtime has already written the bytes to a file and handed you {artifact_path, bytes, media_type} instead. Work from that path with run_shell — ffmpeg, python3 and node are installed, so converting a wav to the mp3 the owner asked for is one command — and leave the deliverable under artifacts/ in the format they asked for. Never pay a second time for a file you already hold.",
       "Each tool result includes the budget before and after that tool call. Never ask for wallet private keys or secrets.",
       ...(options.promptSections ?? [])
@@ -1110,7 +1154,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const finalMessage = response.content.trim()
         ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
       recordFinalMessage(finalMessage);
-      const blocker = options.chatOnly ? undefined : await options.completionGate?.(completionNudges > 0);
+      const blocker = options.chatOnly ? undefined : await options.completionGate?.(completionNudges > 0,
+        completionSignals(messages, task, turn + 1, pendingFinalMessage));
       const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {
@@ -1295,7 +1340,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const finalMessage = result.data && typeof result.data === "object"
         ? (result.data as Record<string, unknown>).final_message : undefined;
       if (typeof finalMessage === "string") recordFinalMessage(finalMessage);
-      const blocker = await options.completionGate?.(completionNudges > 0);
+      const blocker = await options.completionGate?.(completionNudges > 0,
+        completionSignals(messages, task, turn + 1, pendingFinalMessage));
       const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {

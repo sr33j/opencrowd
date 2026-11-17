@@ -7,6 +7,7 @@ import { createSession, executeTool } from "@opencrowd/core";
 import { atomicUsdc, stripReasoning, type Command, type Event, type FinancialState } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
 import { economyTools } from "../src/economy-tools.js";
+import type { CompletionSignals } from "../src/index.js";
 import { isNonAnswer, runAgentTaskDetailed, type LlmMessage, type LlmProvider, type LlmResponse, type ToolExecutor } from "../src/index.js";
 import { MachineWorker, RuntimePause } from "../src/worker.js";
 
@@ -29,13 +30,15 @@ const financial = (): FinancialState => ({
     per_call_approval_threshold_usdc: "0.100000", approval_mode: "auto" } });
 const answer = "The SHA-256 of `hello` begins 2cf24dba5fb0.";
 const complete = (text: string, content = ""): LlmResponse => ({ content, toolCalls: [{ id: `done-${text.length}`, name: "complete_session", arguments: { final_message: text } }] });
-/** The CrowdCode reflection gate, as hosted runs have it. */
+/** The CrowdCode reflection gate, as hosted runs have it, on a run that earned it. */
 function reflection(extra: Partial<EconomyGateway> = {}) {
-  return economyTools({
+  const tools = economyTools({
     definitions: () => [{ name: "request_service", description: "Request a missing service", parameters: { type: "object" } }],
     execute: async () => ({ ok: true, data: { enabled: true } }),
     ...extra,
   });
+  return { ...tools, completionGate: (nudged?: boolean, run?: CompletionSignals) =>
+    tools.completionGate(nudged, run ? { ...run, paidCalls: Math.max(run.paidCalls, 1) } : run) };
 }
 
 describe("SRI-65: the financial snapshot is not the owner's turn", () => {
@@ -131,7 +134,9 @@ describe("SRI-62: housekeeping that fails does not throw the answer away", () =>
   });
 
   it("finishes the hosted run completed, with the answer, when the housekeeping call pauses", async () => {
+    // A failed tool earns the reflection (C6), so the run makes a housekeeping call.
     const { events } = await hostedRun([
+      async () => ({ content: "", toolCalls: [{ id: "bad", name: "complete_session", arguments: { final_message: 42 } }] }),
       async () => complete(answer),
       async (_m, context) => { throw new RuntimePause("payment_unknown", context!.operationId!, "Model request interrupted; payment status needs reconciliation."); },
     ]);
