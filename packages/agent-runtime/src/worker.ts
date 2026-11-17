@@ -21,6 +21,58 @@ import { loadKnowledgeTree } from "./knowledge.js";
  * enough that an ordinary run of capped tool results never triggers it. */
 const MAX_WORKER_STATE_CHARS = 2 * 1024 * 1024;
 
+/** Finished runs whose replay record is kept; older ones are forgotten. */
+export const KEEP_FINISHED_RUNS = 20;
+/** Command ids remembered for duplicate detection, newest kept. */
+export const KEEP_COMMANDS = 1000;
+
+/**
+ * Keep the durable state proportional to what can still happen, not to the
+ * agent's whole history.
+ *
+ * Every `mutate()` re-serializes this file, so whatever it holds is paid for in
+ * CPU on every event of every run. It used to keep every run the agent ever
+ * finished, each with its whole conversation (`checkpoint.messages`) and every
+ * tool result. The canary agent reached 7.5 MB after ~140 runs; on a shared
+ * CPU that exhausted Fly's burst balance (558 s → 0.5 s in half an hour on
+ * 2026-11-17) and from then on the worker could not even report ready inside
+ * the supervisor's 30 s start budget, which failed every deploy's canary.
+ *
+ * A finished run is only ever *replayed* (its outcome, summary, ids, inbox and
+ * which messages were delivered), never resumed, so that is all it keeps; the
+ * newest KEEP_FINISHED_RUNS are kept and older ones dropped. Active and waiting
+ * runs are never touched: they may still resume from their checkpoint.
+ * Returns true when anything changed.
+ */
+export function compactWorkerState(state: WorkerState): boolean {
+  let changed = false;
+  const finished: string[] = [];
+  for (const [id, run] of Object.entries(state.runs)) {
+    if (id === state.activeRunId || !run.outcome || isWaiting(run.outcome)) continue;
+    finished.push(id);
+    if (Object.keys(run.tools ?? {}).length) { run.tools = Object.create(null); changed = true; }
+    const checkpoint = run.checkpoint as Partial<LoopCheckpoint> | undefined;
+    if (checkpoint && Object.keys(checkpoint).some(key => key !== "deliveredMessageIds")) {
+      run.checkpoint = (checkpoint.deliveredMessageIds?.length
+        ? { deliveredMessageIds: checkpoint.deliveredMessageIds } : undefined) as LoopCheckpoint | undefined;
+      if (!run.checkpoint) delete run.checkpoint;
+      changed = true;
+    }
+  }
+  // Object key order is insertion order: the oldest finished runs come first.
+  for (const id of finished.slice(0, Math.max(0, finished.length - KEEP_FINISHED_RUNS))) {
+    delete state.runs[id];
+    changed = true;
+  }
+  const keep = new Set(Object.values(state.runs).map(run => run.commandId));
+  const commands = Object.keys(state.commands);
+  if (commands.length > KEEP_COMMANDS) {
+    const recent = new Set(commands.slice(-KEEP_COMMANDS));
+    for (const id of commands) if (!recent.has(id) && !keep.has(id)) { delete state.commands[id]; changed = true; }
+  }
+  return changed;
+}
+
 export class RuntimePause extends Error {
   constructor(readonly outcome: RunOutcome, readonly operationId: string, message: string) {
     super(message);
@@ -40,7 +92,7 @@ interface DurableRun {
   summary?: string;
   tools: Record<string, { digest: string; result?: ToolResult; approvalPending?: boolean }>;
 }
-interface WorkerState {
+export interface WorkerState {
   version: 1;
   seq: number;
   commands: Record<string, string>;
@@ -108,6 +160,9 @@ export class MachineWorker {
     this.state.commands = Object.assign(Object.create(null), this.state.commands);
     this.state.runs = Object.assign(Object.create(null), this.state.runs);
     for (const run of Object.values(this.state.runs)) run.tools = Object.assign(Object.create(null), run.tools);
+    // A state written before compaction existed carries every run the agent
+    // ever finished; shed it once here, before anything else rewrites it.
+    if (compactWorkerState(this.state)) await atomicWrite(this.statePath, JSON.stringify(this.state));
     await this.emit("worker.ready", { protocolVersion: 1, runtimeVersion: "0.3.2-worker.1", restoredRunId: this.state.activeRunId });
   }
 
@@ -438,6 +493,7 @@ export class MachineWorker {
     await this.mutate(() => {
       run.outcome = outcome; run.summary = summary; run.checkpointId = randomUUID();
       if (!isWaiting(outcome) && this.state.activeRunId === runId) this.state.activeRunId = undefined;
+      compactWorkerState(this.state);
     });
     await this.emit("checkpoint.completed", { checkpointId: run.checkpointId, sessionId: run.sessionId,
       reason: outcome === "cancelled" ? "cancel" : isWaiting(outcome) ? "waiting" : "terminal",
