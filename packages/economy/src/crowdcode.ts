@@ -10,8 +10,17 @@ import { McpConnection } from "./mcp.js";
 
 export interface ServiceEvidence {
   ok: boolean;
-  /** Canonical trust-weighted rating when available. */
+  /** Canonical trust-weighted rating when available (0–5 since CrowdCode scoring v4). */
   score?: number;
+  /**
+   * The number the payment floor compares: CrowdCode's `score_mean`, the
+   * review posterior mean (scoring v3.1's number), else `score` from a
+   * backend that predates it. Scoring v4 publishes `score` as
+   * min(average, 5 × P(better than a 3)), which is lower than the mean for
+   * thinly reviewed services; comparing it with the floor would refuse
+   * services the reviews put above it.
+   */
+  floorScore?: number;
   /** Effective evidence count behind the score. */
   nEff?: number;
   /** Not enough trusted reviews yet: insufficient evidence, not a bad score. */
@@ -124,6 +133,7 @@ export function normalizeEvidence(raw: unknown): ServiceEvidence {
   return {
     ok: true,
     score: numberValue(record.score),
+    floorScore: numberValue(record.score_mean ?? record.score),
     nEff: numberValue(record.n_eff ?? record.nEff),
     unproven: typeof record.unproven === "boolean" ? record.unproven : undefined,
     summary: summarizeEvidence(record),

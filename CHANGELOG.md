@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.16 — 2026-11-17
+
+- **The CrowdCode payment floor reads the review mean (SRI-118).** CrowdCode's scoring v4 publishes `score` as the lower of a service's weighted average rating and 5 × the probability it is better than a 3, on 0–5; for a thinly reviewed service that is below the review mean (one 1-star and one 3-star vote: 1.5 against 2.6). The runtime's "refuse services rated below 2" floor, hosted and local, now compares CrowdCode's `score_mean` (the review posterior mean, the number it always compared) and falls back to `score` from a CrowdCode that does not publish it, so v4 does not refuse services their reviews put above the floor. The refusal names the number it compared.
+
 ## 0.16.15 — 2026-11-17
 
 - **`find_paid_service` shows CrowdCode's tier and why (SRI-115 C13).** CrowdCode's search now ranks every offering in its index by a seeded draw of delivery × quality per dollar, and each result carries `tier` (`proven`, `popular` or `new`), `why`, the `model` it sells, its `capability`, and `explore: true` when CrowdCode is trying it ahead of the best-known option. The agent sees them as they are, in CrowdCode's order, and the runtime no longer makes one `/api/reliability` call per result to label them. A `bad` result, which CrowdCode's gateway refuses, is named in `bad_left_out` instead of offered. The search note says what each tier means for payment: proven and popular pay within the owner's caps, new pays from the exploration allowance and above it asks the owner. Results from an older CrowdCode, without tiers, keep the reliability labels as before.

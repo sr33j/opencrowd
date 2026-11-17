@@ -15,6 +15,7 @@ import {
   McpConnection,
   MockAgentCashAdapter,
   MockCrowdCodeAdapter,
+  normalizeEvidence,
   redactPurchase,
   summarizeEvidence,
   type ApprovalAnswer,
@@ -205,6 +206,29 @@ describe("purchase lifecycle", () => {
     expect(result.ok).toBe(false);
     expect(result.error).toContain("below the 2 floor");
     expect(agentcash.fetchCalls).toHaveLength(0);
+  });
+
+  it("compares CrowdCode's review mean, not the v4 score, with the floor", async () => {
+    // Scoring v4: one 1-star and one 3-star vote publish score 1.5 but a
+    // review mean of 2.6, which the floor has always compared.
+    const kept = await setup({
+      crowdcode: new MockCrowdCodeAdapter({ evidence: { ok: true, score: 1.5, floorScore: 2.6, nEff: 2, unproven: false } })
+    });
+    await inspect(kept.gateway);
+    expect((await kept.gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 })).ok).toBe(true);
+
+    const refused = await setup({
+      crowdcode: new MockCrowdCodeAdapter({ evidence: { ok: true, score: 2.4, floorScore: 1.8, nEff: 9, unproven: false } })
+    });
+    await inspect(refused.gateway);
+    const result = await refused.gateway.execute("call_paid_service", { url: ENDPOINT, max_cost_cents: 10 });
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("at 1.80 (below the 2 floor)");
+  });
+
+  it("reads score_mean from CrowdCode's evidence when it is published", () => {
+    expect(normalizeEvidence({ score: 1.5, score_mean: 2.6, n_eff: 2 })).toMatchObject({ score: 1.5, floorScore: 2.6 });
+    expect(normalizeEvidence({ score: 3.1, n_eff: 2 })).toMatchObject({ score: 3.1, floorScore: 3.1 });
   });
 
   it("requires inspection before calling", async () => {
