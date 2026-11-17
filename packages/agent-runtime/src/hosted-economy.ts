@@ -20,7 +20,9 @@ import {
   type ServiceQuery,
   type ServiceSearch,
   type SearchOptions,
-  type WalletStatusResult
+  type WalletStatusResult,
+  createCrowdCodeApi,
+  crowdcodeApiBase
 } from "@opencrowd/economy";
 import { SERVICE_GATEWAY_TIMEOUT_MS, withDeadline } from "@opencrowd/protocol";
 import { HostedToolTimeout, postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
@@ -617,7 +619,7 @@ export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
 export function createHostedEconomy(options: HostedEconomyOptions): HostedEconomy {
   const fetcher = options.fetcher ?? fetch;
   const socket = { socketPath: options.socketPath, runId: options.runId, sessionId: options.sessionId };
-  const directory = new ServiceDirectory(fetcher, (options.crowdcodeBase ?? DEFAULT_CROWDCODE_BASE).replace(/\/+$/, ""));
+  const directory = new ServiceDirectory(fetcher, (options.crowdcodeBase ?? crowdcodeApiBase()).replace(/\/+$/, ""));
   const agentcash = new HostedAgentCashAdapter(directory, socket, fetcher, options.reconcileDelayMs, options.transferWait);
   const gateway = new EconomyGateway({
     session: options.session,
@@ -627,6 +629,7 @@ export function createHostedEconomy(options: HostedEconomyOptions): HostedEconom
     hostedSpending: true,
     minServiceScore: 2,
     paymentRails: HOSTED_RAILS,
+    crowdcodeApi: createCrowdCodeApi({ base: directory.base, fetcher }),
     // Hosted rules live with the agent's session, never in a user config dir.
     approvalRulesPath: join(options.session.sessionDir, "approval-rules.json")
   });

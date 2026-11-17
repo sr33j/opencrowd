@@ -2,6 +2,11 @@ import { resolve } from "node:path";
 import { defineConfig } from "vitest/config";
 
 export default defineConfig({
+  test: {
+    // No test reaches CrowdCode's real backend: the live tree and reliability
+    // lookups find a closed port and fall back, as they would offline.
+    env: { OPENCROWD_CROWDCODE_URL: "http://127.0.0.1:9" }
+  },
   resolve: {
     alias: {
       "@opencrowd/protocol": resolve(__dirname, "packages/protocol/src/index.ts"),

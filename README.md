@@ -182,10 +182,18 @@ knowledge tree by default (the snapshot bundled with `@opencrowd/agent-runtime`,
 or `OPENCROWD_KNOWLEDGE_DIR`); pass `--knowledge <tree dir>` to evaluate a
 candidate or `--knowledge none` for the static-prompt baseline.
 
-The agent loads the same tree in normal runs: `L0.md` becomes the prompt's
-capability index and the category pages land under `artifacts/knowledge/`.
-Set `OPENCROWD_KNOWLEDGE_DIR=none` to disable it or point it at another tree;
-the loaded version is recorded on the session.
+Normal runs read CrowdCode's live capability tree instead: at session start
+the agent fetches `GET /api/tree` (two seconds at most, cached for an hour per
+process), puts its `l0` in the prompt, and reads deeper nodes with the
+`browse_services` tool. `find_paid_service` and `inspect_paid_service` show
+each service's CrowdCode reliability state (reliable, unverified, unreliable)
+and the reason, reliable first. When the tree cannot be fetched the bundled
+snapshot is used (`L0.md` in the prompt, category pages under
+`artifacts/knowledge/`). The loaded version is recorded on the session
+(`knowledge.tree` for the live tree, `knowledge.fallback` when it fell back).
+`OPENCROWD_TREE_VERSION=candidate` (or a version number) pins a tree;
+`OPENCROWD_CROWDCODE_URL` points at another CrowdCode backend;
+`OPENCROWD_KNOWLEDGE_DIR` uses a tree directory instead (`none` disables it).
 
 ## Headless runs
 

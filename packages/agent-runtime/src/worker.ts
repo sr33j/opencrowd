@@ -15,7 +15,7 @@ import type { EconomyGateway } from "@opencrowd/economy";
 import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { toolDeadlineError, toolDeadlineMs } from "./tool-deadlines.js";
-import { loadKnowledgeTree } from "./knowledge.js";
+import { loadKnowledgeTree, type KnowledgeOptions, type LiveTreeOptions } from "./knowledge.js";
 
 /** Above this the durable state is repaired on load rather than carried. Large
  * enough that an ordinary run of capped tool results never triggers it. */
@@ -117,6 +117,8 @@ export interface WorkerOptions {
   id?: () => string;
   /** Test hook: the backstop deadline for one tool call, in milliseconds. */
   toolDeadlineMs?: (name: string) => number;
+  /** CrowdCode's live capability tree (default: read it); false keeps the bundled snapshot. */
+  liveTree?: false | LiveTreeOptions;
 }
 
 /** Durable single-agent process boundary. stdout is exclusively validated protocol. */
@@ -410,7 +412,7 @@ export class MachineWorker {
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
           completionGate: (alreadyNudged, signals) => dynamicTools!.completionGate(alreadyNudged, signals),
-          knowledge: await this.knowledgeOption(session)
+          knowledge: await this.knowledgeOption(session, run.start.payload.treeVersion)
         } : {}),
         onCheckpoint: async (checkpoint) => {
           await this.mutate(() => { run.checkpoint = checkpoint; run.checkpointId = randomUUID(); });
@@ -473,9 +475,15 @@ export class MachineWorker {
     }
   }
 
-  /** Keep the bundled knowledge tree when it loads; a broken snapshot must never fail a hosted run. */
-  private async knowledgeOption(session: SessionState): Promise<false | undefined> {
-    try { await loadKnowledgeTree(session, {}); return undefined; }
+  /**
+   * CrowdCode's live capability tree, else the bundled snapshot; a tree that
+   * cannot load must never fail a hosted run. The answer is cached for the
+   * hour, so the loop's own load reads the same copy.
+   */
+  private async knowledgeOption(session: SessionState, treeVersion?: string): Promise<false | KnowledgeOptions> {
+    const live = this.options.liveTree;
+    const options: KnowledgeOptions = live === false ? {} : { live: { ...live, ...(treeVersion ? { version: treeVersion } : {}) } };
+    try { await loadKnowledgeTree(session, options); return options; }
     catch { return false; }
   }
 

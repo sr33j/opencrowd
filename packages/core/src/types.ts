@@ -66,6 +66,10 @@ export interface SessionKnowledge {
   version: string;
   source: string;
   loadedAt: string;
+  /** The live capability tree's version number (C7), when the session reads CrowdCode's tree; browse_services pins it. */
+  tree?: number;
+  /** Why the bundled snapshot was used instead of the live tree. */
+  fallback?: string;
 }
 
 export interface SessionModels {

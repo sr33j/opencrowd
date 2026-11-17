@@ -11,3 +11,4 @@ export * from "./purchases.js";
 export * from "./runtime.js";
 export * from "./discovery.js";
 export * from "./offers.js";
+export * from "./tree.js";

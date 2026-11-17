@@ -16,6 +16,7 @@ import {
 import type { AgentCashAdapter, PaidFetchResult, PaymentRail } from "./agentcash.js";
 import type { CrowdCodeAdapter, ServiceEvidence } from "./crowdcode.js";
 import { describeRails } from "./offers.js";
+import { reliabilityNote, type CrowdCodeApi, type Reliability } from "./tree.js";
 import { documentedHeader, findFollowUpTokens, followUpKey, loadFollowUps, saveFollowUp, sellerOpenApi } from "./follow-ups.js";
 import {
   loadApprovalRules,
@@ -51,6 +52,7 @@ export const GATEWAY_TOOL_NAMES = [
   "crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review",
   "read_service",
   "get_wallet_status",
+  "browse_services",
   "find_paid_service",
   "inspect_paid_service",
   "call_paid_service",
@@ -92,6 +94,12 @@ export interface EconomyGatewayOptions {
   minServiceScore?: number;
   /** Rails this payer may settle automatically (default VERIFIED_RAILS). */
   paymentRails?: readonly PaymentRail[];
+  /**
+   * CrowdCode's capability tree and reliability states (C7, C3). Absent, as
+   * in tests and offline runs, browse_services says so and search results
+   * carry no reliability.
+   */
+  crowdcodeApi?: CrowdCodeApi;
   onProgress?: (event: ProgressEvent) => void;
 }
 
@@ -164,6 +172,8 @@ export class EconomyGateway {
           return await this.manageCrowdCode(name, args);
         case "get_wallet_status":
           return await this.getWalletStatus();
+        case "browse_services":
+          return await this.browseServices(args);
         case "find_paid_service":
           return await this.findPaidService(args);
         case "inspect_paid_service":
@@ -239,10 +249,47 @@ export class EconomyGateway {
       // CrowdCode ranks across chains when it is on; off, or on an older adapter, AgentCash's order stands.
       const findServices = this.options.crowdcode.findServices?.bind(this.options.crowdcode);
       const rank = findServices && await this.crowdcodeEnabled().catch(() => false) ? findServices : undefined;
-      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit), ...(rank ? { rank } : {}) });
-      return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
+      // Six ranked results carry their reliability within about 800 tokens; the agent can ask for more.
+      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit) ?? (rank && this.options.crowdcodeApi ? SEARCH_LIMIT : undefined), ...(rank ? { rank } : {}) });
+      if (!result.ok) return { ok: false, error: result.error };
+      return { ok: true, data: rank ? await this.withReliability(result.data) : result.data };
     }
     return { ok: false, error: "find_paid_service requires `origin` (known origin) or `query` (capability search)" };
+  }
+
+  /** One node of the capability tree, at the version this session's instructions were built from. */
+  private async browseServices(args: Record<string, unknown>): Promise<ToolResult> {
+    if (!this.options.crowdcodeApi) return { ok: false, error: "The capability tree is unavailable in this run; use find_paid_service." };
+    return this.options.crowdcodeApi.browse(args.node, this.options.session.knowledge?.tree);
+  }
+
+  /** C3's state for one endpoint, when CrowdCode is on and can say. */
+  private async reliabilityOf(endpoint: string, method: string): Promise<Reliability | undefined> {
+    if (!this.options.crowdcodeApi || !(await this.crowdcodeEnabled().catch(() => false))) return undefined;
+    return this.options.crowdcodeApi.reliability(endpoint, method).catch(() => undefined);
+  }
+
+  /**
+   * Each ranked result with its reliability state and first reason, reliable
+   * first and unreliable last, keeping CrowdCode's order within a state: the
+   * agent knows before paying whether the owner will be asked (C4).
+   */
+  private async withReliability(data: unknown): Promise<unknown> {
+    const services = (data as { services?: unknown } | undefined)?.services;
+    if (!this.options.crowdcodeApi || !Array.isArray(services) || !services.length) return data;
+    const states = await Promise.all(services.map((service) => {
+      const row = service as { endpoint?: unknown; method?: unknown };
+      return typeof row.endpoint === "string" ? this.reliabilityOf(row.endpoint, typeof row.method === "string" ? row.method : "POST") : undefined;
+    }));
+    if (!states.some(Boolean)) return data;
+    const rows = services.map((service, index) => ({ service: service as Record<string, unknown>, index, reliability: states[index] }));
+    // Unreliable is refused before payment: name it once instead of listing it.
+    const refused = rows.filter((row) => row.reliability?.state === "unreliable").map((row) => row.service.endpoint);
+    const annotated = rows.filter((row) => row.reliability?.state !== "unreliable")
+      .sort((a, b) => Number(b.reliability?.state === "reliable") - Number(a.reliability?.state === "reliable") || a.index - b.index)
+      .map(({ service, reliability }) => compactService(service, reliability));
+    return { services: annotated, ...(refused.length ? { unreliable_left_out: refused } : {}),
+      note: `${RELIABILITY_NOTE} ${COMPACT_RANKED_NOTE}${incompleteNote(data)}` };
   }
 
   private async inspectPaidService(args: Record<string, unknown>): Promise<ToolResult> {
@@ -259,7 +306,7 @@ export class EconomyGateway {
     if (!schema.ok) {
       return { ok: false, error: schema.error };
     }
-    const evidence = await this.serviceEvidence(endpoint);
+    const [evidence, reliability] = await Promise.all([this.serviceEvidence(endpoint), this.reliabilityOf(endpoint, method)]);
     const rail = railFromSchema(schema.data);
     // Free but signed: its ceiling is nothing. Should the seller price it by
     // the time it is called, the gateway sees a quote above the ceiling and
@@ -287,6 +334,7 @@ export class EconomyGateway {
         // A free, signed call is the one thing never to move funds for; say it first.
         ...(free ? { free: true, note: (schema.data as { note?: unknown }).note } : {}),
         schema: schema.data,
+        ...(reliability ? { reliability: describeReliability(reliability) } : {}),
         reputation: evidence.ok
           ? {
             score: evidence.score,
@@ -877,6 +925,46 @@ function numberArg(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/** Ranked results shown by default; each carries its reliability. */
+const SEARCH_LIMIT = 6;
+/** Said once per search rather than on every result. */
+const RELIABILITY_NOTE = "Reliable first: it pays automatically within the owner's caps. Unverified may need the owner's approval; say so when you pick one. Unreliable is refused, so it is left out.";
+const COMPACT_RANKED_NOTE = "Then by quality and effective price on best_network (about $0.03 more if USDC must move there). Between equal fits prefer `networks` you already hold USDC on. Inspect before paying.";
+/** The discovery note's word that the probe sweep ran out of time, kept when the note is rewritten. */
+function incompleteNote(data: unknown): string {
+  const note = (data as { note?: unknown } | undefined)?.note;
+  return typeof note === "string" && note.includes("list is partial") ? " The probe budget ran out, so this list is partial; search again or narrow the query if nothing fits." : "";
+}
+
+/** `state: first reason`, the shortest form that still says why. */
+function describeReliability(reliability: Reliability): string {
+  return reliability.reason ? `${reliability.state}: ${reliability.reason}` : `${reliability.state} (${reliabilityNote(reliability.state)})`;
+}
+
+/**
+ * One search result as the agent reads it: what it needs to choose and pay,
+ * without the fields every result repeats. `payable` is always true here,
+ * `rank` is the order itself, and `network` is the first of `networks`.
+ */
+function compactService(service: Record<string, unknown>, reliability: Reliability | undefined): Record<string, unknown> {
+  const { payable: _payable, rank: _rank, sources: _sources, payment_provider: _provider, ...rest } = service;
+  void _payable; void _rank; void _sources; void _provider;
+  const networks = Array.isArray(rest.networks) ? rest.networks : [];
+  if (networks.length) delete rest.network;
+  if (networks.length === 1 && rest.best_network === networks[0]) delete rest.best_network;
+  if (rest.effective_price_usd === rest.price_usd) delete rest.effective_price_usd;
+  if (typeof rest.name === "string" && rest.name.length > NAME_MAX_CHARS) rest.name = `${rest.name.slice(0, NAME_MAX_CHARS - 1)}…`;
+  const quality = rest.quality as Record<string, unknown> | undefined;
+  if (quality) {
+    const kept = Object.fromEntries(Object.entries(quality).filter(([key, value]) => value !== undefined && value !== null && value !== 0
+      && !(key === "verified_reviews" && value === quality.reviews))
+      .map(([key, value]) => [key, typeof value === "number" && !Number.isInteger(value) ? Math.round(value * 10) / 10 : value]));
+    if (Object.keys(kept).length) rest.quality = kept; else delete rest.quality;
+  }
+  return { ...rest, reliability: reliability ? describeReliability(reliability) : "unverified (CrowdCode could not say)" };
+}
+const NAME_MAX_CHARS = 48;
+
 function slugUrl(url: string): string {
   return url.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 80) || "service";
 }
@@ -910,8 +998,18 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
     parameters: { type: "object", properties: {}, additionalProperties: false }
   },
   {
+    name: "browse_services",
+    description: "Read one node of CrowdCode's capability tree (a top node such as search or image, or a leaf such as search.all): when to look, when not to buy, reliable picks with price and delivered rate, unverified candidates, and demand.",
+    parameters: {
+      type: "object",
+      properties: { node: { type: "string", description: "Node or leaf id from the service knowledge, e.g. search, image, video.all" } },
+      required: ["node"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "find_paid_service",
-    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, ranked best first by CrowdCode: quality, then effective price on your best network (including a transfer between your own networks when its balance is short), then your balance there. Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
+    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, reliable ones first, each with its CrowdCode reliability state and reason, then by quality and effective price on your best network (including a transfer between your own networks when its balance is short). Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
     parameters: {
       type: "object",
       properties: {
@@ -924,7 +1022,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "inspect_paid_service",
-    description: "Inspect one endpoint before calling it: exact input schema, price ceiling, supported payment rail, and CrowdCode reputation evidence. Required before call_paid_service.",
+    description: "Inspect one endpoint before calling it: exact input schema, price ceiling, supported payment rail, CrowdCode reliability state and reputation evidence. Required before call_paid_service.",
     parameters: {
       type: "object",
       properties: {

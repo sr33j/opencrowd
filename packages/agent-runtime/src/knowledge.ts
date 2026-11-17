@@ -2,6 +2,7 @@ import { access, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { saveSession, type SessionState } from "@opencrowd/core";
+import { fetchLiveTree, treeVersionPin, type CrowdCodeApiOptions } from "@opencrowd/economy";
 
 /**
  * Service knowledge tree: a CrowdCode-derived, progressively disclosed
@@ -10,23 +11,36 @@ import { saveSession, type SessionState } from "@opencrowd/core";
  *   L0.md               -> system prompt (replaces the static capability line)
  *   INDEX.md, categories -> artifacts/knowledge/ (read on demand)
  *
- * Resolution order: OPENCROWD_KNOWLEDGE_DIR ("none" disables), then the
- * snapshot bundled with this package (the best tree from the last
- * evolution run). The loaded version is recorded on the session so runs
- * are reproducible. The daily-refresh design (fetch a versioned snapshot
- * from CrowdCode) is documented in design-docs; this loader is the seam.
+ * Resolution order: an explicit directory, then OPENCROWD_KNOWLEDGE_DIR
+ * ("none" disables), then — when the caller asks for it (hosted runs and
+ * the CLI do) — CrowdCode's live capability tree (C7), rebuilt nightly from
+ * verified purchases and probes, and finally the snapshot bundled with this
+ * package. The live fetch has two seconds; a run never waits longer for
+ * advice, and never fails for want of it. The loaded version is recorded on
+ * the session so runs are reproducible.
  */
 
 export interface LoadedKnowledge {
   version: string;
   source: string;
   l0: string;
-  dir: string;
+  /** The bundled or explicit directory; absent for the live tree. */
+  dir?: string;
+  /** The live tree's version number, when the live tree was loaded. */
+  tree?: number;
+}
+
+export interface LiveTreeOptions extends CrowdCodeApiOptions {
+  /** current (default), candidate, or a version number; OPENCROWD_TREE_VERSION when absent. */
+  version?: string;
+  timeoutMs?: number;
 }
 
 export interface KnowledgeOptions {
-  /** Explicit tree directory; overrides the environment and the bundled snapshot. */
+  /** Explicit tree directory; overrides the environment, the live tree and the bundled snapshot. */
   dir?: string;
+  /** Read CrowdCode's live tree first, falling back to the bundled snapshot. */
+  live?: boolean | LiveTreeOptions;
 }
 
 const VERSION_FILE = ".version";
@@ -59,11 +73,27 @@ export async function resolveKnowledgeDir(options: KnowledgeOptions = {}): Promi
 }
 
 /**
- * Load the tree, copy it under the session's artifacts (so read_file can
- * reach category pages), and record the version on the session. Returns
- * undefined when no tree is configured or the directory has no L0.md.
+ * Load the tree and record its version on the session. The live tree is
+ * only the L0 text (deeper nodes come from browse_services); a directory
+ * tree is copied under the session's artifacts so read_file can reach its
+ * category pages. Returns undefined when no tree is configured or the
+ * directory has no L0.md.
  */
 export async function loadKnowledgeTree(session: SessionState, options: KnowledgeOptions = {}): Promise<LoadedKnowledge | undefined> {
+  let fallback: string | undefined;
+  if (options.live && !options.dir && !process.env.OPENCROWD_KNOWLEDGE_DIR?.trim()) {
+    const live = options.live === true ? {} : options.live;
+    const { tree, error } = await fetchLiveTree({ ...live, version: treeVersionPin(live.version) });
+    if (tree) {
+      const version = `capability-tree-v${tree.version}`;
+      if (session.knowledge?.version !== version || session.knowledge?.source !== tree.source || session.knowledge?.tree !== tree.version) {
+        session.knowledge = { version, source: tree.source, loadedAt: new Date().toISOString(), tree: tree.version };
+        await saveSession(session);
+      }
+      return { version, source: tree.source, l0: tree.l0, tree: tree.version };
+    }
+    fallback = error;
+  }
   const dir = await resolveKnowledgeDir(options);
   if (!dir) {
     return undefined;
@@ -85,20 +115,24 @@ export async function loadKnowledgeTree(session: SessionState, options: Knowledg
     });
     await writeFile(join(target, VERSION_FILE), `${version}\n`, "utf8");
   }
-  if (session.knowledge?.version !== version || session.knowledge?.source !== dir) {
-    session.knowledge = { version, source: dir, loadedAt: new Date().toISOString() };
+  if (session.knowledge?.version !== version || session.knowledge?.source !== dir || session.knowledge?.fallback !== fallback || session.knowledge?.tree !== undefined) {
+    session.knowledge = { version, source: dir, loadedAt: new Date().toISOString(), ...(fallback ? { fallback } : {}) };
     await saveSession(session);
   }
   return { version, source: dir, l0, dir };
 }
 
-/** The prompt block: preamble, the L0 defaults, and the pointer to the on-demand pages. */
-export function renderCapabilityIndex(l0: string): string {
-  return [
-    "Service knowledge base (derived from CrowdCode reviews of real paid calls):",
-    l0.trim(),
-    "Deeper notes per capability live in the session artifact folder knowledge/ — knowledge/INDEX.md lists the category files; read_file the relevant one (e.g. knowledge/categories/<name>.md) before calling find_paid_service for an unfamiliar capability."
-  ].join("\n");
+/** The prompt block: preamble, the L0 defaults, and where the deeper pages are. */
+export function renderCapabilityIndex(l0: string, live = false): string {
+  return live
+    ? ["Service knowledge (CrowdCode's capability tree, rebuilt nightly from verified purchases and daily probes):",
+      l0.trim(),
+      "browse_services(<node>) reads a node; do so before find_paid_service for an unfamiliar capability."].join("\n")
+    : [
+      "Service knowledge base (derived from CrowdCode reviews of real paid calls):",
+      l0.trim(),
+      "Deeper notes per capability live in the session artifact folder knowledge/ — knowledge/INDEX.md lists the category files; read_file the relevant one (e.g. knowledge/categories/<name>.md) before calling find_paid_service for an unfamiliar capability."
+    ].join("\n");
 }
 
 async function readVersion(dir: string, l0: string): Promise<string> {

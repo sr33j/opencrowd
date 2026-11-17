@@ -3,6 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createOpenCrowdSession, type SessionState } from "@opencrowd/core";
+import { clearTreeCache, EconomyGateway, MockAgentCashAdapter, MockCrowdCodeAdapter } from "@opencrowd/economy";
+import type { Command, Event } from "@opencrowd/protocol";
+import { MachineWorker } from "../src/worker.js";
 import {
   bundledKnowledgeDir,
   loadKnowledgeTree,
@@ -18,6 +21,7 @@ let session: SessionState;
 const savedEnv = process.env.OPENCROWD_KNOWLEDGE_DIR;
 
 beforeEach(async () => {
+  clearTreeCache();
   home = await mkdtemp(join(tmpdir(), "oc-knowledge-"));
   session = await createOpenCrowdSession({ workspaceRoot: home, approvalMode: "auto", shellEnabled: false });
   delete process.env.OPENCROWD_KNOWLEDGE_DIR;
@@ -112,5 +116,99 @@ describe("prompt injection", () => {
     const text = renderCapabilityIndex("- x\n");
     expect(text.split("\n")[1]).toBe("- x");
     expect(text).toContain("knowledge/categories/<name>.md");
+  });
+});
+
+describe("CrowdCode's live capability tree (C7)", () => {
+  const BASE = "https://crowdcode.test";
+  const L0 = "CrowdCode capability tree v4 (2026-11-17).\nFree first: use local files, shell, Python and free public APIs; once they answer, stop.\n- search: Finding pages you have no URL for. → nothing reliable yet";
+  const treeFetcher = (urls: string[] = []) => (async (url: string) => {
+    urls.push(String(url));
+    return new Response(JSON.stringify({ ok: true, version: 4, built_at: "2026-11-17T02:23:01Z", published: true, nodes: [], l0: L0 }), { status: 200 });
+  }) as typeof fetch;
+  const dynamicTools = {
+    definitions: [{ name: "browse_services", description: "x", parameters: { type: "object", properties: {} } }],
+    execute: async () => ({ ok: true, data: {} })
+  };
+  const capture = (seen: LlmMessage[][]): LlmProvider => ({ async complete(messages) { seen.push(messages); throw new Error("captured"); } });
+
+  it("puts the live L0 in the system prompt in place of the bundled one, and records the version", async () => {
+    const seen: LlmMessage[][] = [];
+    const urls: string[] = [];
+    await expect(runAgentTaskDetailed(session, "task", { provider: capture(seen), dynamicTools,
+      knowledge: { live: { base: BASE, fetcher: treeFetcher(urls), version: "candidate" } } })).rejects.toThrow("captured");
+    const system = seen[0][0].content;
+    expect(system).toContain(L0);
+    expect(system).toContain("browse_services(<node>)");
+    expect(system).not.toContain("knowledge/INDEX.md");
+    expect(system).not.toContain("Service knowledge base (derived from CrowdCode reviews");
+    expect(urls).toEqual([`${BASE}/api/tree?version=candidate`]);
+    expect(session.knowledge).toMatchObject({ version: "capability-tree-v4", tree: 4, source: `${BASE}/api/tree` });
+    const persisted = JSON.parse(await readFile(join(session.sessionDir, "session.json"), "utf8")) as SessionState;
+    expect(persisted.knowledge?.tree).toBe(4);
+  });
+
+  it("falls back to the bundled snapshot when the backend is unreachable, and says why on the session", async () => {
+    const seen: LlmMessage[][] = [];
+    const down = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
+    await expect(runAgentTaskDetailed(session, "task", { provider: capture(seen), dynamicTools,
+      knowledge: { live: { base: BASE, fetcher: down } } })).rejects.toThrow("captured");
+    expect(seen[0][0].content).toContain("Service knowledge base (derived from CrowdCode reviews");
+    expect(seen[0][0].content).not.toContain("CrowdCode capability tree v4");
+    expect(session.knowledge?.tree).toBeUndefined();
+    expect(session.knowledge?.fallback).toContain("fetch failed");
+  });
+
+  it("an explicit directory still wins over the live tree", async () => {
+    const custom = join(home, "tree");
+    await mkdir(custom, { recursive: true });
+    await writeFile(join(custom, "L0.md"), "- custom\n");
+    const urls: string[] = [];
+    expect((await loadKnowledgeTree(session, { dir: custom, live: { base: BASE, fetcher: treeFetcher(urls) } }))?.l0).toBe("- custom");
+    expect(urls).toEqual([]);
+  });
+
+  describe("on a hosted worker", () => {
+    const start = (treeVersion?: string): Command => ({ protocolVersion: 1, id: "command-1", runId: "run-1", seq: 1, emittedAt: "2026-11-17T00:00:00Z",
+      type: "run.start", payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "What is 2 + 2?", modelPolicy: {},
+        budget: { limit: "1000000" }, approvalMode: "auto", ...(treeVersion ? { treeVersion } : {}) } });
+
+    async function run(fetcher: typeof fetch, treeVersion?: string) {
+      const agentHome = await mkdtemp(join(tmpdir(), "oc-live-tree-"));
+      const events: Event[] = [];
+      let system = "";
+      const provider: LlmProvider = { async complete(messages) {
+        system = messages.find((m) => m.role === "system")?.content ?? "";
+        return { content: "4", toolCalls: [{ id: "c", name: "complete_session", arguments: { final_message: "4" } }] };
+      } };
+      const worker = new MachineWorker({ agentHome, output: (line) => { events.push(JSON.parse(line)); }, provider: () => provider,
+        liveTree: { base: BASE, fetcher },
+        economy: (_run, current) => new EconomyGateway({ session: current, agentcash: new MockAgentCashAdapter(), crowdcode: new MockCrowdCodeAdapter(),
+          approvalMode: "auto", approvalRulesPath: join(agentHome, "rules.json") }) });
+      await worker.initialize(); await worker.handleLine(JSON.stringify(start(treeVersion))); await worker.drain();
+      const recorded = JSON.parse(await readFile(join(agentHome, "workspace/sessions/session-1/session.json"), "utf8")) as SessionState;
+      await rm(agentHome, { recursive: true, force: true });
+      return { system, outcome: events.filter((e) => e.type === "run.finished").at(-1)?.payload.outcome, knowledge: recorded.knowledge };
+    }
+
+    it("reads the tree a run.start pins and records its version on the session", async () => {
+      const urls: string[] = [];
+      const result = await run(treeFetcher(urls), "candidate");
+      expect(result.outcome).toBe("completed");
+      expect(result.system).toContain(L0);
+      expect(result.knowledge).toMatchObject({ version: "capability-tree-v4", tree: 4 });
+      // The worker's load and the loop's load share one fetch.
+      expect(urls).toEqual([`${BASE}/api/tree?version=candidate`]);
+    });
+
+    it("completes on the bundled snapshot when CrowdCode is unreachable", async () => {
+      const hanging = (() => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
+      const started = Date.now();
+      const result = await run(hanging);
+      expect(result.outcome).toBe("completed");
+      expect(Date.now() - started).toBeLessThan(8_000);
+      expect(result.system).toContain("Service knowledge base (derived from CrowdCode reviews");
+      expect(result.knowledge?.fallback).toMatch(/capability tree unavailable/);
+    }, 15_000);
   });
 });
