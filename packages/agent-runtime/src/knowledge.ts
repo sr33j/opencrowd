@@ -34,6 +34,8 @@ export interface LiveTreeOptions extends CrowdCodeApiOptions {
   /** current (default), candidate, or a version number; OPENCROWD_TREE_VERSION when absent. */
   version?: string;
   timeoutMs?: number;
+  /** Bypass the per-process cache (a run pinned to a tree version). */
+  fresh?: boolean;
 }
 
 export interface KnowledgeOptions {

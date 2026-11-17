@@ -83,13 +83,18 @@ export function clearTreeCache(): void {
  * `GET /api/tree`, cached per process. Resolves to the tree or to the reason
  * it is unavailable; never rejects and never waits past `timeoutMs`.
  */
-export async function fetchLiveTree(options: CrowdCodeApiOptions & { version?: string; timeoutMs?: number; now?: () => number } = {}):
-  Promise<{ tree?: LiveTree; error?: string }> {
+export async function fetchLiveTree(options: CrowdCodeApiOptions & {
+  version?: string;
+  timeoutMs?: number;
+  now?: () => number;
+  /** Neither read nor write the per-process cache: a run pinned to a version (W8's gate) reads exactly that version, now. */
+  fresh?: boolean;
+} = {}): Promise<{ tree?: LiveTree; error?: string }> {
   const base = (options.base ?? crowdcodeApiBase()).replace(/\/+$/, "");
   const version = options.version ?? "current";
   const now = options.now ?? Date.now;
   const key = `${base} ${version}`;
-  const cached = treeCache.get(key);
+  const cached = options.fresh ? undefined : treeCache.get(key);
   if (cached && cached.until > now()) return cached.tree ? { tree: cached.tree } : { error: cached.error };
   const timeoutMs = options.timeoutMs ?? TREE_FETCH_DEADLINE_MS;
   const url = `${base}/api/tree${version === "current" ? "" : `?version=${encodeURIComponent(version)}`}`;
@@ -104,11 +109,11 @@ export async function fetchLiveTree(options: CrowdCodeApiOptions & { version?: s
     if (!Number.isInteger(number) || number < 0 || !l0) throw new Error("the answer had no version or no l0");
     const tree: LiveTree = { version: number, l0, source: `${base}/api/tree`,
       ...(typeof body.built_at === "string" ? { builtAt: body.built_at } : {}) };
-    treeCache.set(key, { until: now() + TREE_CACHE_MS, tree });
+    if (!options.fresh) treeCache.set(key, { until: now() + TREE_CACHE_MS, tree });
     return { tree };
   } catch (error) {
     const reason = `CrowdCode capability tree unavailable: ${(error as Error).message}`;
-    treeCache.set(key, { until: now() + TREE_FAILURE_CACHE_MS, error: reason });
+    if (!options.fresh) treeCache.set(key, { until: now() + TREE_FAILURE_CACHE_MS, error: reason });
     return { error: reason };
   }
 }

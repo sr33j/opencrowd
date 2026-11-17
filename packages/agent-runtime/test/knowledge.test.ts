@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createOpenCrowdSession, type SessionState } from "@opencrowd/core";
 import { clearTreeCache, EconomyGateway, MockAgentCashAdapter, MockCrowdCodeAdapter } from "@opencrowd/economy";
-import type { Command, Event } from "@opencrowd/protocol";
+import { RunStartCommandSchema, type Command, type Event } from "@opencrowd/protocol";
 import { MachineWorker } from "../src/worker.js";
 import {
   bundledKnowledgeDir,
@@ -199,6 +199,24 @@ describe("CrowdCode's live capability tree (C7)", () => {
       expect(result.knowledge).toMatchObject({ version: "capability-tree-v4", tree: 4 });
       // The worker's load and the loop's load share one fetch.
       expect(urls).toEqual([`${BASE}/api/tree?version=candidate`]);
+    });
+
+    it("reads a pinned version afresh on every run, while unpinned runs share the hour's copy", async () => {
+      const urls: string[] = [];
+      const fetcher = treeFetcher(urls);
+      await run(fetcher, "12");
+      await run(fetcher, "12");
+      expect(urls).toEqual([`${BASE}/api/tree?version=12`, `${BASE}/api/tree?version=12`]);
+      urls.length = 0;
+      await run(fetcher);
+      await run(fetcher);
+      expect(urls).toEqual([`${BASE}/api/tree`]);
+    });
+
+    it("rejects a malformed pin at the protocol boundary", () => {
+      expect(RunStartCommandSchema.safeParse(start("candidate")).success).toBe(true);
+      expect(RunStartCommandSchema.safeParse(start("7")).success).toBe(true);
+      expect(RunStartCommandSchema.safeParse(start("latest")).success).toBe(false);
     });
 
     it("completes on the bundled snapshot when CrowdCode is unreachable", async () => {
