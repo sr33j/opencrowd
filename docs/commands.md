@@ -22,7 +22,7 @@ Persistent defaults can also change through `opencrowd config` or `opencrowd wal
 | `/clear` | Archive and clear conversation context; keep session, spend, models, policy |
 | `/new` | Start a new session with configured defaults |
 | `/help` | Show the command registry |
-| `/quit` | Finalize and exit (after required reviews are resolved) |
+| `/quit` | Finalize and exit |
 
 16 commands. Autocomplete, `/help`, and
 `opencrowd --help` render from this same registry.

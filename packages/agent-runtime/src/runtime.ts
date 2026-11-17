@@ -59,7 +59,6 @@ export const localRuntimeStorage: RuntimeStorage = {
 export interface EconomyPort {
   definitions(): DynamicToolDefinition[];
   execute(name: string, args: Record<string, unknown>): Promise<ToolResult>;
-  hasPendingRequiredReviews(): Promise<boolean>;
 }
 
 /** LLM wiring for one run: a typed provider runtime or a scripted provider (tests/demo). */

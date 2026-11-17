@@ -1244,8 +1244,7 @@ describe("dependency-injected runtime", () => {
         execute: async (name) => {
           executed.push(name);
           return { ok: true, data: { done: true } };
-        },
-        hasPendingRequiredReviews: async () => false
+        }
       })
     });
 
@@ -1260,31 +1259,32 @@ describe("dependency-injected runtime", () => {
     expect(persisted.some((message) => message.role === "assistant")).toBe(true);
   });
 
-  it("blocks completion through the injected economy port's pending reviews", async () => {
+  it("completes through the injected economy port right after a paid call, with nothing owed", async () => {
     const root = await tempRoot();
+    let calls = 0;
     const runtime = createOpenCrowdRuntime({
       workspace: root,
       llmProvider: async () => ({
         kind: "scripted",
         provider: {
           async complete(): Promise<LlmResponse> {
-            return { content: "finished", toolCalls: [] };
+            if (calls++ === 0) return { content: "", toolCalls: [{ id: "buy", name: "call_paid_service", arguments: { url: "https://svc.example" } }] };
+            return { content: "The service says the answer is 42.", toolCalls: [] };
           }
         }
       }),
       economy: async () => ({
-        definitions: () => [],
-        execute: async () => ({ ok: true }),
-        hasPendingRequiredReviews: async () => true
+        definitions: () => [{ name: "call_paid_service", description: "buy", parameters: { type: "object", properties: {} } }],
+        execute: async () => ({ ok: true, data: { outcome: "paid_success", purchase_id: "pur_1", review: "automatic" } })
       })
     });
     const session = await runtime.createSession({ budgetCents: 100 });
-    const result = await runtime.runTask(session, "finish");
-    // The review is still owed, and still pending for a later retry, but it
-    // cannot take back the answer the owner was already given (SRI-62).
+    const result = await runtime.runTask(session, "ask the service");
+    // SRI-115: an unreviewed purchase no longer holds the run open or nudges it.
     expect(result.outcome).toBe("completed");
-    expect(result.summary.final_message).toBe("finished");
-    expect(String(result.summary.housekeeping_error)).toContain("required review");
+    expect(result.summary.final_message).toBe("The service says the answer is 42.");
+    expect(result.summary.housekeeping_error).toBeUndefined();
+    expect(calls).toBe(2);
   });
 });
 
@@ -1352,13 +1352,13 @@ describe("completion gating", () => {
 
     const result = await runAgentTaskDetailed(session, "finish up", {
       provider,
-      completionGate: async () => "a confirmed paid purchase still needs its required review"
+      completionGate: async () => "the housekeeping step has not run yet"
     });
 
     expect(completions).toBe(2); // initial attempt + one nudge
     expect(result.outcome).toBe("completed");
     expect(result.summary.final_message).toBe("all done");
-    expect(String(result.summary.housekeeping_error)).toContain("required review");
+    expect(String(result.summary.housekeeping_error)).toContain("housekeeping step");
   });
 
   it("completes normally once the gate clears", async () => {

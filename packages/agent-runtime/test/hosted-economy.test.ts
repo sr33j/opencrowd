@@ -243,22 +243,62 @@ describe("hosted economy: payment over the bridge", () => {
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "opencrowd" } });
     expect(call.ok).toBe(true);
-    expect(call.data).toMatchObject({ outcome: "paid_success", status: 200, charged_cost_cents: 1, review_required: true, data: { results: ["paid result"] } });
+    // CrowdCode's judge reviews a hosted purchase by itself: nothing is owed.
+    expect(call.data).toMatchObject({ outcome: "paid_success", status: 200, charged_cost_cents: 1, review: "automatic", data: { results: ["paid result"] } });
+    expect(call.data).not.toHaveProperty("review_required");
     const pay = requests.find(r => r.name === "economy.pay")!;
     expect(pay).toMatchObject({ runId: "run-1", sessionId: "session-1", arguments: { service_id: "svc_search", url: SEARCH, method: "POST",
       body: JSON.stringify({ query: "opencrowd" }), max_cost_cents: 1 } });
+    expect(pay.arguments).not.toHaveProperty("crowdcode_review");
     expect(pay.arguments.purchase_request_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     const reloaded = await loadSession(session.workspaceRoot, session.sessionId);
     expect(reloaded.spentCents).toBe(1); expect(reloaded.reservedCents).toBe(0);
-    expect(await gateway.hasPendingRequiredReviews()).toBe(true);
-    const blocked = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
-    expect(blocked.error).toMatch(/review_paid_service/);
+    // An optional review, submitted after the fact, still goes through economy.review.
     const purchaseId = (call.data as any).purchase_id;
     const review = await gateway.execute("review_paid_service", { purchase_id: purchaseId, rating: 5, reason: "exactly what I needed", task_context: "research" });
     expect(review).toEqual({ ok: true, data: { purchase_id: purchaseId, review: "submitted", rating: 5 } });
     expect(requests.find(r => r.name === "economy.review")!.arguments).toEqual({ api_endpoint: SEARCH, payment_provider: "x402", payment_target_ref: "0xpayee",
       payment_reference: "0xtx", rating: 5, reason: "exactly what I needed", task_context: "research" });
-    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
+  });
+
+  it("marks a hosted paid call as reviewed automatically and lets the next paid call through at once (SRI-115)", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath, requests } = await bridge((name) => name === "economy.pay" ? SETTLED : { ok: false, error: "unexpected" });
+    const { session, gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const first = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "one" } });
+    expect(first).toMatchObject({ ok: true, data: { outcome: "paid_success", review: "automatic" } });
+    // Straight on to the next purchase: no review_paid_service in between.
+    const second = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "two" } });
+    expect(second).toMatchObject({ ok: true, data: { outcome: "paid_success", review: "automatic" } });
+    expect(requests.map(r => r.name)).toEqual(["economy.pay", "economy.pay"]);
+    expect((await loadSession(session.workspaceRoot, session.sessionId)).spentCents).toBe(2);
+    expect((await listPurchases(session)).map(p => p.reviewStatus)).toEqual(["not_required", "not_required"]);
+  });
+
+  it("tells the gateway not to review a purchase only while the owner has CrowdCode off", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath, requests } = await bridge((name) => name === "economy.pay" ? SETTLED : { ok: false, error: "unexpected" });
+    const { gateway } = await economy(fetcher, socketPath);
+    const buy = async () => {
+      await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+      const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "q" } });
+      return { call, pay: requests.filter(r => r.name === "economy.pay").at(-1)!.arguments };
+    };
+    const on = await buy();
+    expect(on.pay).not.toHaveProperty("crowdcode_review");
+    expect(on.call.data).toMatchObject({ review: "automatic" });
+
+    expect(await gateway.execute("set_crowdcode_enabled", { enabled: false })).toMatchObject({ ok: true, data: { enabled: false } });
+    const off = await buy();
+    expect(off.call).toMatchObject({ ok: true, data: { outcome: "paid_success" } });
+    expect(off.pay).toMatchObject({ url: SEARCH, crowdcode_review: false });
+    expect(off.call.data).not.toHaveProperty("review");
+
+    await gateway.execute("set_crowdcode_enabled", { enabled: true });
+    const back = await buy();
+    expect(back.pay).not.toHaveProperty("crowdcode_review");
+    expect(back.call.data).toMatchObject({ review: "automatic" });
   });
 
   it("reports a call to the agent's own service as a free owner test, with nothing to review (SRI-68)", async () => {
@@ -271,11 +311,11 @@ describe("hosted economy: payment over the bridge", () => {
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { text: "one two three" } });
     expect(call.ok).toBe(true);
-    expect(call.data).toMatchObject({ outcome: "free", status: 200, charged_cost_cents: 0, review_required: false,
+    expect(call.data).toMatchObject({ outcome: "free", status: 200, charged_cost_cents: 0,
       note: expect.stringContaining("own service"), data: { words: 3, sentences: 1 } });
+    expect(call.data).not.toHaveProperty("review");
     expect(JSON.stringify(call)).not.toMatch(/payment state is unknown|must not be retried/);
     expect((await loadSession(session.workspaceRoot, session.sessionId)).spentCents).toBe(0);
-    expect(await gateway.hasPendingRequiredReviews()).toBe(false);
     // The worker never fetched the service itself: the gateway's answer is the answer.
     expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ text: "one two three" }))).toHaveLength(0);
     // A handler error on its own test is the service's answer, not an uncertain payment.
@@ -293,7 +333,8 @@ describe("hosted economy: payment over the bridge", () => {
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "free" }, max_cost_cents: 1 });
     expect(call.ok).toBe(true);
-    expect(call.data).toMatchObject({ outcome: "free", status: 200, charged_cost_cents: 0, review_required: false, data: { results: ["free result"] } });
+    expect(call.data).toMatchObject({ outcome: "free", status: 200, charged_cost_cents: 0, data: { results: ["free result"] } });
+    expect(call.data).not.toHaveProperty("review");
     expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ query: "free" }))).toHaveLength(1);
   });
 
@@ -406,8 +447,9 @@ describe("hosted economy: payment over the bridge", () => {
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
     expect(call.ok).toBe(false);
+    expect(call.data).not.toHaveProperty("review");
     const [purchase] = await listPurchases(session);
-    expect(purchase.record).toMatchObject({ caller_error: true, review_required: false });
+    expect(purchase.record).toMatchObject({ caller_error: true });
     const review = await gateway.execute("review_paid_service", {
       purchase_id: purchase.record.purchase_id, rating: 1, reason: "its 402 is broken",
     });
@@ -449,7 +491,7 @@ describe("hosted economy: payment over the bridge", () => {
     const { session, gateway } = await economy(fetcher, socketPath);
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "q" } });
-    expect(call).toMatchObject({ ok: true, data: { outcome: "paid_success", review_required: true } });
+    expect(call).toMatchObject({ ok: true, data: { outcome: "paid_success", review: "automatic" } });
     const [purchase] = await (await import("@opencrowd/economy")).listPurchases(session);
     expect(purchase.record).toMatchObject({ rail, evidence: { rail, reference: transaction, payer: "agent-payer" } });
     await gateway.execute("review_paid_service", { purchase_id: (call.data as any).purchase_id, rating: 4, reason: "fine" });
@@ -520,44 +562,40 @@ describe("hosted economy: worker wiring", () => {
     expect(JSON.parse(toolMessage.content).result.data.services[0].endpoint).toBe(SEARCH);
   });
 
-  it("keeps the model from finishing while a paid purchase still needs its review", async () => {
+  it("lets the model buy twice and finish without reviewing either purchase (SRI-115)", async () => {
     const home = await root(); const events: Event[] = []; let turn = 0;
     const { fetcher } = fakeFetch();
-    const { socketPath } = await bridge((name) => name === "economy.pay"
+    const { socketPath, requests } = await bridge((name) => name === "economy.pay"
       ? { ok: true, data: { outcome: "paid_success", status: 200, body: "ok", content_type: "text/plain", amount_atomic: "10000", transaction: "0xtx", pay_to: "0xpayee" } }
       : { ok: true, data: { review: "submitted" } });
-    const provider = { complete: vi.fn(async () => {
+    const provider = { complete: vi.fn(async (_messages: unknown) => {
       switch (turn++) {
         case 0: return { content: "", toolCalls: [{ id: "i", name: "inspect_paid_service", arguments: { url: SEARCH, method: "POST" } }] };
-        case 1: return { content: "", toolCalls: [{ id: "p", name: "call_paid_service", arguments: { url: SEARCH, method: "POST", body: { query: "q" } } }] };
-        case 2: return { content: "all done", toolCalls: [] };
-        default: return { content: "", toolCalls: [{ id: "r", name: "review_paid_service", arguments: { purchase_id: purchaseId, rating: 4, reason: "worked" } }, { id: "c", name: "complete_session", arguments: { final_message: "reviewed" } }] };
+        case 1: return { content: "", toolCalls: [{ id: "p1", name: "call_paid_service", arguments: { url: SEARCH, method: "POST", body: { query: "q1" } } }] };
+        case 2: return { content: "", toolCalls: [{ id: "p2", name: "call_paid_service", arguments: { url: SEARCH, method: "POST", body: { query: "q2" } } }] };
+        case 3: return { content: "all done", toolCalls: [] };
+        default: return { content: "", toolCalls: [{ id: "c", name: "complete_session", arguments: { final_message: "all done" } }] };
       }
     }) };
-    let purchaseId = "";
-    const worker = new MachineWorker({ agentHome: home, output: line => {
-      const event = JSON.parse(line) as Event; events.push(event);
-    }, provider: () => provider,
+    const worker = new MachineWorker({ agentHome: home, output: line => { events.push(JSON.parse(line)); }, provider: () => provider,
       economy: (run, session) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize();
     const command: Command = { protocolVersion: 1, id: "command-1", runId: "run-1", seq: 1, emittedAt: "2026-09-16T00:00:00Z", type: "run.start",
       payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "Search", modelPolicy: {}, budget: { limit: "1000000" }, approvalMode: "auto" } };
-    const pending = worker.handleLine(JSON.stringify(command));
-    // The review turn needs the purchase id from the call result; read it from the checkpointed tool message.
-    const original = provider.complete.getMockImplementation()!;
-    provider.complete.mockImplementation(async (messages: any) => {
-      const paid = messages.find((m: any) => m.role === "tool" && m.toolCallId === "p");
-      if (paid) purchaseId = JSON.parse(paid.content).result.data.purchase_id;
-      return original(messages);
-    });
-    await pending; await worker.drain();
+    await worker.handleLine(JSON.stringify(command)); await worker.drain();
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
-    // The loop mutates one messages array; the completion-gate nudge is the only user message after the prompt.
-    const nudges = (provider.complete.mock.calls[3][0] as { role: string; content: string }[]).filter(m => m.role === "user").slice(1);
-    expect(nudges).toEqual([{ role: "user", content: expect.stringMatching(/required review.*request_service/) }]);
-    expect(provider.complete).toHaveBeenCalledTimes(4);
-    expect(events.filter(e => e.type === "tool.started").map(e => e.payload.input)).toEqual([
-      { url: SEARCH, method: "POST" }, { url: SEARCH, method: "POST" }, { purchase_id: purchaseId, rating: "4" }, { summary: "reviewed" }]);
+    // Both purchases were paid, one straight after the other, and neither was reviewed.
+    const results = (provider.complete.mock.calls[3][0] as { role: string; toolCallId?: string; content: string }[])
+      .filter(m => m.role === "tool" && (m.toolCallId === "p1" || m.toolCallId === "p2")).map(m => JSON.parse(m.content).result);
+    expect(results).toEqual([expect.objectContaining({ ok: true, data: expect.objectContaining({ outcome: "paid_success", review: "automatic" }) }),
+      expect.objectContaining({ ok: true, data: expect.objectContaining({ outcome: "paid_success", review: "automatic" }) })]);
+    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(2);
+    expect(requests.filter(r => r.name === "economy.review")).toHaveLength(0);
+    // The only completion nudge is the one-time CrowdCode reflection; no review is asked for.
+    const nudges = (provider.complete.mock.calls[4][0] as { role: string; content: string }[]).filter(m => m.role === "user").slice(1);
+    expect(nudges).toEqual([{ role: "user", content: expect.stringContaining("request_service") }]);
+    expect(nudges[0].content).not.toMatch(/review_paid_service|required review/);
+    expect(provider.complete).toHaveBeenCalledTimes(5);
     const dynamic = hostedDynamicTools(createHostedEconomy({ socketPath, runId: "r", sessionId: "s", session: await createSession({ workspaceRoot: await root() }), fetcher }));
     // Hosted agents move their own funds between networks; the hosted description replaces AgentCash's.
     expect(dynamic.definitions.find(d => d.name === "bridge_usdc")?.description).toContain("always arrives at your own address");
@@ -585,26 +623,20 @@ it.each([true, false])("publishes the prepared answer with prior service request
   expect(provider.complete).toHaveBeenCalledTimes(2);
 });
 
-describe("hosted economy: review gate", () => {
-  it("uses durable per-purchase review decisions even across wrappers and subsequent purchases", async () => {
-    let pending = true, attempts = 0;
+describe("hosted economy: completion gate", () => {
+  it("never waits on a review, however review submissions go", async () => {
+    let reviews = 0;
     const economy = {
       definitions: () => [{ name: "review_paid_service", description: "", parameters: {} }],
-      execute: async () => { if (++attempts === 2) pending = false; return { ok: false, error: "Registry rejected the review" }; },
-      hasPendingRequiredReviews: async () => pending
+      execute: async () => { reviews++; return { ok: false, error: "Registry rejected the review" }; }
     } as unknown as Parameters<typeof hostedDynamicTools>[0];
     const tools = hostedDynamicTools(economy);
-    expect(await tools.completionGate()).toMatch(/review_paid_service/);
-    await tools.execute("review_paid_service", { purchase_id: "p", rating: 4, reason: "x" });
-    expect(await tools.completionGate()).toMatch(/review_paid_service/);
+    expect(await tools.completionGate()).toBeUndefined();
     await tools.execute("review_paid_service", { purchase_id: "p", rating: 4, reason: "x" });
     expect(await tools.completionGate()).toBeUndefined();
-    expect(await hostedDynamicTools(economy).completionGate()).toBeUndefined();
-    pending = true; // A new purchase has its own review requirement.
-    expect(await tools.completionGate()).toMatch(/review_paid_service/);
+    expect(reviews).toBe(1);
   });
 });
-
 
 it("resumes an approved paid tool after worker restart with the same purchase ID", async () => {
   const home = await root(); const events: Event[] = []; let approved = false; let turn = 0;
@@ -620,11 +652,7 @@ it("resumes an approved paid tool after worker restart with the same purchase ID
     }
   }) };
   const options = { agentHome: home, output: (line: string) => { events.push(JSON.parse(line)); }, provider: () => provider,
-    economy: (run: any, session: any) => {
-      const gateway = createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE });
-      gateway.hasPendingRequiredReviews = async () => false;
-      return gateway;
-    } };
+    economy: (run: any, session: any) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) };
   const worker = new MachineWorker(options); await worker.initialize();
   await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "start", runId: "run-1", seq: 1, emittedAt: "2026-09-16T00:00:00Z", type: "run.start",
     payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "Search", modelPolicy: {}, budget: { limit: "10000000" }, approvalMode: "auto" } }));
@@ -654,11 +682,7 @@ it("resumes an approved move between networks after worker restart with the same
     ? { content: "", toolCalls: [{ id: "m", name: "bridge_usdc", arguments: { from: "base", to: "tempo", amount_usd: 2 } }] }
     : { content: "moved", toolCalls: [] }) };
   const options = { agentHome: home, output: (line: string) => { events.push(JSON.parse(line)); }, provider: () => provider,
-    economy: (run: any, session: any) => {
-      const gateway = createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE });
-      gateway.hasPendingRequiredReviews = async () => false;
-      return gateway;
-    } };
+    economy: (run: any, session: any) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) };
   const worker = new MachineWorker(options); await worker.initialize();
   await worker.handleLine(JSON.stringify({ protocolVersion: 1, id: "start", runId: "run-1", seq: 1, emittedAt: "2026-10-20T00:00:00Z", type: "run.start",
     payload: { session: { kind: "create", sessionId: "session-1" }, prompt: "Move $2 to Tempo", modelPolicy: {}, budget: { limit: "10000000" }, approvalMode: "auto" } }));
@@ -768,7 +792,8 @@ describe("hosted economy: moving funds between the agent's networks", () => {
     // agent in exactly this position gave the provider one star on
     // 2026-10-28; the purchase is now marked so the review tool refuses it.
     const [purchase] = await listPurchases((gateway as any).options.session);
-    expect(purchase.record).toMatchObject({ caller_error: true, review_required: false });
+    expect(purchase.record).toMatchObject({ caller_error: true });
+    expect(call.data).not.toHaveProperty("review");
     const review = await gateway.execute("review_paid_service", {
       purchase_id: purchase.record.purchase_id, rating: 1, reason: "would not take my money",
     });

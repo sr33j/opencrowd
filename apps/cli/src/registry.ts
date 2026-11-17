@@ -12,7 +12,6 @@ import {
   approvalRulesPath,
   isApprovalMode,
   loadApprovalRules,
-  pendingRequiredReviews,
   removeApprovalRule,
   upsertApprovalRule
 } from "@opencrowd/economy";
@@ -365,7 +364,7 @@ export const COMMAND_REGISTRY: CommandSpec[] = [
   {
     name: "quit",
     usage: "/quit",
-    summary: "Finalize and exit (after required reviews are resolved)",
+    summary: "Finalize and exit",
     execute: async () => ({ kind: "exit" })
   }
 ];
@@ -401,11 +400,6 @@ export function renderCommandHelpMarkdown(): string {
     "| --- | --- |",
     ...COMMAND_REGISTRY.map((command) => `| \`${command.usage.replace(/\|/g, "\\|")}\` | ${command.summary} |`)
   ].join("\n");
-}
-
-/** True while a confirmed paid purchase still needs its required review. */
-export async function sessionHasPendingReviews(session: SessionState): Promise<boolean> {
-  return (await pendingRequiredReviews(session)).length > 0;
 }
 
 function activeProviderId(session: SessionState, fallback: ProviderId): ProviderId {

@@ -6,19 +6,24 @@ import type { PaymentEvidence } from "./agentcash.js";
 
 /**
  * Append-only purchase store: `sessions/<session-id>/purchases.jsonl`.
- * Every event is immutable; current state is a fold over the events, so
- * pending required reviews survive restarts by construction. Full responses
- * belong in artifacts, not here.
+ * Every event is immutable; current state is a fold over the events, so a
+ * submitted review survives restarts by construction. Full responses belong
+ * in artifacts, not here.
+ *
+ * No purchase is ever owed a review. On hosted agents CrowdCode's gateway
+ * judges every settled purchase itself, from its own record of the request,
+ * the response and the payment; `review_paid_service` is optional notes.
+ * Until 0.16.8 a paid purchase blocked the next one, and the run's
+ * completion, until the agent reviewed it: an extra model turn per purchase
+ * that cost more than the Exa search it reviewed, and 8 of 25 failed paid
+ * calls in the fortnight before it went (SRI-115).
  */
-
-export const MAX_REVIEW_ATTEMPTS = 2;
 
 export type PurchaseOutcome = "free" | "siwx" | "paid_success" | "paid_failure" | "unknown";
 
 export interface PurchaseRecord {
   purchase_id: string;
   session_id: string;
-  /** Review gates belong to the query that made this purchase. */
   query_id?: string;
   created_at: string;
   endpoint: string;
@@ -28,8 +33,11 @@ export interface PurchaseRecord {
   charged_cost_cents: number;
   outcome: PurchaseOutcome;
   artifact_path?: string;
-  /** Confirmed paid outcomes require a CrowdCode review before further purchases. */
-  review_required: boolean;
+  /**
+   * Written by releases before 0.16.8, when a paid purchase required a
+   * review before the next one. Read from old sessions, never acted on.
+   */
+  review_required?: boolean;
   /**
    * The call was refused on our side and never reached the service — no USDC
    * on a network it accepts, a spending cap, an unpayable rail. It is recorded
@@ -48,23 +56,23 @@ export interface PurchaseRecord {
 
 export type PurchaseEvent =
   | { type: "purchase"; record: PurchaseRecord }
+  /** Old sessions only: CrowdCode was turned off with a review pending. */
   | { type: "review_skipped"; purchase_id: string }
   /**
    * `permanent` marks a rejection that is about the service's registration in
    * the CrowdCode directory rather than about this attempt — "service identity
    * conflict", for one — so the same review submitted again gets the same
-   * answer. It exhausts the attempts in one event, because what the agent must
-   * not do is spend a turn and a model call discovering that, with its next
-   * purchase blocked in the meantime.
+   * answer.
    */
   | { type: "review_failed"; purchase_id: string; attempted_at: string; permanent?: boolean }
   | { type: "review_submitted"; purchase_id: string; rating: number; submitted_at: string };
 
 export interface PurchaseState {
   record: PurchaseRecord;
-  reviewStatus: "not_required" | "pending" | "submitted";
+  reviewStatus: "not_required" | "submitted";
   reviewRating?: number;
-  reviewAttempts?: number;
+  /** CrowdCode refused a review of it for a reason a retry cannot change. */
+  reviewRejected?: boolean;
 }
 
 export function purchasesPath(session: SessionState): string {
@@ -101,10 +109,6 @@ export async function recordReviewFailed(
   });
 }
 
-export async function skipPendingReviews(session: SessionState): Promise<void> {
-  for (const state of await pendingRequiredReviews(session)) await appendPurchaseEvent(session, { type: "review_skipped", purchase_id: state.record.purchase_id });
-}
-
 async function appendPurchaseEvent(session: SessionState, event: PurchaseEvent): Promise<void> {
   const path = purchasesPath(session);
   await mkdir(dirname(path), { recursive: true });
@@ -133,19 +137,10 @@ export async function listPurchases(session: SessionState): Promise<PurchaseStat
       continue;
     }
     if (event.type === "purchase") {
-      states.set(event.record.purchase_id, {
-        record: event.record,
-        reviewStatus: event.record.review_required ? "pending" : "not_required"
-      });
-    } else if (event.type === "review_skipped") {
-      const state = states.get(event.purchase_id);
-      if (state) state.reviewStatus = "not_required";
+      states.set(event.record.purchase_id, { record: event.record, reviewStatus: "not_required" });
     } else if (event.type === "review_failed") {
       const state = states.get(event.purchase_id);
-      if (state)
-        state.reviewAttempts = event.permanent
-          ? MAX_REVIEW_ATTEMPTS
-          : (state.reviewAttempts ?? 0) + 1;
+      if (state && event.permanent) state.reviewRejected = true;
     } else if (event.type === "review_submitted") {
       const state = states.get(event.purchase_id);
       if (state) {
@@ -155,12 +150,6 @@ export async function listPurchases(session: SessionState): Promise<PurchaseStat
     }
   }
   return [...states.values()];
-}
-
-export async function pendingRequiredReviews(session: SessionState): Promise<PurchaseState[]> {
-  return (await listPurchases(session)).filter((state) => state.reviewStatus === "pending"
-    && (state.reviewAttempts ?? 0) < MAX_REVIEW_ATTEMPTS
-    && (!session.query || state.record.query_id === session.query.id));
 }
 
 /** Model-visible view of a purchase: no payment proof, payer, or tx hashes. */
@@ -176,7 +165,6 @@ export function redactPurchase(state: PurchaseState): Record<string, unknown> {
     charged_cost_cents: record.charged_cost_cents,
     artifact_path: record.artifact_path,
     review_status: state.reviewStatus,
-    review_deferred: state.reviewStatus === "pending" && (state.reviewAttempts ?? 0) >= MAX_REVIEW_ATTEMPTS,
     created_at: record.created_at
   };
 }
