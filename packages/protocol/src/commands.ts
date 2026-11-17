@@ -30,7 +30,12 @@ export const RunStartCommandSchema = z.looseObject({
     modelPolicy: ModelPolicySchema,
     budget: BudgetSchema,
     approvalMode: ApprovalModeSchema,
-    maxTurns: z.int().positive().optional()
+    maxTurns: z.int().positive().optional(),
+    /**
+     * Which capability tree (C7) the run reads: current (default), candidate,
+     * or a version number. The tree gate pins a candidate this way.
+     */
+    treeVersion: z.string().regex(/^(current|candidate|\d{1,8})$/).optional()
   })
 });
 

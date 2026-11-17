@@ -1,4 +1,5 @@
 import { economyTools } from "./economy-tools.js";
+import type { KnowledgeOptions } from "./knowledge.js";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -73,6 +74,8 @@ export interface OpenCrowdRuntimeOptions {
   llmProvider: (session: SessionState) => Promise<RuntimeLlm>;
   /** Resolve the paid-capability port for a session; undefined disables paid tools. */
   economy?: (session: SessionState) => Promise<EconomyPort | undefined>;
+  /** Which service knowledge tree to load (default: the bundled snapshot). */
+  knowledge?: KnowledgeOptions;
 }
 
 export interface RuntimeRunOptions {
@@ -129,7 +132,8 @@ export function createOpenCrowdRuntime(options: OpenCrowdRuntimeOptions): OpenCr
       ...(llm.kind === "typed"
         ? { llm: llm.main, subagent: llm.subagent, promptSections: llm.promptSections }
         : { provider: llm.provider, toolExecutor: llm.toolExecutor }),
-      ...(paidTools ? { dynamicTools: paidTools, completionGate: paidTools.completionGate } : {})
+      ...(paidTools ? { dynamicTools: paidTools, completionGate: paidTools.completionGate } : {}),
+      ...(options.knowledge ? { knowledge: options.knowledge } : {})
     };
   }
 

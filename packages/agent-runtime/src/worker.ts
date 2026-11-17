@@ -15,7 +15,7 @@ import type { EconomyGateway } from "@opencrowd/economy";
 import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { toolDeadlineError, toolDeadlineMs } from "./tool-deadlines.js";
-import { loadKnowledgeTree } from "./knowledge.js";
+import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions, type LiveTreeOptions } from "./knowledge.js";
 
 /** Above this the durable state is repaired on load rather than carried. Large
  * enough that an ordinary run of capped tool results never triggers it. */
@@ -117,6 +117,8 @@ export interface WorkerOptions {
   id?: () => string;
   /** Test hook: the backstop deadline for one tool call, in milliseconds. */
   toolDeadlineMs?: (name: string) => number;
+  /** CrowdCode's live capability tree (default: read it); false keeps the bundled snapshot. */
+  liveTree?: false | LiveTreeOptions;
 }
 
 /** Durable single-agent process boundary. stdout is exclusively validated protocol. */
@@ -410,7 +412,7 @@ export class MachineWorker {
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
           completionGate: (alreadyNudged, signals) => dynamicTools!.completionGate(alreadyNudged, signals),
-          knowledge: await this.knowledgeOption(session)
+          ...await this.capabilityIndex(session, run.start.payload.treeVersion, !!run.checkpoint)
         } : {}),
         onCheckpoint: async (checkpoint) => {
           await this.mutate(() => { run.checkpoint = checkpoint; run.checkpointId = randomUUID(); });
@@ -473,10 +475,26 @@ export class MachineWorker {
     }
   }
 
-  /** Keep the bundled knowledge tree when it loads; a broken snapshot must never fail a hosted run. */
-  private async knowledgeOption(session: SessionState): Promise<false | undefined> {
-    try { await loadKnowledgeTree(session, {}); return undefined; }
-    catch { return false; }
+  /**
+   * CrowdCode's live capability tree, else the bundled snapshot; a tree that
+   * cannot load must never fail a hosted run. Loaded once here and handed to
+   * the loop as its rendered index, so a run makes one fetch at most.
+   *
+   * A run pinned by `run.start` `treeVersion` (W8's gate: `candidate` or a
+   * version number) fetches `GET /api/tree?version=<value>` itself, past the
+   * per-process cache. A resumed run keeps the prompt in its checkpoint, so
+   * nothing is reloaded and the session keeps the version that prompt came from.
+   */
+  private async capabilityIndex(session: SessionState, treeVersion: string | undefined, resuming: boolean): Promise<{ capabilityIndex?: string; knowledge: false }> {
+    if (resuming) return { knowledge: false };
+    const live = this.options.liveTree;
+    const options: KnowledgeOptions = live === false ? {} : { live: { ...live, ...(treeVersion ? { version: treeVersion, fresh: true } : {}) } };
+    try {
+      const loaded = await loadKnowledgeTree(session, options);
+      return loaded ? { capabilityIndex: renderCapabilityIndex(loaded.l0, loaded.tree !== undefined), knowledge: false } : { knowledge: false };
+    } catch {
+      return { knowledge: false };
+    }
   }
 
   private async history(session: SessionState): Promise<LoopCheckpoint["messages"]> {

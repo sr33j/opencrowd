@@ -1,6 +1,7 @@
 import { setSpendingHandler, type SpendingHandler, type ProgressEvent, type SessionState } from "@opencrowd/core";
 import {
   EconomyGateway,
+  createCrowdCodeApi,
   MockAgentCashAdapter,
   MockCrowdCodeAdapter,
   sharedEconomyRuntime,
@@ -135,7 +136,9 @@ function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) 
         promptSections: await vendorInstructions()
       } satisfies RuntimeLlm;
     },
-    economy: (current) => buildGateway(current, options)
+    economy: (current) => buildGateway(current, options),
+    // CrowdCode's live capability tree, the bundled snapshot when it cannot be read; demo runs stay offline.
+    ...(options.testMode || connectorsDisabled() ? {} : { knowledge: { live: true } })
   });
 }
 
@@ -168,6 +171,7 @@ async function buildGateway(
       session,
       agentcash: runtime.agentcash,
       crowdcode: runtime.crowdcode,
+      crowdcodeApi: createCrowdCodeApi(),
       approvalMode: session.approvalMode,
       approvalHandler: options.approvalHandler,
       onProgress: options.onProgress

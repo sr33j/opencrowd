@@ -20,7 +20,9 @@ const TOOL_DEADLINE_MS: Record<string, number> = {
   // Its own ceiling is PAY_TIMEOUT_MS (gateway + 30s) for the payment, plus
   // inspection, the reputation check and one reconcile before that.
   call_paid_service: SERVICE_BRIDGE_TIMEOUT_MS + 120_000,
-  // Catalogs, a ranking call and a bounded probe sweep.
+  // One read of CrowdCode's tree, bounded at ten seconds inside.
+  browse_services: 60_000,
+  // Catalogs, a ranking call, a bounded probe sweep and reliability lookups.
   find_paid_service: 180_000,
   inspect_paid_service: 120_000,
   read_service: 120_000,

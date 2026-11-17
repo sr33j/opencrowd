@@ -35,7 +35,7 @@ export interface SearchOptions {
   rank?: ServiceRanker;
 }
 
-export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality first, then effective price on best_network (including about $0.03 to move USDC between your own networks when that network's balance is short), then your balance there. Prefer the highest-ranked service that fits the task, whatever its network. Each result's `networks` are the networks it can be paid on; between results that fit the task equally well, one you can pay from a balance you already hold beats one that needs a transfer first. transfer_needed means your balance on best_network is short: move USDC between your own networks first if you have a tool for that; otherwise say which network needs funds. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.";
+export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality, then effective price on best_network (about $0.03 more when USDC must move there first), then your balance. `networks` are where each can be paid; between equal fits, prefer one you already hold USDC on. transfer_needed: move USDC between your own networks first if you can, else say which network needs funds. Inspect the chosen endpoint before paying.";
 
 export interface DiscoveryOptions {
   /** Preferred settlement network when a service offers several (default base). */

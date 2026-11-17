@@ -225,6 +225,8 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ action: text(args.action), automation_id: text(args.automation_id), name: text(args.name), prompt: text(args.prompt, 120) });
     case "complete_session":
       return pick({ summary: text(args.final_message ?? args.summary ?? args.message) });
+    case "browse_services":
+      return pick({ node: text(args.node, 80) });
     case "find_paid_service":
       return pick({ query: text(args.query), origin: text(args.origin) });
     case "inspect_paid_service":
