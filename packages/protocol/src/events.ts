@@ -255,6 +255,20 @@ export const CheckpointCompletedEventSchema = z.looseObject({
   })
 });
 
+/**
+ * The service knowledge tree a run actually read (C7). `version` is the id on
+ * `session.knowledge` (`capability-tree-v<n>`, or the bundled snapshot's id);
+ * `tree` is the number when it came from CrowdCode's `/api/tree`; `fallback`
+ * says why the bundled snapshot was used instead. The tree gate counts a
+ * pinned run only when `tree` is the version it pinned.
+ */
+export const RunKnowledgeSchema = z.looseObject({
+  version: z.string().min(1).max(200),
+  tree: z.int().nonnegative().optional(),
+  fallback: z.string().max(500).optional()
+});
+export type RunKnowledge = z.infer<typeof RunKnowledgeSchema>;
+
 export const RunFinishedEventSchema = z.looseObject({
   ...runScoped,
   type: z.literal("run.finished"),
@@ -267,7 +281,9 @@ export const RunFinishedEventSchema = z.looseObject({
     /** For waiting outcomes: the operation that must be resolved before `run.resume`. */
     pendingOperationId: IdSchema.optional(),
     turns: z.int().nonnegative().optional(),
-    error: z.looseObject({ code: z.string().min(1), message: z.string() }).optional()
+    error: z.looseObject({ code: z.string().min(1), message: z.string() }).optional(),
+    /** The knowledge tree this run's prompt was built from; absent when it read none (chat-only, no paid tools). */
+    knowledge: RunKnowledgeSchema.optional()
   })
 });
 

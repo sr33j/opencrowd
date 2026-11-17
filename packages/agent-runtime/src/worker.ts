@@ -8,7 +8,7 @@ import {
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
-  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, PAYMENT_RECONCILING_MESSAGE, upstreamRefusalSummary, type CommandOf, type Event, type EventType,
+  encodeEvent, parseCommandLine, RUN_FAILURE_MESSAGE, PAYMENT_RECONCILING_MESSAGE, upstreamRefusalSummary, type CommandOf, type Event, type EventType, type RunKnowledge,
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
@@ -90,6 +90,8 @@ interface DurableRun {
   checkpointId: string;
   pendingOperationId?: string;
   summary?: string;
+  /** The knowledge tree the run's prompt was built from, reported on run.finished (C7). */
+  knowledge?: RunKnowledge;
   tools: Record<string, { digest: string; result?: ToolResult; approvalPending?: boolean }>;
 }
 export interface WorkerState {
@@ -243,7 +245,7 @@ export class MachineWorker {
       for (const message of run.inbox ?? []) if (run.checkpoint?.deliveredMessageIds?.includes(message.id))
         await this.emit("user.message", { messageId: message.id, content: message.prompt }, command.runId, message.id);
       await this.emit("run.finished", { sessionId: run.sessionId, outcome: run.outcome, checkpointId: run.checkpointId,
-        summary: run.summary, pendingOperationId: run.pendingOperationId }, command.runId, command.id);
+        summary: run.summary, pendingOperationId: run.pendingOperationId, ...(run.knowledge ? { knowledge: run.knowledge } : {}) }, command.runId, command.id);
       return;
     }
     // A previously accepted resume may have been interrupted after clearing
@@ -412,7 +414,7 @@ export class MachineWorker {
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
           completionGate: (alreadyNudged, signals) => dynamicTools!.completionGate(alreadyNudged, signals),
-          ...await this.capabilityIndex(session, run.start.payload.treeVersion, !!run.checkpoint)
+          ...await this.capabilityIndex(session, run, !!run.checkpoint)
         } : {}),
         onCheckpoint: async (checkpoint) => {
           await this.mutate(() => { run.checkpoint = checkpoint; run.checkpointId = randomUUID(); });
@@ -485,16 +487,23 @@ export class MachineWorker {
    * per-process cache. A resumed run keeps the prompt in its checkpoint, so
    * nothing is reloaded and the session keeps the version that prompt came from.
    */
-  private async capabilityIndex(session: SessionState, treeVersion: string | undefined, resuming: boolean): Promise<{ capabilityIndex?: string; knowledge: false }> {
+  private async capabilityIndex(session: SessionState, run: DurableRun, resuming: boolean): Promise<{ capabilityIndex?: string; knowledge: false }> {
     if (resuming) return { knowledge: false };
+    const treeVersion = run.start.payload.treeVersion;
     const live = this.options.liveTree;
     const options: KnowledgeOptions = live === false ? {} : { live: { ...live, ...(treeVersion ? { version: treeVersion, fresh: true } : {}) } };
+    let loaded;
     try {
-      const loaded = await loadKnowledgeTree(session, options);
-      return loaded ? { capabilityIndex: renderCapabilityIndex(loaded.l0, loaded.tree !== undefined), knowledge: false } : { knowledge: false };
+      loaded = await loadKnowledgeTree(session, options);
     } catch {
       return { knowledge: false };
     }
+    if (!loaded) return { knowledge: false };
+    const fallback = session.knowledge?.version === loaded.version ? session.knowledge.fallback : undefined;
+    const knowledge: RunKnowledge = { version: loaded.version, ...(loaded.tree !== undefined ? { tree: loaded.tree } : {}),
+      ...(fallback ? { fallback: scrubText(fallback).slice(0, 500) } : {}) };
+    await this.mutate(() => { run.knowledge = knowledge; });
+    return { capabilityIndex: renderCapabilityIndex(loaded.l0, loaded.tree !== undefined), knowledge: false };
   }
 
   private async history(session: SessionState): Promise<LoopCheckpoint["messages"]> {
@@ -517,7 +526,7 @@ export class MachineWorker {
       reason: outcome === "cancelled" ? "cancel" : isWaiting(outcome) ? "waiting" : "terminal",
       pendingOperationIds: run.pendingOperationId ? [run.pendingOperationId] : [] }, runId, run.commandId);
     await this.emit("run.finished", { sessionId: run.sessionId, outcome, summary,
-      checkpointId: run.checkpointId, pendingOperationId: run.pendingOperationId }, runId, run.commandId);
+      checkpointId: run.checkpointId, pendingOperationId: run.pendingOperationId, ...(run.knowledge ? { knowledge: run.knowledge } : {}) }, runId, run.commandId);
   }
 
   async drain(): Promise<void> { await this.running; await this.writes; }
