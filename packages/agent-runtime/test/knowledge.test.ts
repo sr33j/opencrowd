@@ -188,7 +188,8 @@ describe("CrowdCode's live capability tree (C7)", () => {
       await worker.initialize(); await worker.handleLine(JSON.stringify(start(treeVersion))); await worker.drain();
       const recorded = JSON.parse(await readFile(join(agentHome, "workspace/sessions/session-1/session.json"), "utf8")) as SessionState;
       await rm(agentHome, { recursive: true, force: true });
-      return { system, outcome: events.filter((e) => e.type === "run.finished").at(-1)?.payload.outcome, knowledge: recorded.knowledge };
+      const finished = events.filter((e) => e.type === "run.finished").at(-1) as Extract<Event, { type: "run.finished" }> | undefined;
+      return { system, outcome: finished?.payload.outcome, knowledge: recorded.knowledge, reported: finished?.payload.knowledge };
     }
 
     it("reads the tree a run.start pins and records its version on the session", async () => {
@@ -197,6 +198,8 @@ describe("CrowdCode's live capability tree (C7)", () => {
       expect(result.outcome).toBe("completed");
       expect(result.system).toContain(L0);
       expect(result.knowledge).toMatchObject({ version: "capability-tree-v4", tree: 4 });
+      // run.finished reports the tree this run read, for the tree gate (W8).
+      expect(result.reported).toEqual({ version: "capability-tree-v4", tree: 4 });
       // The worker's load and the loop's load share one fetch.
       expect(urls).toEqual([`${BASE}/api/tree?version=candidate`]);
     });
@@ -213,6 +216,18 @@ describe("CrowdCode's live capability tree (C7)", () => {
       expect(urls).toEqual([`${BASE}/api/tree`]);
     });
 
+    it("reports no tree for a run that read none", async () => {
+      const agentHome = await mkdtemp(join(tmpdir(), "oc-live-tree-"));
+      const events: Event[] = [];
+      const provider: LlmProvider = { async complete() { return { content: "4", toolCalls: [{ id: "c", name: "complete_session", arguments: { final_message: "4" } }] }; } };
+      const worker = new MachineWorker({ agentHome, output: (line) => { events.push(JSON.parse(line)); }, provider: () => provider, liveTree: false });
+      await worker.initialize(); await worker.handleLine(JSON.stringify(start())); await worker.drain();
+      await rm(agentHome, { recursive: true, force: true });
+      const finished = events.filter((e) => e.type === "run.finished").at(-1) as Extract<Event, { type: "run.finished" }>;
+      expect(finished.payload.outcome).toBe("completed");
+      expect(finished.payload.knowledge).toBeUndefined();
+    });
+
     it("rejects a malformed pin at the protocol boundary", () => {
       expect(RunStartCommandSchema.safeParse(start("candidate")).success).toBe(true);
       expect(RunStartCommandSchema.safeParse(start("7")).success).toBe(true);
@@ -227,6 +242,9 @@ describe("CrowdCode's live capability tree (C7)", () => {
       expect(Date.now() - started).toBeLessThan(8_000);
       expect(result.system).toContain("Service knowledge base (derived from CrowdCode reviews");
       expect(result.knowledge?.fallback).toMatch(/capability tree unavailable/);
+      expect(result.reported?.version).toBe(result.knowledge?.version);
+      expect(result.reported?.tree).toBeUndefined();
+      expect(result.reported?.fallback).toMatch(/capability tree unavailable/);
     }, 15_000);
   });
 });

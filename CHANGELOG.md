@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.12 — 2026-11-17
+
+- **`run.finished` reports the knowledge tree the run read** as `payload.knowledge`: `{ version, tree?, fallback? }`. `version` is the id on `session.knowledge` (`capability-tree-v<n>`, or the bundled snapshot's id); `tree` is the number when the tree came from CrowdCode's `/api/tree`; `fallback` says why the bundled snapshot was used. A run that read no tree (chat-only, no paid tools) carries none; a resumed run reports the tree it started with. CrowdCode's tree gate counts a pinned run only when `tree` is the version it pinned. New protocol export: `RunKnowledgeSchema`.
+
 ## 0.16.11 — 2026-11-17
 
 - **The agent reads CrowdCode's live capability tree (SRI-115 C7).** At session start, hosted runs and the CLI fetch `GET /api/tree` from CrowdCode and put its `l0` in the system prompt in place of the snapshot bundled on 2026-09-14. The tree is rebuilt nightly from verified purchases and daily probes and says, per capability, when to look, when not to buy and which reliable service to use. The fetch has two seconds and is cached for an hour per process, so a chat's runs keep a byte-identical prompt and prompt caching holds. If CrowdCode cannot be reached the bundled snapshot is used and the run goes ahead. The session records `knowledge.version` (`capability-tree-v<n>`) and `knowledge.tree`, or `knowledge.fallback` with the reason. `run.start` takes an optional `payload.treeVersion` (`candidate` or a version number; `current` is accepted too): that run fetches `GET /api/tree?version=<value>` past the per-process cache, so a candidate tree can be evaluated before it is published. `OPENCROWD_TREE_VERSION` pins the CLI the same way. A resumed run does not reload the tree; its prompt and its `browse_services` calls stay on the version it started with. `OPENCROWD_CROWDCODE_URL` points both at another backend.

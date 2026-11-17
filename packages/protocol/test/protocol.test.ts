@@ -298,3 +298,20 @@ describe("primitives and helpers", () => {
     expect(tracker.last).toBe(6);
   });
 });
+
+describe("run.finished knowledge (C7, read by the tree gate)", () => {
+  const finished = (knowledge: unknown) => ({ protocolVersion: PROTOCOL_VERSION, id: "e-1", seq: 3, emittedAt: "2026-11-17T00:00:00Z", runId: "run-1", commandId: "command-1",
+    type: "run.finished" as const, payload: { sessionId: "session-1", outcome: "completed" as const, knowledge } });
+
+  it("keeps the tree the run read through encoding", () => {
+    const encoded = JSON.parse(encodeEvent(finished({ version: "capability-tree-v5", tree: 5 }) as never));
+    expect(encoded.payload.knowledge).toEqual({ version: "capability-tree-v5", tree: 5 });
+    const fallback = JSON.parse(encodeEvent(finished({ version: "g1-c1@0593ef60", fallback: "CrowdCode capability tree unavailable: HTTP 503" }) as never));
+    expect(fallback.payload.knowledge.fallback).toContain("HTTP 503");
+  });
+
+  it("refuses a malformed one", () => {
+    expect(() => encodeEvent(finished({ tree: 5 }) as never)).toThrow();
+    expect(() => encodeEvent(finished({ version: "capability-tree-v5", tree: "5" }) as never)).toThrow();
+  });
+});
