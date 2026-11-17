@@ -1,5 +1,7 @@
 # Image, video, and audio
 
+Hard rule: when the owner asks for a video, image or audio, deliver a real file from a model. Never substitute SVG, HTML, CSS or canvas animation, or a slideshow, unless the owner asks for one.
+
 ## Ranked paid paths
 - **StableStudio Flux 2 Pro** — `https://stablestudio.dev/api/generate/flux-2-pro/generate`; mppx Tempo; $0.40–$3.20/job observed; **3.94/5, n_eff 6.6**.
   - Async jobs produced valid artifacts with good visual adherence [svc_845113a14ce0efabe6f0#r1] [svc_845113a14ce0efabe6f0#r2]. Text can be gibberish and polling can take seconds to minutes [svc_845113a14ce0efabe6f0#r3] [svc_845113a14ce0efabe6f0#r4].
@@ -12,4 +14,4 @@
   - Generated a usable high-resolution image [svc_75aece0751a86841b923#r1], but labels may be missing or hallucinated.
 
 ## Cheapest correct path
-- Reuse assets or use SVG/Pillow/ImageMagick/local TTS first. For requested generation, avoid repeated inspect/discovery turns and save the final artifact locally.
+- When the owner asks for a video, image or audio, buy it from a model: an SVG, HTML, CSS or canvas animation, a slideshow or a drawn placeholder is not a substitute unless the owner asks for one. Reuse an existing asset, or use Pillow/ImageMagick/ffmpeg, only to edit, convert or resize a real file. Avoid repeated inspect/discovery turns, and save the final artifact locally.

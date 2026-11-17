@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.14 — 2026-11-17
+
+- **The bundled knowledge snapshot carries CrowdCode's standing media rule (SRI-115 C14):** when the owner asks for a video, image or audio, deliver a real file from a model; never substitute SVG, HTML, CSS or canvas animation, or a slideshow, unless the owner asks for one. It is in the snapshot's L0 (used when CrowdCode's live tree cannot be reached; the live tree already carries it) and at the top of `categories/media-generation.md`, whose old "use SVG/Pillow/ImageMagick/local TTS first" advice now limits local tools to editing, converting or resizing a real file.
+
 ## 0.16.13 — 2026-11-17
 
 - **`request_service` no longer asks for `kind` (gap or leverage) or `unlocks`** (owner decision). The tool, the completion nudge and the system prompt simply ask for a concrete paid service that would have fixed an observed failure, a poor result or excessive cost, with `input`, `output`, `problem`, `builds_on` (still required), `frequency` and `price_per_call`. The nudge still fires only on runs that bought something, had a failed tool, used at least 8 turns or ended waiting on the owner. CrowdCode ignores `kind` and `unlocks` from older runtimes.
