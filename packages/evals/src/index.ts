@@ -10,3 +10,4 @@ export * from "./suite.js";
 export * from "./evidence.js";
 export * from "./knowledge.js";
 export * from "./evolve.js";
+export { bestOf, dominates, pickParentFrom, seededUnit, type Scored, type ScoredRow } from "./selection.js";
