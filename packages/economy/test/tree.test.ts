@@ -151,6 +151,29 @@ describe("the gateway's view of the tree and reliability", () => {
     expect(Buffer.byteLength(JSON.stringify(data)) / 3).toBeLessThan(800);
   });
 
+  it("shows the tier and why CrowdCode's index search carries, in CrowdCode's order, without a lookup per result", async () => {
+    const calls: string[] = [];
+    const { gateway } = await gatewayWith(api(calls));
+    const agentcash = (gateway as unknown as { options: { agentcash: MockAgentCashAdapter } }).options.agentcash;
+    const tiered = [
+      { ...ranked[2], tier: "proven", why: "185 of 185 judged purchases delivered", model: "veo-3.1", capability: "video.generation" },
+      { ...ranked[0], tier: "new", why: "3 payers in 30 days; no judged purchase yet", explore: true },
+      { ...ranked[1], tier: "bad", why: "the last daily probes all failed" }
+    ];
+    agentcash.search = async () => ({ ok: true, data: { services: structuredClone(tiered), note: "Ranked by CrowdCode" } });
+    const result = await gateway.execute("find_paid_service", { query: "generate a video" });
+    const data = result.data as { services: Record<string, unknown>[]; note: string; bad_left_out?: string[] };
+    expect(calls.filter((call) => call.startsWith("reliability"))).toEqual([]);
+    expect(data.services.map((service) => [service.name, service.tier, service.why, service.explore])).toEqual([
+      ["C", "proven", "185 of 185 judged purchases delivered", undefined],
+      ["A", "new", "3 payers in 30 days; no judged purchase yet", true]
+    ]);
+    expect(data.services[0]).toMatchObject({ model: "veo-3.1", capability: "video.generation" });
+    expect(data.services[0].reliability).toBeUndefined();
+    expect(data.bad_left_out).toEqual(["https://b.example/search"]);
+    expect(data.note).toContain("exploration allowance");
+  });
+
   it("asks for six ranked results unless the agent asks for more", async () => {
     const { gateway } = await gatewayWith(api());
     const limits: unknown[] = [];

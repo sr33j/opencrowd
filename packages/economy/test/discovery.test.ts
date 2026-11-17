@@ -33,6 +33,16 @@ it("ranks with CrowdCode even when AgentCash search fails, probing GET when a ca
   expect((result.data as any).services).toHaveLength(1);
 });
 
+it("keeps the tier, why, model, capability and explore flag CrowdCode's index search ranks with (C13)", async () => {
+  check.mockImplementation(async () => ({ found: true, advisories: [{ method: "POST", authMode: "paid", paymentOptions: [{ protocol: "x402", network: "eip155:8453", asset: BASE_USDC, amount: "400000", payTo: "0xbase" }] }] }));
+  const rank = vi.fn(async () => ({ ok: true, data: { services: [
+    { rank: 1, endpoint: "https://video.example/veo", method: "POST", tier: "popular", why: "12 payers in 30 days on the x402 Bazaar", model: "veo-3.1",
+      capability: "video.generation", explore: true, best: { network: "base", effective_price_usd: 0.4 } }] } }));
+  const result = await new BaseServiceDiscovery(async () => ({ ok: true, data: { results: [] } })).search("generate a video", { rank });
+  expect((result.data as any).services[0]).toMatchObject({ endpoint: "https://video.example/veo", tier: "popular", why: "12 payers in 30 days on the x402 Bazaar",
+    model: "veo-3.1", capability: "video.generation", explore: true, best_network: "base", effective_price_usd: 0.4 });
+});
+
 it("lists every network a result can be paid on, so a caller short on one can prefer another", async () => {
   // A quote sold only on Tempo next to one payable on Base or Solana: the
   // difference has to be visible in the search result, not only after a 402.
