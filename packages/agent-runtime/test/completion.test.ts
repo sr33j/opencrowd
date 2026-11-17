@@ -216,7 +216,8 @@ describe("the reflection is asked only of runs that earned it (SRI-115 C6)", () 
     });
     expect(await tools.completionGate(false, plain)).toBeUndefined();
     const prompt = await tools.completionGate(false, { ...plain, paidCalls: 1 });
-    expect(prompt).toContain("leverage");
+    expect(prompt).toContain("fixed an observed failure, a poor result or excessive cost");
+    expect(prompt).not.toMatch(/leverage|unlocks|kind,/);
     expect(prompt).toContain("builds_on");
     expect(await tools.completionGate(false, { ...plain, paidCalls: 1 })).toBeUndefined();
   });
@@ -244,3 +245,4 @@ describe("the reflection is asked only of runs that earned it (SRI-115 C6)", () 
     expect(provider.complete).toHaveBeenCalledTimes(1);
   });
 });
+

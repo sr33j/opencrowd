@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.13 — 2026-11-17
+
+- **`request_service` no longer asks for `kind` (gap or leverage) or `unlocks`** (owner decision). The tool, the completion nudge and the system prompt simply ask for a concrete paid service that would have fixed an observed failure, a poor result or excessive cost, with `input`, `output`, `problem`, `builds_on` (still required), `frequency` and `price_per_call`. The nudge still fires only on runs that bought something, had a failed tool, used at least 8 turns or ended waiting on the owner. CrowdCode ignores `kind` and `unlocks` from older runtimes.
+
 ## 0.16.12 — 2026-11-17
 
 - **`run.finished` reports the knowledge tree the run read** as `payload.knowledge`: `{ version, tree?, fallback? }`. `version` is the id on `session.knowledge` (`capability-tree-v<n>`, or the bundled snapshot's id); `tree` is the number when the tree came from CrowdCode's `/api/tree`; `fallback` says why the bundled snapshot was used. A run that read no tree (chat-only, no paid tools) carries none; a resumed run reports the tree it started with. CrowdCode's tree gate counts a pinned run only when `tree` is the version it pinned. New protocol export: `RunKnowledgeSchema`.

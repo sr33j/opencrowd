@@ -80,6 +80,15 @@ describe("gateway surface", () => {
     const schemaText = JSON.stringify(definitions.map(tool => tool.parameters));
     expect(schemaText).not.toMatch(/payment_proof|tx_hash|signature|private/i);
   });
+
+  it("asks request_service for a concrete fix, without kind or unlocks (owner decision, 2026-11-17)", async () => {
+    const { gateway } = await setup();
+    const tool = gateway.definitions().find((t) => t.name === "request_service")!;
+    const parameters = tool.parameters as { properties: Record<string, unknown>; required: string[] };
+    expect(Object.keys(parameters.properties)).toEqual(["input", "output", "problem", "builds_on", "frequency", "price_per_call", "capability"]);
+    expect(parameters.required).toContain("builds_on");
+    expect(tool.description).not.toMatch(/leverage|unlocks/i);
+  });
 });
 
 describe("purchase lifecycle", () => {
