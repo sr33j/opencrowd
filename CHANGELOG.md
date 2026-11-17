@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.15 — 2026-11-17
+
+- **`find_paid_service` shows CrowdCode's tier and why (SRI-115 C13).** CrowdCode's search now ranks every offering in its index by a seeded draw of delivery × quality per dollar, and each result carries `tier` (`proven`, `popular` or `new`), `why`, the `model` it sells, its `capability`, and `explore: true` when CrowdCode is trying it ahead of the best-known option. The agent sees them as they are, in CrowdCode's order, and the runtime no longer makes one `/api/reliability` call per result to label them. A `bad` result, which CrowdCode's gateway refuses, is named in `bad_left_out` instead of offered. The search note says what each tier means for payment: proven and popular pay within the owner's caps, new pays from the exploration allowance and above it asks the owner. Results from an older CrowdCode, without tiers, keep the reliability labels as before.
+
 ## 0.16.14 — 2026-11-17
 
 - **The bundled knowledge snapshot carries CrowdCode's standing media rule (SRI-115 C14):** when the owner asks for a video, image or audio, deliver a real file from a model; never substitute SVG, HTML, CSS or canvas animation, or a slideshow, unless the owner asks for one. It is in the snapshot's L0 (used when CrowdCode's live tree cannot be reached; the live tree already carries it) and at the top of `categories/media-generation.md`, whose old "use SVG/Pillow/ImageMagick/local TTS first" advice now limits local tools to editing, converting or resizing a real file.

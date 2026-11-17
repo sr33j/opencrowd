@@ -277,6 +277,13 @@ export class EconomyGateway {
   private async withReliability(data: unknown): Promise<unknown> {
     const services = (data as { services?: unknown } | undefined)?.services;
     if (!this.options.crowdcodeApi || !Array.isArray(services) || !services.length) return data;
+    // CrowdCode's index search already carries each result's tier and why (C13): no lookups needed.
+    if (services.every((service) => typeof (service as { tier?: unknown }).tier === "string")) {
+      const rows = services as Record<string, unknown>[];
+      const refused = rows.filter((row) => row.tier === "bad").map((row) => row.endpoint);
+      return { services: rows.filter((row) => row.tier !== "bad").map((row) => compactService(row, undefined)),
+        ...(refused.length ? { bad_left_out: refused } : {}), note: `${TIER_NOTE} ${COMPACT_RANKED_NOTE}${incompleteNote(data)}` };
+    }
     const states = await Promise.all(services.map((service) => {
       const row = service as { endpoint?: unknown; method?: unknown };
       return typeof row.endpoint === "string" ? this.reliabilityOf(row.endpoint, typeof row.method === "string" ? row.method : "POST") : undefined;
@@ -929,6 +936,8 @@ function numberArg(value: unknown): number | undefined {
 const SEARCH_LIMIT = 6;
 /** Said once per search rather than on every result. */
 const RELIABILITY_NOTE = "Reliable first: it pays automatically within the owner's caps. Unverified may need the owner's approval; say so when you pick one. Unreliable is refused, so it is left out.";
+/** Said once per search over CrowdCode's index (C10, C12, C13). */
+const TIER_NOTE = "Ranked by CrowdCode's evidence: delivery and quality per dollar. tier proven = seen to deliver, popular = many payers and healthy; both pay automatically within the owner's caps. new = little evidence yet: it pays from the exploration allowance, and above it the owner is asked. bad is refused, so it is left out. explore: true means CrowdCode is trying it ahead of the best-known option; prefer the first fit unless the task needs otherwise.";
 const COMPACT_RANKED_NOTE = "Then by quality and effective price on best_network (about $0.03 more if USDC must move there). Between equal fits prefer `networks` you already hold USDC on. Inspect before paying.";
 /** The discovery note's word that the probe sweep ran out of time, kept when the note is rewritten. */
 function incompleteNote(data: unknown): string {
@@ -961,6 +970,7 @@ function compactService(service: Record<string, unknown>, reliability: Reliabili
       .map(([key, value]) => [key, typeof value === "number" && !Number.isInteger(value) ? Math.round(value * 10) / 10 : value]));
     if (Object.keys(kept).length) rest.quality = kept; else delete rest.quality;
   }
+  if (typeof rest.tier === "string") return rest;
   return { ...rest, reliability: reliability ? describeReliability(reliability) : "unverified (CrowdCode could not say)" };
 }
 const NAME_MAX_CHARS = 48;
@@ -1007,7 +1017,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "find_paid_service",
-    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, reliable ones first, each with its CrowdCode reliability state and reason, then by quality and effective price on your best network (including a transfer between your own networks when its balance is short). Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
+    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, best first, each with its CrowdCode tier (proven, popular, new) and why, or its reliability state, ranked by delivery and quality per dollar on your best network (including a transfer between your own networks when its balance is short). Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
     parameters: {
       type: "object",
       properties: {

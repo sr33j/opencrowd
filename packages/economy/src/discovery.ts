@@ -288,6 +288,12 @@ function ranked(ranking: any, schema: any): Record<string, unknown> {
     quality: { score: quality.score, n_eff: quality.n_eff, reviews: quality.num_reviews, verified_reviews: quality.num_verified_reviews,
       ...(quality.unique_payers_30d != null ? { payers_30d: quality.unique_payers_30d } : {}),
       ...(quality.below_floor ? { below_floor: true } : {}) },
-    sources: ranking.sources
+    sources: ranking.sources,
+    // Search over CrowdCode's index (C13): the tier and why, the model and capability, and whether the draw is exploring.
+    ...(typeof ranking.tier === "string" ? { tier: ranking.tier } : {}),
+    ...(typeof ranking.why === "string" ? { why: ranking.why } : {}),
+    ...(ranking.explore === true ? { explore: true } : {}),
+    ...(typeof ranking.model === "string" ? { model: ranking.model } : {}),
+    ...(typeof ranking.capability === "string" ? { capability: ranking.capability } : {})
   };
 }
