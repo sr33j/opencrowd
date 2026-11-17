@@ -471,7 +471,13 @@ export class EconomyGateway {
     // capped, before this body reaches the tool result, the saved artifact,
     // the run journal and the event details.
     if (result.data) result.data = await boundResponse(session, result.data);
-    const artifact = result.ambiguityReason === "transport" ? undefined : await saveArtifact(
+    // Nothing to keep when the seller never answered: a refusal before the
+    // call (the hosted gateway's `service_unreliable`, a rail it cannot pay)
+    // has no status and no body, and saving it left an empty `{}` file among
+    // the owner's files as if it were a receipt. Any real answer is kept,
+    // errors included.
+    const answered = result.status !== undefined || result.data !== undefined;
+    const artifact = result.ambiguityReason === "transport" || !answered ? undefined : await saveArtifact(
       session,
       `service-calls/${Date.now()}-${slugUrl(endpoint)}.json`,
       JSON.stringify({ status: result.status, body: result.data }, null, 2),

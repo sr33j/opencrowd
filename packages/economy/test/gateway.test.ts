@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
@@ -912,5 +912,32 @@ describe("external response bodies", () => {
     expect(result.ok).toBe(true);
     expect((result.data as { mp3?: { media_type?: string } }).mp3).toMatchObject({ bytes: audio.length, media_type: "audio/wav" });
     expect(JSON.stringify(result).length).toBeLessThan(500);
+  });
+});
+
+describe("service-call files", () => {
+  it("saves no file for a call refused before the seller answered, and keeps a real answer even when it is an error", async () => {
+    const refused = new MockAgentCashAdapter({ defaultFetchResult: {
+      ok: false, ambiguous: false, data: undefined, callerError: true,
+      error: "CrowdCode rates POST https://svc.example/api/lookup bad (unreliable), so it was not paid and nothing was signed (service_unreliable)"
+    } });
+    const first = await setup({ agentcash: refused });
+    await inspect(first.gateway);
+    const call = await first.gateway.execute("call_paid_service", { url: ENDPOINT });
+    expect(call.ok).toBe(false);
+    expect(call.error).toContain("service_unreliable");
+    const [purchase] = await listPurchases(first.session);
+    expect(purchase.record.artifact_path).toBeUndefined();
+    const saved = await readdir(join(first.session.sessionDir, "artifacts")).catch(() => [] as string[]);
+    expect(saved.filter((name) => name.startsWith("service-calls"))).toEqual([]);
+
+    const sellerError = new MockAgentCashAdapter({ defaultFetchResult: {
+      ok: false, ambiguous: false, status: 402, authMode: "free", data: undefined, error: "invalid payment requirements"
+    } });
+    const second = await setup({ agentcash: sellerError });
+    await inspect(second.gateway);
+    await second.gateway.execute("call_paid_service", { url: ENDPOINT });
+    const [kept] = await listPurchases(second.session);
+    expect(kept.record.artifact_path).toMatch(/^artifacts\/service-calls\//);
   });
 });

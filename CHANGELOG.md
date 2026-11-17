@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.17 — 2026-11-17
+
+- **A paid call refused before the seller answered no longer leaves an empty file.** When the hosted gateway refuses a call (for example `service_unreliable` for a service CrowdCode rates `bad`, or a payment network hosted agents cannot use), there is no status and no body. The runtime still saved `service-calls/<time>-<url>.json` with `{}` in it, which showed among the owner's files as if it were a receipt. It now saves nothing when the seller never answered. Any real answer is still kept, errors included.
+
 ## 0.16.16 — 2026-11-17
 
 - **The CrowdCode payment floor reads the review mean (SRI-118).** CrowdCode's scoring v4 publishes `score` as the lower of a service's weighted average rating and 5 × the probability it is better than a 3, on 0–5; for a thinly reviewed service that is below the review mean (one 1-star and one 3-star vote: 1.5 against 2.6). The runtime's "refuse services rated below 2" floor, hosted and local, now compares CrowdCode's `score_mean` (the review posterior mean, the number it always compared) and falls back to `score` from a CrowdCode that does not publish it, so v4 does not refuse services their reviews put above the floor. The refusal names the number it compared.
