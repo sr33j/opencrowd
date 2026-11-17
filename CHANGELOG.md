@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.10 — 2026-11-17
+
+- **A long-lived agent's durable state no longer grows with its history.** `worker.json` kept every run the agent ever finished, each with its whole conversation (`checkpoint.messages`) and every tool result, and the worker rewrites the whole file on every event. CrowdCode's canary agent reached 7.5 MB after ~140 runs; on a shared CPU the rewrites exhausted the machine's burst balance (558 s to 0.5 s in half an hour) and from then on the worker could not report ready within the supervisor's 30 s start budget, so every deploy's canary failed (2026-11-17). Now a finished run keeps only what a replay needs (outcome, summary, ids, inbox, delivered message ids); the newest 20 finished runs and the last 1,000 command ids are kept; active and waiting runs are untouched. A state written by an older runtime is compacted once at boot. New exports: `compactWorkerState`, `KEEP_FINISHED_RUNS`, `KEEP_COMMANDS`, `WorkerState`.
+
 ## 0.16.9 — 2026-11-17
 
 - **The completion reflection is asked only of runs that earned it (SRI-115 C6).** It used to cost an extra model turn on every run with CrowdCode on, and produced "N/A" filler and restated tasks. Now it fires only when the run bought something (a successful `call_paid_service`), had a failed tool, used at least 8 turns, or ended waiting on the owner (an answer that hands a step back, such as "you'll need to book it on the airline's site"). A one-question run finishes without it. The gate receives `CompletionSignals` (`turns`, `failedTools`, `paidCalls`, `finalMessage`), derived from the run's own messages so they survive a checkpoint restart; `completionSignals()` and `reflectionTrigger()` are exported.

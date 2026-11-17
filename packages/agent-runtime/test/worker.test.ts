@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { MachineWorker, RuntimePause, createWorkerDemoProvider } from "../src/worker.js";
+import { KEEP_FINISHED_RUNS, MachineWorker, RuntimePause, compactWorkerState, createWorkerDemoProvider, type WorkerState } from "../src/worker.js";
 import { type Command, type Event } from "@opencrowd/protocol";
 import { createSession, readArtifact } from "@opencrowd/core";
 import { runAgentTaskDetailed, type LoopCheckpoint } from "../src/index.js";
@@ -31,6 +31,73 @@ describe("durable JSONL worker", () => {
     const messages = await readFile(join(home,"workspace/sessions/session-1/messages.jsonl"),"utf8");
     expect(messages.match(/Write a report/g)).toHaveLength(2); // user prompt plus artifact tool content
     expect(messages.split('\n').filter(Boolean).map(l=>JSON.parse(l).message).filter(m=>m.role==='user')).toHaveLength(1);
+  });
+
+  it("keeps the durable state proportional to what can still happen, not to the agent's history", async () => {
+    // The canary agent's worker.json reached 7.5 MB after ~140 runs (every
+    // finished run kept its whole conversation and tool results); rewriting it
+    // on every event exhausted the machine's CPU burst and the worker could no
+    // longer report ready within the supervisor's 30 s (2026-11-17).
+    const big = "x".repeat(20_000);
+    const checkpoint = (delivered: string[] = []) => ({ deliveredMessageIds: delivered, messages: [{ role: "user", content: big }],
+      turn: 3, completedTools: { a: { ok: true, data: big } }, completionNudges: 0, outputContinuationNudges: 0,
+      outputContinuationPrefix: "", serviceCallFailures: 0, repeatedFailures: [] }) as unknown as LoopCheckpoint;
+    const runs: WorkerState["runs"] = Object.create(null);
+    const commands: Record<string, string> = Object.create(null);
+    for (let i = 0; i < 60; i++) {
+      runs[`run-${i}`] = { start: start(`command-${i}`, `run-${i}`) as never, sessionId: "session-1", commandId: `command-${i}`,
+        checkpointId: `cp-${i}`, outcome: "completed", summary: `done ${i}`, checkpoint: checkpoint(i === 59 ? ["m-1"] : []),
+        tools: { "1:t": { digest: "d", result: { ok: true, data: big } } } };
+      commands[`command-${i}`] = "digest";
+    }
+    for (let i = 0; i < 1500; i++) commands[`extra-${i}`] = "digest";
+    runs["waiting"] = { start: start("command-w", "waiting") as never, sessionId: "session-1", commandId: "command-w", checkpointId: "cp-w",
+      outcome: "waiting_for_approval", checkpoint: checkpoint(), tools: { "1:t": { digest: "d", result: { ok: true, data: big } } } };
+    runs["active"] = { start: start("command-a", "active") as never, sessionId: "session-1", commandId: "command-a", checkpointId: "cp-a",
+      checkpoint: checkpoint(), tools: { "1:t": { digest: "d", result: { ok: true, data: big } } } };
+    commands["command-w"] = "digest"; commands["command-a"] = "digest";
+    const state: WorkerState = { version: 1, seq: 9, commands, runs, activeRunId: "active" };
+    const before = JSON.stringify(state).length;
+
+    expect(compactWorkerState(state)).toBe(true);
+
+    const finished = Object.keys(state.runs).filter(id => id.startsWith("run-"));
+    expect(finished).toHaveLength(KEEP_FINISHED_RUNS);
+    expect(finished[0]).toBe(`run-${60 - KEEP_FINISHED_RUNS}`); // the newest are the ones kept
+    expect(state.runs["run-59"].checkpoint).toEqual({ deliveredMessageIds: ["m-1"] });
+    expect(state.runs["run-58"].checkpoint).toBeUndefined();
+    expect(Object.keys(state.runs["run-59"].tools)).toHaveLength(0);
+    expect(state.runs["run-59"]).toMatchObject({ outcome: "completed", summary: "done 59", commandId: "command-59", checkpointId: "cp-59" });
+    // Runs that may still resume are untouched.
+    expect(state.runs.waiting.checkpoint?.messages).toHaveLength(1);
+    expect(Object.keys(state.runs.active.tools)).toHaveLength(1);
+    // Kept runs' commands survive the command cap; the oldest strays do not.
+    expect(state.commands["command-w"]).toBe("digest");
+    expect(state.commands["command-59"]).toBe("digest");
+    expect(state.commands["command-0"]).toBeUndefined();
+    expect(Object.keys(state.commands).length).toBeLessThanOrEqual(1000 + KEEP_FINISHED_RUNS + 2);
+    expect(JSON.stringify(state).length).toBeLessThan(before / 10);
+    expect(compactWorkerState(state)).toBe(false); // idempotent
+  });
+
+  it("sheds an uncompacted state on boot and still replays a kept finished run", async () => {
+    const home = await root(); const events: Event[] = [];
+    const options = { agentHome: home, provider: vi.fn(() => createWorkerDemoProvider()), output: (line: string) => { events.push(JSON.parse(line)); } };
+    const first = new MachineWorker(options); await first.initialize();
+    await first.handleLine(JSON.stringify(start())); await first.drain();
+    const statePath = join(home, "metadata/worker.json");
+    const saved = JSON.parse(await readFile(statePath, "utf8")) as WorkerState;
+    // A finished run as the old runtime kept it: whole conversation, all results.
+    saved.runs["run-1"].checkpoint = { messages: [{ role: "user", content: "y".repeat(500_000) }], turn: 2, completedTools: {} } as never;
+    saved.runs["run-1"].tools = { "1:t": { digest: "d", result: { ok: true, data: "z".repeat(500_000) } } };
+    await writeFile(statePath, JSON.stringify(saved));
+
+    const rebooted = new MachineWorker(options); await rebooted.initialize();
+    expect((await readFile(statePath, "utf8")).length).toBeLessThan(50_000);
+    events.length = 0;
+    await rebooted.handleLine(JSON.stringify(start())); await rebooted.drain();
+    expect(options.provider).toHaveBeenCalledTimes(1); // replayed, not re-run
+    expect(events.find(e => e.type === "run.finished")?.payload.outcome).toBe("completed");
   });
 
   it("repairs a durable state that already holds an oversized tool result, instead of dying on it", async () => {
@@ -76,8 +143,10 @@ describe("durable JSONL worker", () => {
     await restarted.drain();
     expect(operations).toEqual(['run-1:llm:0','run-1:llm:0']);
     expect(events.filter(e=>e.type==='run.finished').at(-1)?.payload.outcome).toBe('completed');
-    const saved = JSON.parse(await readFile(join(home,'metadata/worker.json'),'utf8'));
-    expect(saved.runs['run-1'].checkpoint.messages.filter(m=>m.role==='user')).toHaveLength(1);
+    // The finished run's checkpoint is compacted away; the session log is the
+    // durable record of the conversation, and it holds the prompt once.
+    const messages = await readFile(join(home,'workspace/sessions/session-1/messages.jsonl'),'utf8');
+    expect(messages.split('\n').filter(Boolean).map(l=>JSON.parse(l).message).filter(m=>m.role==='user')).toHaveLength(1);
   });
 
   it("reads cancellation while a model request is active and emits one terminal outcome", async () => {

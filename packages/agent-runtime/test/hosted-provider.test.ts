@@ -59,8 +59,10 @@ it('survives SIGKILL after a completed tool and resumes the same model operation
     // and failed nothing ends there, with no reflection turn (SRI-115 C6).
     expect(operations).toEqual(['kill-run:llm:0','kill-run:llm:1','kill-run:llm:1']);
     expect(await readFile(join(home,'data/workspace/sessions/kill-session/artifacts/result.md'),'utf8')).toBe(before);
-    const state=JSON.parse(await readFile(join(home,'data/metadata/worker.json'),'utf8'));
-    expect(state.runs['kill-run'].checkpoint.messages.filter((m:{role:string;content:string})=>m.role==='user' && !m.content.includes('reflect once'))).toHaveLength(1);
+    // The finished run's checkpoint is compacted away (worker.ts compactWorkerState);
+    // the session log is the durable conversation, and it holds the prompt once.
+    const log=(await readFile(join(home,'data/workspace/sessions/kill-session/messages.jsonl'),'utf8')).split('\n').filter(Boolean).map(l=>JSON.parse(l).message);
+    expect(log.filter((m:{role:string;content:string})=>m.role==='user' && !m.content.includes('reflect once'))).toHaveLength(1);
   } finally {
     child.kill('SIGKILL'); server.closeAllConnections(); await new Promise<void>(resolve=>server.close(()=>resolve())); await rm(home,{recursive:true,force:true});
   }
