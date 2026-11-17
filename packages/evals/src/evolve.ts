@@ -16,6 +16,9 @@ import {
 } from "./knowledge.js";
 import { runSuite, type SuiteReport, type SuiteResultRow } from "./suite.js";
 import { loadTaskSet, type EvalTask } from "./tasks.js";
+import { bestOf, metricsOfRows as metricsOfScoredRows, paretoFrontier as frontierOf, pickParentFrom, type CandidateMetrics } from "./selection.js";
+
+export type { CandidateMetrics } from "./selection.js";
 
 /**
  * Meta-harness: evolutionary search over knowledge trees.
@@ -63,20 +66,6 @@ export interface ArchiveEntry {
   children: number;
   status: "evaluated" | "invalid" | "failed";
   errors?: string[];
-}
-
-export interface CandidateMetrics {
-  tasks: number;
-  correct: number;
-  accuracy: number;
-  mean_score: number;
-  total_cost_cents: number;
-  mean_turns: number;
-  paid_calls: number;
-  unnecessary_purchases: number;
-  errors: number;
-  /** correct answers minus dollars spent (one correct answer is worth one dollar). */
-  fitness: number;
 }
 
 export interface Archive {
@@ -302,40 +291,15 @@ async function proposeCandidate(input: ProposeCandidateInput): Promise<ArchiveEn
 
 /** Parent choice: fitness-weighted, penalized by offspring count (Darwin Godel Machine style), deterministic per slot. */
 export function pickParent(archive: Archive, slot: string): ArchiveEntry | undefined {
-  const candidates = archive.entries.filter((entry) => entry.status === "evaluated" && entry.dir && entry.metrics);
-  if (candidates.length === 0) {
-    return undefined;
-  }
-  const frontier = paretoFrontier(candidates);
-  const pool = frontier.length > 0 ? frontier : candidates;
-  const weights = pool.map((entry) => Math.max(0.05, (entry.metrics?.fitness ?? 0) + 1) / (1 + entry.children));
-  const total = weights.reduce((sum, weight) => sum + weight, 0);
-  let roll = seededUnit(`${archive.started_at}:${slot}`) * total;
-  for (const [index, entry] of pool.entries()) {
-    roll -= weights[index];
-    if (roll <= 0) {
-      return entry;
-    }
-  }
-  return pool[pool.length - 1];
+  return pickParentFrom(archive.entries, `${archive.started_at}:${slot}`, (entry) => !!entry.dir);
 }
 
 export function paretoFrontier(entries: ArchiveEntry[]): ArchiveEntry[] {
-  return entries.filter((candidate) => !entries.some((other) => other !== candidate && dominates(other, candidate)));
-}
-
-function dominates(a: ArchiveEntry, b: ArchiveEntry): boolean {
-  const ma = a.metrics!;
-  const mb = b.metrics!;
-  const betterOrEqual = ma.mean_score >= mb.mean_score && ma.total_cost_cents <= mb.total_cost_cents;
-  const strictlyBetter = ma.mean_score > mb.mean_score || ma.total_cost_cents < mb.total_cost_cents;
-  return betterOrEqual && strictlyBetter;
+  return frontierOf(entries);
 }
 
 export function bestEntry(archive: Archive): ArchiveEntry | undefined {
-  return [...archive.entries]
-    .filter((entry) => entry.status === "evaluated" && entry.metrics)
-    .sort((left, right) => (right.metrics!.fitness - left.metrics!.fitness) || (left.metrics!.total_cost_cents - right.metrics!.total_cost_cents))[0];
+  return bestOf(archive.entries);
 }
 
 export function metricsOf(report: SuiteReport): CandidateMetrics {
@@ -343,21 +307,7 @@ export function metricsOf(report: SuiteReport): CandidateMetrics {
 }
 
 export function metricsOfRows(rows: SuiteResultRow[]): CandidateMetrics {
-  const correct = rows.filter((row) => row.correct).length;
-  const cost = rows.reduce((sum, row) => sum + (row.cost_cents ?? 0), 0);
-  const meanScore = rows.length === 0 ? 0 : rows.reduce((sum, row) => sum + row.score, 0) / rows.length;
-  return {
-    tasks: rows.length,
-    correct,
-    accuracy: rows.length === 0 ? 0 : correct / rows.length,
-    mean_score: meanScore,
-    total_cost_cents: cost,
-    mean_turns: rows.length === 0 ? 0 : rows.reduce((sum, row) => sum + (row.turns ?? 0), 0) / rows.length,
-    paid_calls: rows.reduce((sum, row) => sum + (row.paid_calls ?? 0), 0),
-    unnecessary_purchases: rows.filter((row) => row.unnecessary_purchase).length,
-    errors: rows.filter((row) => row.error).length,
-    fitness: rows.reduce((sum, row) => sum + row.score, 0) - cost / 100
-  };
+  return metricsOfScoredRows(rows);
 }
 
 /** Weakness mining: every held-in row becomes a case, with a compact tool trace from the trajectory. */
@@ -465,15 +415,6 @@ export function renderArchive(archive: Archive): string {
     lines.push("", `Best by fitness: ${best.id}${best.dir ? ` (${best.dir})` : ""}`);
   }
   return lines.join("\n");
-}
-
-function seededUnit(seed: string): number {
-  let hash = 2166136261;
-  for (const char of seed) {
-    hash ^= char.charCodeAt(0);
-    hash = Math.imul(hash, 16777619) >>> 0;
-  }
-  return (hash % 100000) / 100000;
 }
 
 function parseJson(text: string): unknown {
