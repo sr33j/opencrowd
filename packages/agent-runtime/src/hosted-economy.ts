@@ -589,6 +589,8 @@ export class HostedCrowdCodeAdapter implements CrowdCodeAdapter {
     return {
       ok: true,
       score: numberValue(body.score),
+      // The payment floor reads CrowdCode's review mean (economy/crowdcode.ts).
+      floorScore: numberValue(body.score_mean ?? body.score),
       nEff: numberValue(body.n_eff),
       unproven: typeof body.unproven === "boolean" ? body.unproven : undefined,
       summary: summarizeEvidence(body),

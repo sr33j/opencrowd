@@ -411,10 +411,11 @@ export class EconomyGateway {
       };
     }
     const minScore = this.options.minServiceScore ?? 2;
-    if (evidence.score !== undefined && evidence.unproven !== true && evidence.score < minScore) {
+    const floorScore = evidence.floorScore ?? evidence.score;
+    if (floorScore !== undefined && evidence.unproven !== true && floorScore < minScore) {
       return {
         ok: false,
-        error: `CrowdCode rates this service ${evidence.score.toFixed(2)} (below the ${minScore} floor); refusing to pay. ${evidence.summary ?? ""}`.trim()
+        error: `CrowdCode's reviews put this service at ${floorScore.toFixed(2)} (below the ${minScore} floor); refusing to pay. ${evidence.summary ?? ""}`.trim()
       };
     }
 
