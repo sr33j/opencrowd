@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.9 — 2026-11-17
+
+- **The completion reflection is asked only of runs that earned it (SRI-115 C6).** It used to cost an extra model turn on every run with CrowdCode on, and produced "N/A" filler and restated tasks. Now it fires only when the run bought something (a successful `call_paid_service`), had a failed tool, used at least 8 turns, or ended waiting on the owner (an answer that hands a step back, such as "you'll need to book it on the airline's site"). A one-question run finishes without it. The gate receives `CompletionSignals` (`turns`, `failedTools`, `paidCalls`, `finalMessage`), derived from the run's own messages so they survive a checkpoint restart; `completionSignals()` and `reflectionTrigger()` are exported.
+- **`request_service` asks for a gap or leverage service.** New required fields: `kind` (`gap` or `leverage`), `builds_on` (what it could be built from today), `unlocks` (what the agent could then have done for the owner) and `frequency` (`one_off`, `per_task_like_this`, `recurring`), and an optional `capability`. The description and the nudge describe leverage: acting (book, call, buy, file, send), reaching data, persisting and verifying. They also say to price the outcome's value. CrowdCode rejects task restatements, "N/A" and requests without `builds_on`.
+
 ## 0.16.8 — 2026-11-17
 
 - **No review is owed after a purchase (SRI-115).** A paid call no longer blocks the next one, or the run's completion, until the agent reviews it. The gate cost an extra model turn per purchase — more than the $0.007 search it reviewed — and caused 8 of 25 failed paid calls in the fortnight before it went. CrowdCode's hosted gateway now judges every settled purchase itself, from its own record of the request, the response and the payment, and submits the review signed by the agent's wallet as before. `review_paid_service` stays, as optional notes for what that record cannot show; notes that arrive after the automatic review are not used. A failed review is never presented as something to retry.

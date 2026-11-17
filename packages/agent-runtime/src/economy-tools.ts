@@ -1,14 +1,40 @@
 import type { EconomyGateway } from "@opencrowd/economy";
-import type { DynamicToolsOption } from "./index.js";
+import type { CompletionSignals, DynamicToolsOption } from "./index.js";
 
 export interface EconomyTools extends DynamicToolsOption {
-  completionGate(alreadyNudged?: boolean): Promise<string | undefined>;
+  completionGate(alreadyNudged?: boolean, run?: CompletionSignals): Promise<string | undefined>;
 }
+
+/** A run at least this long earned a reflection on what would have helped. */
+export const REFLECTION_MIN_TURNS = 8;
+
+/**
+ * An answer that hands a step back to the owner: the run ended waiting on
+ * them. Narrow on purpose; a false positive costs one extra model turn.
+ */
+const OWNER_STEP = /\b(you(?:'ll| will)? need to|you have to|please (?:sign|log) in|please (?:upload|provide|send|share|confirm|approve|fund|add|connect|authori[sz]e)|(?:do|finish|complete) (?:this|that|it) (?:manually|by hand)|manually (?:book|call|file|submit|upload|enter|complete)|waiting (?:for|on) your|requires? your (?:approval|login|confirmation))\b/i;
+
+/** Why this run qualifies for the reflection, or undefined when it does not. */
+export function reflectionTrigger(run: CompletionSignals | undefined): string | undefined {
+  if (!run) return "unknown run";
+  if (run.paidCalls > 0) return "bought a service";
+  if (run.failedTools > 0) return "a tool failed";
+  if (run.turns >= REFLECTION_MIN_TURNS) return "many turns";
+  if (run.finalMessage && OWNER_STEP.test(run.finalMessage)) return "ended waiting on the owner";
+  return undefined;
+}
+
+export const REFLECTION_NUDGE = "Before this run ends, reflect once on what a service could have changed in this task, in two kinds. gap: a step that failed, was poor, slow or costly. leverage: a service that, at a fair price, would have let you deliver a much better result or something you could not do at all: act (book, call, buy, file, send), reach data you could not (licensed, real-time, behind the owner's own login with consent), persist (monitor, alert, retry over days) or verify (an authoritative or human check). For each worthwhile one, call request_service with kind, input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), unlocks (what you could then have done for the owner), frequency (one_off, per_task_like_this or recurring) and price_per_call (price the outcome's value; it is an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If nothing qualifies, submit nothing. Then call complete_session again to finish.";
+
 /**
  * The paid tools, and the one thing they ask of a run before it completes:
  * an optional reflection on which services would have helped. No review is
  * ever owed: CrowdCode's gateway judges every settled hosted purchase by
  * itself (SRI-115), so a purchase never holds the run open.
+ *
+ * The reflection costs a model turn, so it is asked only of runs that earned
+ * it (C6): one that bought something, had a failed tool, used at least
+ * REFLECTION_MIN_TURNS turns, or ended waiting on the owner.
  */
 export function economyTools(economy: Pick<EconomyGateway, "definitions" | "execute">, options: { hidden?: ReadonlySet<string>; resuming?: boolean } = {}): EconomyTools {
   let reflected = false;
@@ -21,12 +47,13 @@ export function economyTools(economy: Pick<EconomyGateway, "definitions" | "exec
       if (name === "request_service" && result.ok) reflected = true;
       return result;
     },
-    completionGate: async (alreadyNudged = false) => {
+    completionGate: async (alreadyNudged = false, run?: CompletionSignals) => {
       if (reflected || alreadyNudged || !supportsReflection) return undefined;
+      if (!reflectionTrigger(run)) return undefined;
       reflected = true;
       const status = await economy.execute("crowdcode_status", {});
       if (!status.ok || !(status.data as { enabled?: boolean })?.enabled) return undefined;
-      return "Before this run ends, reflect once: What concrete services would have been worth paying for to solve this task? For each observed failure, poor result, excessive cost or avoidable detour with a reusable paid remedy, call request_service with concrete input (what the user would give), output (the exact deliverable), problem (what it solves) and price_per_call (what you would pay per call in USD). A prior purchase or spending permission is not required; the price is your estimate, not a budget. Skip generic local computation, ordinary agent mistakes without a sellable remedy, and services such as web search that already worked well. If everything worked well and cheaply, submit nothing. Then call complete_session again to finish.";
+      return REFLECTION_NUDGE;
     }
   };
 }

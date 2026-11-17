@@ -556,8 +556,9 @@ describe("hosted economy: worker wiring", () => {
     expect(systemPrompt).not.toContain("Paid external services are unavailable");
     expect(events.filter(e => e.type === "run.finished").at(-1)?.payload.outcome).toBe("completed");
     expect(events.filter(e => e.type === "tool.started").map(e => [e.payload.toolName, e.payload.input])).toEqual([
-      ["find_paid_service", { query: "web search" }], ["complete_session", { summary: "found it" }], ["complete_session", { summary: "found it" }]]);
-    expect(events.filter(e => e.type === "tool.finished").map(e => e.payload.status)).toEqual(["ok", "ok", "ok"]);
+      ["find_paid_service", { query: "web search" }], ["complete_session", { summary: "found it" }]]);
+    // A free search and an answer earn no reflection turn (C6; the nudge is covered in completion.test.ts).
+    expect(events.filter(e => e.type === "tool.finished").map(e => e.payload.status)).toEqual(["ok", "ok"]);
     const toolMessage = provider.complete.mock.calls[1][0].find((m: { role: string }) => m.role === "tool")!;
     expect(JSON.parse(toolMessage.content).result.data.services[0].endpoint).toBe(SEARCH);
   });
@@ -608,7 +609,7 @@ it.each([true, false])("publishes the prepared answer with prior service request
   const { socketPath } = await bridge(() => ({ ok: true, data: { accepted: true } }));
   const answer = "Target neural decoding roles and build a streaming BCI benchmark.";
   const done = { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: answer } }] };
-  // Without an earlier request, complete_session is followed by reflection and an empty reply.
+  // Either way the answer is published as prepared.
   const responses = requestFirst
     ? [{ content: "", toolCalls: [{ id: "request", name: "request_service", arguments: { input: "a target role and a public professional profile", output: "ranked current official openings with fit notes", problem: "career advice relied on stale third-party listings", price_per_call: 0.5 } }] }, done]
     : [done, { content: "", toolCalls: [] }];
@@ -620,7 +621,8 @@ it.each([true, false])("publishes the prepared answer with prior service request
     payload: { session: { kind: "create", sessionId: "session" }, prompt: "Which role should I target?", modelPolicy: {}, budget: { limit: "1000000" }, approvalMode: "auto" } }));
   await worker.drain();
   expect(events.find(e => e.type === "run.finished")?.payload).toMatchObject({ outcome: "completed", summary: answer });
-  expect(provider.complete).toHaveBeenCalledTimes(2);
+  // A one-question run without a purchase or a failure earns no reflection turn (C6).
+  expect(provider.complete).toHaveBeenCalledTimes(requestFirst ? 2 : 1);
 });
 
 describe("hosted economy: completion gate", () => {

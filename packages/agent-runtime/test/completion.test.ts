@@ -1,9 +1,10 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { describe, afterEach, expect, it, vi } from "vitest";
 import { createSession } from "@opencrowd/core";
-import { economyTools } from "../src/economy-tools.js";
+import { economyTools, reflectionTrigger, REFLECTION_MIN_TURNS } from "../src/economy-tools.js";
+import { completionSignals, type CompletionSignals } from "../src/index.js";
 import { runAgentTaskDetailed, type LlmResponse, type LoopCheckpoint } from "../src/index.js";
 import { FileSteeringInbox } from "../src/inbox.js";
 
@@ -17,11 +18,16 @@ async function session() {
 const answer = "Target neural decoding roles. Build a streaming decoder and seek feedback from BCI engineers.";
 const complete = (text = answer): LlmResponse => ({ content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: text } }] });
 const empty: LlmResponse = { content: "", toolCalls: [] };
+/** The reflection gate on a run that earned it (as if it had bought something). */
 function reflection(enabled = true, definitions = ["request_service"]) {
-  return economyTools({
+  return qualifying(economyTools({
     definitions: () => definitions.map(name => ({ name, description: name, parameters: { type: "object" } })),
     execute: async () => ({ ok: true, data: { enabled } })
-  });
+  }));
+}
+function qualifying<T extends { completionGate: (nudged?: boolean, run?: CompletionSignals) => Promise<string | undefined> }>(tools: T): T {
+  return { ...tools, completionGate: (nudged?: boolean, run?: CompletionSignals) =>
+    tools.completionGate(nudged, run ? { ...run, paidCalls: Math.max(run.paidCalls, 1) } : run) };
 }
 
 it("finishes immediately when a service request already satisfied reflection", async () => {
@@ -187,4 +193,54 @@ it("allows a malformed completion tool call to be corrected", async () => {
   const result = await runAgentTaskDetailed(await session(), "Find a role", { provider });
   expect(result).toMatchObject({ outcome: "completed", summary: { final_message: answer } });
   expect(provider.complete).toHaveBeenCalledTimes(2);
+});
+
+
+describe("the reflection is asked only of runs that earned it (SRI-115 C6)", () => {
+  const plain = { turns: 2, failedTools: 0, paidCalls: 0 };
+  it("qualifies a purchase, a failed tool, many turns, or an answer waiting on the owner", () => {
+    expect(reflectionTrigger(plain)).toBeUndefined();
+    expect(reflectionTrigger({ ...plain, finalMessage: "A stock is a share of ownership in a company." })).toBeUndefined();
+    expect(reflectionTrigger({ ...plain, paidCalls: 1 })).toBe("bought a service");
+    expect(reflectionTrigger({ ...plain, failedTools: 1 })).toBe("a tool failed");
+    expect(reflectionTrigger({ ...plain, turns: REFLECTION_MIN_TURNS - 1 })).toBeUndefined();
+    expect(reflectionTrigger({ ...plain, turns: REFLECTION_MIN_TURNS })).toBe("many turns");
+    expect(reflectionTrigger({ ...plain, finalMessage: "I found two fares; you'll need to book the 9:40 one on the airline's site." })).toBe("ended waiting on the owner");
+    expect(reflectionTrigger({ ...plain, finalMessage: "Please sign in to your bank so I can read the statement." })).toBe("ended waiting on the owner");
+  });
+
+  it("does not nudge a short unpaid run, and nudges a purchase with both kinds of request", async () => {
+    const tools = economyTools({
+      definitions: () => [{ name: "request_service", description: "r", parameters: { type: "object" } }],
+      execute: async () => ({ ok: true, data: { enabled: true } })
+    });
+    expect(await tools.completionGate(false, plain)).toBeUndefined();
+    const prompt = await tools.completionGate(false, { ...plain, paidCalls: 1 });
+    expect(prompt).toContain("leverage");
+    expect(prompt).toContain("builds_on");
+    expect(await tools.completionGate(false, { ...plain, paidCalls: 1 })).toBeUndefined();
+  });
+
+  it("derives the signals from this run's messages only", () => {
+    const tool = (id: string, ok: boolean) => ({ role: "tool" as const, toolCallId: id, content: JSON.stringify({ result: { ok } }) });
+    const call = (id: string, name: string) => ({ role: "assistant" as const, content: "", toolCalls: [{ id, name, arguments: {} }] });
+    const messages = [
+      { role: "system" as const, content: "s" },
+      { role: "user" as const, content: "earlier task" }, call("a", "call_paid_service"), tool("a", true), call("b", "run_shell"), tool("b", false),
+      { role: "user" as const, content: "now" }, call("c", "call_paid_service"), tool("c", true), call("d", "web_fetch"), tool("d", true),
+    ];
+    expect(completionSignals(messages, "now", 3, "done")).toEqual({ turns: 3, failedTools: 0, paidCalls: 1, finalMessage: "done" });
+    expect(completionSignals(messages.slice(0, 6), "earlier task", 2)).toEqual({ turns: 2, failedTools: 1, paidCalls: 1 });
+  });
+
+  it("a one-question run finishes without the reflection turn", async () => {
+    const tools = economyTools({
+      definitions: () => [{ name: "request_service", description: "r", parameters: { type: "object" } }],
+      execute: async () => ({ ok: true, data: { enabled: true } })
+    });
+    const provider = { complete: vi.fn().mockResolvedValueOnce(complete()).mockResolvedValue(empty) };
+    const result = await runAgentTaskDetailed(await session(), "What should I study?", { provider, completionGate: tools.completionGate });
+    expect(result).toMatchObject({ outcome: "completed", summary: { final_message: answer } });
+    expect(provider.complete).toHaveBeenCalledTimes(1);
+  });
 });

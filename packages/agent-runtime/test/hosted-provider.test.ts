@@ -55,7 +55,9 @@ it('survives SIGKILL after a completed tool and resumes the same model operation
     const events=lines.join('').trim().split('\n').map(line=>JSON.parse(line));
     expect(events.filter(e=>e.type==='run.finished').at(-1).payload.outcome).toBe('completed');
     expect(events.filter(e=>e.type==='tool.started')).toHaveLength(0);
-    expect(operations).toEqual(['kill-run:llm:0','kill-run:llm:1','kill-run:llm:1','kill-run:llm:2']);
+    // The resumed call is the same operation; a two-turn run that bought nothing
+    // and failed nothing ends there, with no reflection turn (SRI-115 C6).
+    expect(operations).toEqual(['kill-run:llm:0','kill-run:llm:1','kill-run:llm:1']);
     expect(await readFile(join(home,'data/workspace/sessions/kill-session/artifacts/result.md'),'utf8')).toBe(before);
     const state=JSON.parse(await readFile(join(home,'data/metadata/worker.json'),'utf8'));
     expect(state.runs['kill-run'].checkpoint.messages.filter((m:{role:string;content:string})=>m.role==='user' && !m.content.includes('reflect once'))).toHaveLength(1);
