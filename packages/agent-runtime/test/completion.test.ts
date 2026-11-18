@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, afterEach, expect, it, vi } from "vitest";
 import { createSession } from "@opencrowd/core";
-import { economyTools, reflectionTrigger, REFLECTION_MIN_TURNS } from "../src/economy-tools.js";
+import { economyTools, endedShort, reflectionTrigger, REFLECTION_MIN_TURNS, SHORT_RUN_NUDGE } from "../src/economy-tools.js";
 import { completionSignals, type CompletionSignals } from "../src/index.js";
 import { runAgentTaskDetailed, type LlmResponse, type LoopCheckpoint } from "../src/index.js";
 import { FileSteeringInbox } from "../src/inbox.js";
@@ -230,7 +230,7 @@ describe("the reflection is asked only of runs that earned it (SRI-115 C6)", () 
       { role: "user" as const, content: "earlier task" }, call("a", "call_paid_service"), tool("a", true), call("b", "run_shell"), tool("b", false),
       { role: "user" as const, content: "now" }, call("c", "call_paid_service"), tool("c", true), call("d", "web_fetch"), tool("d", true),
     ];
-    expect(completionSignals(messages, "now", 3, "done")).toEqual({ turns: 3, failedTools: 0, paidCalls: 1, finalMessage: "done" });
+    expect(completionSignals(messages, "now", 3, "done")).toEqual({ turns: 3, failedTools: 0, paidCalls: 1, finalMessage: "done", task: "now" });
     expect(completionSignals(messages.slice(0, 6), "earlier task", 2)).toEqual({ turns: 2, failedTools: 1, paidCalls: 1 });
   });
 
@@ -246,3 +246,58 @@ describe("the reflection is asked only of runs that earned it (SRI-115 C6)", () 
   });
 });
 
+describe("a run that ends short of its task asks for the service that would have finished it (SRI-122)", () => {
+  const plain = { turns: 3, failedTools: 0, paidCalls: 0 };
+  const gate = () => economyTools({
+    definitions: () => [{ name: "request_service", description: "r", parameters: { type: "object" } }],
+    execute: async () => ({ ok: true, data: { enabled: true } })
+  });
+
+  it("reads a shortfall from the answer or the task's own count, not from ordinary prose", () => {
+    expect(endedShort({ ...plain, finalMessage: "I couldn't find a service that returns 10-Q revenue tables, so this is incomplete." })).toBe(true);
+    expect(endedShort({ ...plain, finalMessage: "We were unable to transcribe the voicemail: no service offers speaker labels." })).toBe(true);
+    expect(endedShort({ ...plain, finalMessage: "Here is a partial list; the registry was down." })).toBe(true);
+    expect(endedShort({ ...plain, finalMessage: "I'm unable to reach the registry today." })).toBe(true);
+    expect(endedShort({ ...plain, finalMessage: "Done. The API can't take more than 100 rows, so I sent them in 3 batches; you cannot undo it." })).toBe(false);
+    expect(endedShort({ ...plain, task: "Find 20 leads", finalMessage: "Here are 7 leads." })).toBe(true);
+    expect(endedShort({ ...plain, finalMessage: "I was able to find all three filings. You cannot deduct the fee." })).toBe(false);
+    expect(endedShort({ ...plain, task: "Find 20 leads", finalMessage: "Here are 20 leads." })).toBe(false);
+    expect(endedShort(plain)).toBe(false);
+    expect(reflectionTrigger({ ...plain, paidCalls: 2, finalMessage: "I could not get the tables." })).toBe("ended short of its task");
+  });
+
+  it("a task that fails for lack of a service ends with one request, and no review asked", async () => {
+    const prompt = await gate().completionGate(false, { ...plain, finalMessage: "I couldn't find any service that does this." });
+    expect(prompt).toBe(SHORT_RUN_NUDGE);
+    expect(prompt).toContain("Call request_service once");
+    expect(prompt).toContain("no review is needed");
+    // Asked once: the next completion goes through.
+    const tools = gate();
+    await tools.completionGate(false, { ...plain, finalMessage: "I couldn't do it." });
+    expect(await tools.completionGate(false, { ...plain, finalMessage: "I couldn't do it." })).toBeUndefined();
+  });
+
+  it("a successful task with no paid calls produces neither", async () => {
+    expect(await gate().completionGate(false, { ...plain, task: "Summarize this file", finalMessage: "Here is the summary: it covers three topics." })).toBeUndefined();
+  });
+
+  it("drives one request through a real run that ends short", async () => {
+    const requests: string[] = [];
+    const tools = economyTools({
+      definitions: () => [{ name: "request_service", description: "r", parameters: { type: "object" } }],
+      execute: async (name) => { if (name === "request_service") requests.push(name); return { ok: true, data: { enabled: true, accepted: true } }; }
+    });
+    const short = "I couldn't find a paid service that returns the tables, so I have no result.";
+    const provider = { complete: vi.fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "c1", name: "complete_session", arguments: { final_message: short } }] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "r1", name: "request_service", arguments: {} }] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "c2", name: "complete_session", arguments: { final_message: "Requested it." } }] })
+      .mockResolvedValue(empty) };
+    const result = await runAgentTaskDetailed(await session(), "Extract the revenue tables", { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
+    expect(result.outcome).toBe("completed");
+    expect(requests).toEqual(["request_service"]);
+    // The second model call saw the short-run nudge.
+    expect(JSON.stringify(provider.complete.mock.calls[1])).toContain("ending short of its task");
+    expect(provider.complete).toHaveBeenCalledTimes(3);
+  });
+});

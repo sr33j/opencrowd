@@ -789,6 +789,8 @@ export interface CompletionSignals {
   paidCalls: number;
   /** The answer the run is about to deliver. */
   finalMessage?: string;
+  /** The task this run was given, so a gate can compare the answer to it. */
+  task?: string;
 }
 
 /** Signals for the run that began at the last user message equal to `task`. */
@@ -806,7 +808,7 @@ export function completionSignals(messages: readonly LlmMessage[], task: string,
     if (ok === false) failedTools += 1;
     else if (ok === true && names.get(message.toolCallId ?? "") === "call_paid_service") paidCalls += 1;
   }
-  return { turns, failedTools, paidCalls, ...(finalMessage ? { finalMessage } : {}) };
+  return { turns, failedTools, paidCalls, ...(finalMessage ? { finalMessage, task } : {}) };
 }
 
 function toolResultOk(content: unknown): boolean | undefined {
