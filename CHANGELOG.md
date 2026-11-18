@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.24 — 2026-11-18
+
+- **A conversation survives a run that stopped between a tool call and its result.** The loop guard can stop a run in the middle of a tool batch ("failed repeatedly"), and a worker can stop mid-turn. Either leaves tool calls with no result in `messages.jsonl`, and every provider then refuses the conversation ("No tool output found for function call …"), so it was lost for good. The worker now repairs the history it replays (`repairToolPairs`): a call with no result gets a short "not run" result, and a result with no call is dropped. A sound history is unchanged.
+
 ## 0.16.23 — 2026-11-18
 
 - **A run that ends short of its task asks for the service that would have finished it (SRI-122).** Before, a run that answered "I couldn't find a service for this" after three turns, with no purchase and no failed tool, got no reflection at all. Now `endedShort()` reads the answer (first person or explicit: could not, partial, a workaround, no service could) and SRI-119's `countShortfall` against the task's own count. A run that ended short gets `SHORT_RUN_NUDGE`: call `request_service` once for the paid service that would have let it finish. No review is asked: CrowdCode's gateway already judges every settled hosted purchase. It comes after SRI-119's early-stop question, and like it is asked once; the held answer is delivered as before. `CompletionSignals` carries `task`.
