@@ -724,6 +724,17 @@ export interface AgentRunOptions {
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
   promptSections?: string[];
   /**
+   * Control-declared tools (`run.start` `tools`, C2), advertised beside the
+   * built-in and dynamic tools under their names without the `control.`
+   * prefix. Built-in and dynamic tool names win; callers drop collisions.
+   */
+  declaredTools?: DynamicToolsOption;
+  /**
+   * Control's prompt sections (`run.start` `instructions`), each its own
+   * paragraph after every hosted section. Ignored for a chat-only model.
+   */
+  instructions?: string[];
+  /**
    * A chat-only model (`modelPolicy.chatOnly`): no tools are advertised, the
    * system prompt is `CHAT_ONLY_SYSTEM_PROMPT`, and a tool call the seller
    * returns anyway is never executed. Dynamic tools and the knowledge tree
@@ -847,7 +858,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   const enabledTools: ToolName[] = options.chatOnly ? [] : options.tools
     ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status"].includes(name))
       : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));
-  const dynamicDefinitions = options.chatOnly ? [] : options.dynamicTools?.definitions ?? [];
+  const dynamicDefinitions = options.chatOnly ? [] : [...options.dynamicTools?.definitions ?? [], ...options.declaredTools?.definitions ?? []];
+  const declaredToolNames = new Set(options.chatOnly ? [] : options.declaredTools?.definitions.map((tool) => tool.name) ?? []);
   const model = options.llm?.catalog?.find((m) => m.id === options.llm?.model);
   const limits = contextLimits(options.contextWindowTokens ?? model?.contextWindowTokens, options.maxOutputTokens ?? model?.maxOutputTokens);
   const contextState: ContextState = { ...options.resume?.context };
@@ -958,7 +970,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     );
   }
   const messages: LlmMessage[] = options.resume?.messages ?? [
-    { role: "system", content: options.chatOnly ? CHAT_ONLY_SYSTEM_PROMPT : systemPromptParts.join(" ") },
+    { role: "system", content: options.chatOnly ? CHAT_ONLY_SYSTEM_PROMPT
+      : [systemPromptParts.join(" "), ...(options.instructions ?? []).filter((section) => section.trim())].join("\n\n") },
     ...(options.history ?? []),
     { role: "user", content: task }
   ];
@@ -1282,6 +1295,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           }
         } else if (TOOL_NAMES.includes(call.name as ToolName)) {
           result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress, signal: options.signal });
+        } else if (declaredToolNames.has(call.name)) {
+          result = await options.declaredTools!.execute(call.name, callArguments);
         } else if (options.dynamicTools) {
           result = await options.dynamicTools.execute(call.name, callArguments);
         } else {

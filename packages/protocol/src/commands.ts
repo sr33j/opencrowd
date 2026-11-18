@@ -20,6 +20,27 @@ export const SessionDirectiveSchema = z.discriminatedUnion("kind", [
 ]);
 export type SessionDirective = z.infer<typeof SessionDirectiveSchema>;
 
+/** A declared tool's wire name: `control.` and a lower-case name (C2). */
+export const DECLARED_TOOL_NAME_PATTERN = /^control\.[a-z_]{1,40}$/;
+export const MAX_DECLARED_TOOLS = 16;
+export const MAX_RUN_INSTRUCTIONS = 8;
+/** Every instruction section together, in UTF-8 bytes. */
+export const MAX_RUN_INSTRUCTIONS_BYTES = 16 * 1024;
+const utf8 = new TextEncoder();
+
+/**
+ * A tool control declares for one run. The runtime advertises it to the model
+ * without the `control.` prefix and sends each call back over the supervisor
+ * socket as `POST /tool {name: "control.<name>"}`; control decides on every
+ * call whether this agent may use it, so declaring a tool grants nothing.
+ */
+export const DeclaredToolSchema = z.looseObject({
+  name: z.string().regex(DECLARED_TOOL_NAME_PATTERN),
+  description: z.string().min(1).max(4000),
+  parameters: z.record(z.string(), z.unknown())
+});
+export type DeclaredTool = z.infer<typeof DeclaredToolSchema>;
+
 export const RunStartCommandSchema = z.looseObject({
   ...commandBase,
   type: z.literal("run.start"),
@@ -35,7 +56,16 @@ export const RunStartCommandSchema = z.looseObject({
      * Which capability tree (C7) the run reads: current (default), candidate,
      * or a version number. The tree gate pins a candidate this way.
      */
-    treeVersion: z.string().regex(/^(current|candidate|\d{1,8})$/).optional()
+    treeVersion: z.string().regex(/^(current|candidate|\d{1,8})$/).optional(),
+    /** Control's prompt sections, appended after the hosted system prompt. */
+    instructions: z.array(z.string().min(1)).max(MAX_RUN_INSTRUCTIONS)
+      .refine(sections => sections.reduce((total, section) => total + utf8.encode(section).length, 0) <= MAX_RUN_INSTRUCTIONS_BYTES,
+        { error: `instructions exceed ${MAX_RUN_INSTRUCTIONS_BYTES} bytes in total` })
+      .optional(),
+    /** Control-declared tools for this run (C2). */
+    tools: z.array(DeclaredToolSchema).max(MAX_DECLARED_TOOLS)
+      .refine(tools => new Set(tools.map(tool => tool.name)).size === tools.length, { error: "declared tool names must be unique" })
+      .optional()
   })
 });
 

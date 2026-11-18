@@ -4,7 +4,7 @@ import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import {
-  atomicWrite, containedPath, createSession, executeTool, loadSession, resolveAgentPaths, summarizeToolInput, HOSTED_ONLY_TOOL_NAMES,
+  atomicWrite, containedPath, createSession, executeTool, loadSession, resolveAgentPaths, summarizeToolInput, HOSTED_ONLY_TOOL_NAMES, TOOL_NAMES,
   type AgentPaths, type SessionState, type ToolContext, type ToolName, type ToolResult
 } from "@opencrowd/core";
 import {
@@ -101,8 +101,8 @@ export interface WorkerState {
   runs: Record<string, DurableRun>;
   activeRunId?: string;
 }
-/** Executes supervisor-owned tools (HOSTED_ONLY_TOOL_NAMES) outside the agent process. */
-export type HostedToolExecutor = (name: ToolName, args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
+/** Executes supervisor-owned tools (HOSTED_ONLY_TOOL_NAMES, and control-declared `control.<name>` tools) outside the agent process. */
+export type HostedToolExecutor = (name: ToolName | `control.${string}`, args: Record<string, unknown>, context: ToolContext) => Promise<ToolResult>;
 
 export interface WorkerOptions {
   agentHome: string;
@@ -309,6 +309,9 @@ export class MachineWorker {
       const hosted = chatOnly ? undefined : this.options.hostedTools?.(run.start, session);
       const economy = chatOnly ? undefined : this.options.economy?.(run.start, session);
       const dynamicTools = economy ? hostedDynamicTools(economy) : undefined;
+      // Control-declared tools (C2) are answered by control through the hosted
+      // executor, so a worker without one advertises none of them.
+      const declared = hosted ? declaredToolDefinitions(run.start, dynamicTools?.definitions ?? []) : [];
       let latestFinancialState: import("@opencrowd/protocol").FinancialState = { status: "unavailable", reason: "Hosted financial state has not been read." };
       const financialState = this.options.financialState && !chatOnly ? async () => {
         try { latestFinancialState = await this.options.financialState!(run.start, session); }
@@ -316,7 +319,8 @@ export class MachineWorker {
         return latestFinancialState;
       } : undefined;
       // Every tool call, built-in or economy, is recorded once per checkpoint turn and replayed from its stored result.
-      const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>): Promise<ToolResult> => {
+      // `wireName` is what the trace and the backstop know a declared tool by (`control.<name>`).
+      const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>, wireName = name): Promise<ToolResult> => {
         const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
         // Providers may reuse tool IDs on later turns. Results are scoped to
         // their checkpoint turn so a later call cannot replay an old result.
@@ -337,13 +341,13 @@ export class MachineWorker {
         }
         if (saved && !saved.approvalPending && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
         await this.mutate(() => { run.tools[id] = { digest }; });
-        await this.emit("tool.started", { toolCallId: id, toolName: name, input: summarizeToolInput(name, args), details: captureDetail({ input: args }), turn: run.checkpoint?.turn ?? 0 }, runId, run.commandId);
+        await this.emit("tool.started", { toolCallId: id, toolName: wireName, input: summarizeToolInput(wireName, args), details: captureDetail({ input: args }), turn: run.checkpoint?.turn ?? 0 }, runId, run.commandId);
         const started = Date.now();
         let output: ToolResult;
         try {
           if (saved?.approvalPending && name === "call_paid_service" && economy)
             await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
-          output = capToolResult(await this.withinDeadline(name, invoke));
+          output = capToolResult(await this.withinDeadline(wireName, invoke));
           // Keep durable tool diagnostics consistent with what the model sees.
           if (financialState && name === "get_budget_status") output = { ok: true, data: latestFinancialState };
           if (financialState && name === "complete_session" && output.ok && output.data && typeof output.data === "object")
@@ -351,7 +355,7 @@ export class MachineWorker {
         } catch (error) {
           if (error instanceof RuntimePause && error.outcome === "waiting_for_approval")
             await this.mutate(() => { run.tools[id].approvalPending = true; });
-          await this.emit("tool.finished", { toolCallId: id, toolName: name,
+          await this.emit("tool.finished", { toolCallId: id, toolName: wireName,
             status: error instanceof RuntimePause ? "blocked" : signal.aborted ? "cancelled" : "error",
             durationMs: Date.now() - started, turn: run.checkpoint?.turn ?? 0,
             error: scrubText(error instanceof Error ? error.message : String(error)),
@@ -360,7 +364,7 @@ export class MachineWorker {
           throw error;
         }
         await this.mutate(() => { run.tools[id].result = output; });
-        await this.emit("tool.finished", { toolCallId: id, toolName: name, status: output.ok ? "ok" : "error",
+        await this.emit("tool.finished", { toolCallId: id, toolName: wireName, status: output.ok ? "ok" : "error",
           error: output.error ? scrubText(output.error) : undefined, durationMs: Date.now() - started,
           turn: run.checkpoint?.turn ?? 0, details: captureDetail({ output }) }, runId, run.commandId);
         if (name === "save_file" && output.ok) await this.emit("artifact.created", {
@@ -368,7 +372,7 @@ export class MachineWorker {
         }, runId, run.commandId);
         return output;
       };
-      const baseProvider = this.options.provider(run.start, session, dynamicTools?.definitions ?? []);
+      const baseProvider = this.options.provider(run.start, session, [...dynamicTools?.definitions ?? [], ...declared]);
       const provider: LlmProvider = {
         complete: async (messages, context) => {
           const callId = randomUUID(), started = Date.now(), turn = run.checkpoint?.turn ?? 0;
@@ -402,6 +406,9 @@ export class MachineWorker {
         },
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         ...(chatOnly ? { chatOnly: true } : {}),
+        ...(declared.length ? { declaredTools: { definitions: declared,
+          execute: (name, args) => record(name, args, () => hosted!(`control.${name}`, args, { session, signal }), `control.${name}`) } } : {}),
+        ...(!chatOnly && run.start.payload.instructions?.length ? { instructions: run.start.payload.instructions } : {}),
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
         prices: {
@@ -531,6 +538,24 @@ export class MachineWorker {
   }
 
   async drain(): Promise<void> { await this.running; await this.writes; }
+}
+
+/**
+ * The model-facing definitions of a run's control-declared tools: each name
+ * without its `control.` prefix. A declared name that a built-in or dynamic
+ * tool already uses is dropped, so control can never shadow a runtime tool.
+ * The definitions come from `run.start`, which the worker checkpoint keeps,
+ * so a resumed, unpaused or rebooted run is offered exactly the same tools.
+ */
+export function declaredToolDefinitions(start: CommandOf<"run.start">, taken: DynamicToolDefinition[] = []): DynamicToolDefinition[] {
+  if (start.payload.modelPolicy.chatOnly === true) return [];
+  const reserved = new Set<string>([...TOOL_NAMES, ...taken.map(tool => tool.name)]);
+  return (start.payload.tools ?? []).flatMap(tool => {
+    const name = tool.name.slice("control.".length);
+    if (reserved.has(name)) return [];
+    reserved.add(name);
+    return [{ name, description: tool.description, parameters: tool.parameters }];
+  });
 }
 
 function isWaiting(outcome: RunOutcome): boolean {

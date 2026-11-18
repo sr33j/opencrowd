@@ -213,7 +213,8 @@ export function createHostedToolExecutor(options: HostedBridgeOptions): HostedTo
     try {
       // These three are brokered by control (an upload, a vault read, a
       // deploy), which takes up to 170s of its own; the rest answer in seconds.
-      const timeoutMs = ["deploy_service", "request_secret", "vault_request"].includes(name)
+      // Control-declared tools (`control.<name>`, C2) are answered by control too.
+      const timeoutMs = ["deploy_service", "request_secret", "vault_request"].includes(name) || name.startsWith("control.")
         ? HOSTED_CONTROL_TOOL_TIMEOUT_MS : undefined;
       const result = await postHostedTool(options, name, { ...args, ...(source === undefined ? {} : { source }) },
         { signal: context.signal, ...(timeoutMs ? { timeoutMs } : {}) });
