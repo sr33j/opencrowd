@@ -93,6 +93,19 @@ describe("gateway surface", () => {
 });
 
 describe("purchase lifecycle", () => {
+  it("refuses a search phrase pasted into url before any lookup or payment (SRI-119)", async () => {
+    const { gateway, agentcash } = await setup();
+    const url = "https://github.com OpenClaw agent builder paid API personal project";
+    const result = await gateway.execute("call_paid_service", { url, method: "POST" });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/contains spaces\. Put search terms in `body`.*Nothing was paid\.$/);
+    expect(result.error).not.toMatch(/inspect_paid_service must run/);
+    expect((await gateway.execute("inspect_paid_service", { url, method: "POST" })).error).toMatch(/contains spaces/);
+    expect((await gateway.execute("call_paid_service", { url: "https://search", method: "POST" })).error).toMatch(/no valid host/);
+    expect((await gateway.execute("call_paid_service", { url: "ftp://svc.example/x", method: "POST" })).error).toMatch(/not an http\(s\) endpoint/);
+    expect(agentcash.fetchCalls).toHaveLength(0);
+  });
+
   it("sends GET inputs as query parameters instead of a body", async () => {
     const { gateway, agentcash } = await setup();
     expect((await gateway.execute("inspect_paid_service", { url: ENDPOINT, method: "GET" })).ok).toBe(true);
