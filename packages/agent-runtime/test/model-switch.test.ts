@@ -84,14 +84,18 @@ it("keeps the newest answer word for word and the pasted logs searchable when a 
   // So are the older answers, the stale one included: the pasted logs were
   // what was big, and they were saved to files rather than any exchange cut.
   expect(result.summarized).toBe(0);
-  expect(result.saved).toBe(10); // the six research results, then the four logs
+  // The six research results, then the three oldest logs. The newest log fits
+  // what this model's price allows for history, now that the instructions and
+  // tools are not counted as part of it, and stays in the request as pasted.
+  expect(result.saved).toBe(9);
+  expect(messages.some(m => m.content === log(4))).toBe(true);
   const at = (content: string) => messages.findIndex(m => m.content === content);
   expect(at(CORRECT)).toBeGreaterThan(at(STALE));
 
   // Each log is a pointer that says what it was and where it is, and the
   // file holds every word: grep finds all four facts.
   const pointers = messages.filter(m => m.role === "user" && m.content.includes("saved verbatim"));
-  expect(pointers).toHaveLength(4);
+  expect(pointers).toHaveLength(3);
   pointers.forEach((pointer, i) => expect(pointer.content).toContain(`It began: "Here is part ${i + 1} of 4 of our port operations log.`));
   const found = execFileSync("grep", ["-rh", "IMPORTANT FACT", "context/"], { cwd: s.sessionDir, encoding: "utf8" });
   for (const fact of FACTS) expect(found).toContain(fact);

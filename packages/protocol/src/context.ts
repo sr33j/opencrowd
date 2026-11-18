@@ -134,13 +134,20 @@ export const CONTEXT_COST_BUDGET_USD = 0.02;
  * History no cost trigger may compact below. Two cents of the dearest models
  * is a few thousand tokens, which is not a conversation an agent can work in;
  * past this floor the right answer is a cheaper model, not a shorter memory.
+ *
+ * It is history and only history. System instructions and tool definitions
+ * are sent whatever is compacted, so the caller counts them beside this and
+ * not inside it: a hosted agent's come to some 15,000 estimated tokens, and
+ * taken out of 24,000 they left a run on a $2-a-million model nothing to
+ * remember with (2026-11-13; see `compactContext`).
  */
 export const CONTEXT_MIN_HISTORY_TOKENS = 24_000;
 
 /**
- * The input size at which a turn costs more than `CONTEXT_COST_BUDGET_USD`,
- * given what the seller charges per million input tokens and how much of the
- * last turn it served from its prompt cache.
+ * How much history a turn may carry before it costs more than
+ * `CONTEXT_COST_BUDGET_USD`, given what the seller charges per million input
+ * tokens and how much of the last turn it served from its prompt cache. An
+ * allowance for what compaction can remove, to be added to what it cannot.
  *
  * The cache is why this takes an observed hit rate rather than just a price.
  * Compaction and prompt caching pull in opposite directions: compacting
