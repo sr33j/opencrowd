@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.22 — 2026-11-18
+
+- **Control can declare tools and instructions per run (SRI-121).** A hosted `run.start` may carry `payload.tools` (up to 16 `{name, description, parameters}`, named `control.<name>`) and `payload.instructions` (up to 8 prompt sections, 16 KB in total). The worker offers each tool to the model as `<name>`, sends its calls to the supervisor as `POST /tool {name: "control.<name>"}` with the control-tool timeout, and returns the answer or the error to the model. Instructions follow the hosted system prompt. Both are kept in the run's checkpoint, so a resumed, unpaused or restarted run has the same tools and instructions. A name that a runtime tool already uses is dropped, a chat-only model gets neither, and payloads without the fields behave exactly as before. Changing these tools is now a CrowdCode deploy, not an opencrowd release.
+
 ## 0.16.21 — 2026-11-18
 
 - **A dear model no longer forgets its task every two turns.** Compaction's price trigger (two cents of input a turn, never below 24,000 tokens) was compared against the whole request, system instructions and tool definitions included. A hosted agent's come to about 15,000 estimated tokens, so on `moonshot/kimi-k3.1-pro` at $2 a million the 12,000-token target was smaller than what can never be removed. Every compaction took each exchange, then the running summary, then the owner's 4,164-character request, and fired again two or three turns later: 35 times in 91 calls, a $10 budget spent re-reading its own archive. Now:

@@ -241,9 +241,16 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ from: text(args.from), to: text(args.to), amount_usd: text(args.amount_usd),
         quote_only: args.quote_only === true ? "true" : undefined, transfer_id: text(args.transfer_id) });
     default:
+      // Control-declared tools (C2): their arguments are control's to define,
+      // so only short identifying fields are kept, never free text.
+      if (name.startsWith("control.")) return pick(Object.fromEntries(CONTROL_TOOL_SUMMARY_FIELDS
+        .map((field) => [field, text(args[field], 120)])));
       return undefined;
   }
 }
+
+/** The fields of a control-declared tool call that the run's trace shows. */
+const CONTROL_TOOL_SUMMARY_FIELDS = ["action", "agent", "id", "kind", "status", "option", "host", "mode", "path", "amount_usd", "budget_usd"] as const;
 
 function automationSchema(extra: Record<string, JsonSchema>, required: string[] = []): JsonSchema {
   return objectSchema({

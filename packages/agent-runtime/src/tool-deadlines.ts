@@ -43,6 +43,8 @@ const DEFAULT_TOOL_DEADLINE_MS = 120_000;
  */
 export function toolDeadlineMs(name: string, env: NodeJS.ProcessEnv = process.env): number {
   if (name === "run_shell") return SHELL_TIMEOUT_CEILING_MS + 120_000;
+  // Control-declared tools are answered by control, like deploy_service.
+  if (name.startsWith("control.")) return HOSTED_CONTROL_TOOL_TIMEOUT_MS + 60_000;
   void env;
   return TOOL_DEADLINE_MS[name] ?? DEFAULT_TOOL_DEADLINE_MS;
 }
