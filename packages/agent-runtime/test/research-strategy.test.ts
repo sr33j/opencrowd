@@ -122,6 +122,27 @@ describe("change strategy after empty results", () => {
   });
 });
 
+describe("a seller that is down", () => {
+  it("counts one endpoint failing a parallel batch as one failure, so the run can try another service", async () => {
+    const DOWN = "https://reddit.apitoll.cloud/v1/reddit/search";
+    const tools: DynamicToolsOption = {
+      definitions: [{ name: "call_paid_service", description: "call", parameters: { type: "object" } }],
+      execute: async (_name, args) => args.url === DOWN
+        ? { ok: false, error: `the call to ${DOWN} failed in transport and its payment state is unknown` }
+        : { ok: true, data: { outcome: "paid_success", status: 200, data: { posts: [{ author: "alice" }] } } }
+    };
+    const responses: LlmResponse[] = [
+      { content: "", toolCalls: ["a", "b", "c"].map(q => call(`d-${q}`, "call_paid_service", { url: DOWN, method: "GET", body: { q } })) },
+      { content: "", toolCalls: [call("ok", "call_paid_service", { url: CONTENT_SEARCH, method: "POST", body: { q: "x402" } })] },
+      done("Found u/alice.")
+    ];
+    const result = await runAgentTaskDetailed(await session(), "Find people on Reddit.", {
+      provider: { complete: async () => responses.shift() ?? done("Found u/alice.") }, dynamicTools: tools, knowledge: false
+    });
+    expect(result).toMatchObject({ outcome: "completed", summary: { final_message: "Found u/alice." } });
+  });
+});
+
 describe("honest early stops", () => {
   const task1 = "Find 100 useful individual GTM prospects for crowdcode.app.\n\nCustomer: indie AI-agent builders.";
   const answer1 = "Completed a new workspace with 32 unique prospect records (a verified subset, not padded to 100). Costs: 15 paid searches at $0.01.";

@@ -4,7 +4,7 @@ import { completeWithContext, type ContextState, type ModelPrices } from "./cont
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
-import { earlyStopNudge, emptyServiceLog, recordServiceResult, type ServiceLog } from "./service-strategy.js";
+import { earlyStopNudge, emptyServiceLog, endpointKey, recordServiceResult, type ServiceLog } from "./service-strategy.js";
 import {
   atomicWrite,
   conversationPath,
@@ -1226,6 +1226,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         }
       }
     }
+    // One endpoint failing a parallel batch is one failure, not one per call:
+    // three calls to a seller that is down ended a run before it could try
+    // another service (SRI-119).
+    const failedEndpoints = new Set<string>();
     for (const call of response.toolCalls) {
       options.signal?.throwIfAborted();
       options.onProgress?.({
@@ -1326,7 +1330,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       // A successful purchase proves paid services work in this run; only a streak of failures should stop it.
       if (call.name === "call_paid_service" && result.ok) serviceCallFailures = 0;
       if (!result.ok) {
-        if (call.name === "call_paid_service") {
+        const failedEndpoint = call.name === "call_paid_service" ? endpointKey(callArguments.url, callArguments.method) ?? "" : undefined;
+        if (failedEndpoint !== undefined && !failedEndpoints.has(failedEndpoint)) {
+          failedEndpoints.add(failedEndpoint);
           serviceCallFailures += 1;
           if (serviceCallFailures >= 3) {
             if (holding()) return deliverHeld(turn, `paid service calls failed ${serviceCallFailures} times: ${result.error}`);

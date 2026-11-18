@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.20 — 2026-11-18
+
+- **A seller that is down no longer ends the run in one turn (SRI-119).** A run stops after three paid-service failures in a row, and three parallel calls to one endpoint used to count as all three: on 2026-11-18 a Reddit research run sent three searches to a seller answering 502 in one reply and was stopped before it could try another service. Failures of one endpoint (method and URL, query aside) within one reply now count once; three failing turns, or three different failing endpoints, still stop the run.
+
 ## 0.16.19 — 2026-11-18
 
 - **A slow CrowdCode backend no longer puts a run on the September snapshot.** On 2026-11-17 at 23:45 UTC a hosted run's 2 s tree fetch timed out because the backend's new instance was still warming its search index (Render p95 latency 165 s that minute). The run went out on the bundled 2026-09-14 tree instead of the served v31.
