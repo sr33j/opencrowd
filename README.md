@@ -183,8 +183,8 @@ or `OPENCROWD_KNOWLEDGE_DIR`); pass `--knowledge <tree dir>` to evaluate a
 candidate or `--knowledge none` for the static-prompt baseline.
 
 Normal runs read CrowdCode's live capability tree instead: at session start
-the agent fetches `GET /api/tree` (two seconds at most, cached for an hour per
-process), puts its `l0` in the prompt, and reads deeper nodes with the
+the agent fetches `GET /api/tree` (4 s per attempt and one retry, cached for an
+hour, and the last tree served kept on disk for when the backend is slow), puts its `l0` in the prompt, and reads deeper nodes with the
 `browse_services` tool. `find_paid_service` and `inspect_paid_service` show
 each service's CrowdCode reliability state (reliable, unverified, unreliable)
 and the reason, reliable first. When the tree cannot be fetched the bundled

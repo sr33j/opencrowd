@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -52,6 +52,80 @@ describe("the live capability tree (C7)", () => {
     expect((await fetchLiveTree({ base: `${BASE}/b`, fetcher: broken })).error).toContain("HTTP 503");
     const empty = (async () => json({ version: 3, l0: "" })) as typeof fetch;
     expect((await fetchLiveTree({ base: `${BASE}/c`, fetcher: empty })).error).toContain("no l0");
+  });
+
+  it("retries once, so one dropped answer does not cost the run its tree", async () => {
+    let calls = 0;
+    const flaky = (async () => { if (calls++ === 0) throw new TypeError("fetch failed"); return json({ version: 33, l0: "tree v33" }); }) as typeof fetch;
+    expect((await fetchLiveTree({ base: BASE, fetcher: flaky, retryDelayMs: 1 })).tree?.version).toBe(33);
+    expect(calls).toBe(2);
+    let refused = 0;
+    const down = (async () => { refused++; return json({ ok: false }, 502); }) as typeof fetch;
+    const result = await fetchLiveTree({ base: `${BASE}/down`, fetcher: down, retryDelayMs: 1 });
+    expect(refused).toBe(2);
+    expect(result.error).toBe("CrowdCode capability tree unavailable after 2 attempts of 4 s: HTTP 502");
+  });
+
+  describe("the last tree served, on the agent's volume", () => {
+    const slow = (ms: number) => ((_url: string, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(json({ version: 34, l0: "tree v34" })), ms);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new DOMException("The operation was aborted due to timeout", "TimeoutError")); });
+    })) as unknown as typeof fetch;
+
+    async function persistPath() {
+      const root = await mkdtemp(join(tmpdir(), "opencrowd-tree-disk-"));
+      roots.push(root);
+      return join(root, "metadata", "capability-tree.json");
+    }
+
+    it("stands in for a slow backend instead of the bundled snapshot, and says so", async () => {
+      const path = await persistPath();
+      let now = Date.parse("2026-11-17T23:00:00Z");
+      const good = (async () => json({ version: 33, built_at: "2026-11-17T22:00:00Z", l0: "tree v33" })) as typeof fetch;
+      expect((await fetchLiveTree({ base: BASE, fetcher: good, persistPath: path, now: () => now })).tree?.version).toBe(33);
+      expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({ version: 33, l0: "tree v33", base: BASE, fetchedAt: "2026-11-17T23:00:00.000Z" });
+      // A new process (a hosted wake) two hours later, while the backend warms up for longer than the deadline.
+      clearTreeCache();
+      now += 2 * 60 * 60_000;
+      const started = Date.now();
+      const result = await fetchLiveTree({ base: BASE, fetcher: slow(5_000), persistPath: path, now: () => now, timeoutMs: 100, retryDelayMs: 1 });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(result.tree).toEqual({ version: 33, builtAt: "2026-11-17T22:00:00Z", l0: "tree v33", source: `${BASE}/api/tree` });
+      expect(result.staleSince).toBe("2026-11-17T23:00:00.000Z");
+      expect(result.error).toMatch(/unavailable after 2 attempts/);
+      // Within the failure minute the same process does not wait again.
+      const again = Date.now();
+      expect((await fetchLiveTree({ base: BASE, fetcher: slow(5_000), persistPath: path, now: () => now, timeoutMs: 100 })).tree?.version).toBe(33);
+      expect(Date.now() - again).toBeLessThan(50);
+      // A backend that answers within the deadline replaces the copy.
+      clearTreeCache();
+      expect((await fetchLiveTree({ base: BASE, fetcher: slow(10), persistPath: path, now: () => now, timeoutMs: 1_000 })).tree?.version).toBe(34);
+      expect(JSON.parse(await readFile(path, "utf8")).version).toBe(34);
+    });
+
+    it("spares a fresh process the fetch for an hour", async () => {
+      const path = await persistPath();
+      const now = Date.parse("2026-11-17T23:00:00Z");
+      let calls = 0;
+      const counted = (async () => { calls++; return json({ version: 33, l0: "tree v33" }); }) as typeof fetch;
+      await fetchLiveTree({ base: BASE, fetcher: counted, persistPath: path, now: () => now });
+      clearTreeCache();
+      expect((await fetchLiveTree({ base: BASE, fetcher: counted, persistPath: path, now: () => now + 59 * 60_000 })).tree?.version).toBe(33);
+      expect(calls).toBe(1);
+    });
+
+    it("is never read or written by a pinned run, nor read for another backend", async () => {
+      const path = await persistPath();
+      const good = (async () => json({ version: 33, l0: "tree v33" })) as typeof fetch;
+      await fetchLiveTree({ base: BASE, fetcher: good, persistPath: path, version: "candidate", fresh: true });
+      await expect(readFile(path, "utf8")).rejects.toThrow();
+      await fetchLiveTree({ base: BASE, fetcher: good, persistPath: path });
+      clearTreeCache();
+      const down = (async () => json({}, 503)) as typeof fetch;
+      expect((await fetchLiveTree({ base: BASE, fetcher: down, persistPath: path, version: "candidate", fresh: true, retryDelayMs: 1 })).tree).toBeUndefined();
+      expect((await fetchLiveTree({ base: `${BASE}/other`, fetcher: down, persistPath: path, retryDelayMs: 1 })).tree).toBeUndefined();
+      expect((await fetchLiveTree({ base: BASE, fetcher: down, persistPath: path, retryDelayMs: 1, now: () => Date.now() + 2 * 60 * 60_000 })).tree?.version).toBe(33);
+    });
   });
 
   it("takes a version pin from the run, then the environment, and ignores junk", () => {

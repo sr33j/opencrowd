@@ -1,4 +1,5 @@
-import { setSpendingHandler, type SpendingHandler, type ProgressEvent, type SessionState } from "@opencrowd/core";
+import { join } from "node:path";
+import { resolveAgentPaths, setSpendingHandler, type SpendingHandler, type ProgressEvent, type SessionState } from "@opencrowd/core";
 import {
   EconomyGateway,
   createCrowdCodeApi,
@@ -138,7 +139,7 @@ function cliRuntime(session: SessionState, options: PersistentAgentTaskOptions) 
     },
     economy: (current) => buildGateway(current, options),
     // CrowdCode's live capability tree, the bundled snapshot when it cannot be read; demo runs stay offline.
-    ...(options.testMode || connectorsDisabled() ? {} : { knowledge: { live: true } })
+    ...(options.testMode || connectorsDisabled() ? {} : { knowledge: { live: { persistPath: join(resolveAgentPaths().config, "capability-tree.json") } } })
   });
 }
 

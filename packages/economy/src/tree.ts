@@ -1,4 +1,5 @@
-import type { ToolResult } from "@opencrowd/core";
+import { readFile } from "node:fs/promises";
+import { atomicWrite, type ToolResult } from "@opencrowd/core";
 import { withDeadline } from "@opencrowd/protocol";
 
 /**
@@ -10,8 +11,16 @@ import { withDeadline } from "@opencrowd/protocol";
  */
 
 export const DEFAULT_CROWDCODE_API = "https://crowdcode-backend.onrender.com";
-/** The tree fetch at session start. A run starts on the bundled snapshot rather than wait longer. */
-export const TREE_FETCH_DEADLINE_MS = 2_000;
+/**
+ * One attempt at the tree at session start. Two seconds was not enough: on
+ * 2026-11-17 at 23:45 a run's fetch landed while the backend's new instance
+ * was still warming its search index (p95 latency 165 s for that minute) and
+ * the run went out on the September snapshot.
+ */
+export const TREE_FETCH_DEADLINE_MS = 4_000;
+/** Attempts per fetch: the first and one retry, so a run waits at most about 8.3 s. */
+const TREE_FETCH_ATTEMPTS = 2;
+const TREE_RETRY_DELAY_MS = 300;
 /**
  * The tree changes at most nightly. One copy per process per hour keeps the
  * system prompt byte-identical across a chat's runs, so prompt caching holds.
@@ -43,6 +52,12 @@ export interface LiveTree {
   l0: string;
   /** Where it came from, for the session record. */
   source: string;
+}
+
+/** The last tree a backend served, kept on disk so a slow backend costs a day's freshness, not the tree. */
+interface PersistedTree extends LiveTree {
+  base: string;
+  fetchedAt: string;
 }
 
 export interface CrowdCodeApiOptions {
@@ -79,44 +94,99 @@ export function clearTreeCache(): void {
   reliabilityCache.clear();
 }
 
+export interface LiveTreeResult {
+  tree?: LiveTree;
+  /** Why the backend's answer was not used; with `tree`, the tree is the last one served, read from disk. */
+  error?: string;
+  /** When `tree` is a persisted copy: when it was fetched. */
+  staleSince?: string;
+}
+
 /**
- * `GET /api/tree`, cached per process. Resolves to the tree or to the reason
- * it is unavailable; never rejects and never waits past `timeoutMs`.
+ * `GET /api/tree`: one attempt of `timeoutMs`, then one retry. Never rejects.
+ *
+ * The answer is kept for an hour in memory and, given `persistPath`, on disk:
+ * a hosted agent's worker is a new process on every wake, so the disk copy is
+ * what spares each run a fetch, and what a run falls back to when the backend
+ * is slow (stale-if-error), instead of the bundled snapshot. Only the
+ * published (`current`) tree is persisted; a run pinned to a version (W8's
+ * gate, `fresh`) neither reads nor writes either cache.
  */
 export async function fetchLiveTree(options: CrowdCodeApiOptions & {
   version?: string;
   timeoutMs?: number;
   now?: () => number;
-  /** Neither read nor write the per-process cache: a run pinned to a version (W8's gate) reads exactly that version, now. */
+  /** Neither read nor write the caches: a run pinned to a version (W8's gate) reads exactly that version, now. */
   fresh?: boolean;
-} = {}): Promise<{ tree?: LiveTree; error?: string }> {
+  /** Where the last tree served is kept (the agent's volume). */
+  persistPath?: string;
+  /** Tests: the pause before the retry. */
+  retryDelayMs?: number;
+} = {}): Promise<LiveTreeResult> {
   const base = (options.base ?? crowdcodeApiBase()).replace(/\/+$/, "");
   const version = options.version ?? "current";
   const now = options.now ?? Date.now;
   const key = `${base} ${version}`;
+  const persist = !options.fresh && version === "current" ? options.persistPath : undefined;
   const cached = options.fresh ? undefined : treeCache.get(key);
-  if (cached && cached.until > now()) return cached.tree ? { tree: cached.tree } : { error: cached.error };
+  if (cached?.tree && cached.until > now()) return { tree: cached.tree };
+  const stored = persist ? await readPersistedTree(persist, base) : undefined;
+  if (stored && now() - Date.parse(stored.fetchedAt) < TREE_CACHE_MS) {
+    const tree = liveTree(stored);
+    treeCache.set(key, { until: Date.parse(stored.fetchedAt) + TREE_CACHE_MS, tree });
+    return { tree };
+  }
+  let error = cached?.error && cached.until > now() ? cached.error : undefined;
+  if (!error) {
+    const fetched = await fetchTreeWithRetry(base, version, options);
+    if (fetched.tree) {
+      if (!options.fresh) treeCache.set(key, { until: now() + TREE_CACHE_MS, tree: fetched.tree });
+      if (persist) await atomicWrite(persist, JSON.stringify({ ...fetched.tree, base, fetchedAt: new Date(now()).toISOString() } satisfies PersistedTree))
+        .catch(() => undefined);
+      return { tree: fetched.tree };
+    }
+    error = fetched.error!;
+    if (!options.fresh) treeCache.set(key, { until: now() + TREE_FAILURE_CACHE_MS, error });
+  }
+  return stored ? { tree: liveTree(stored), error, staleSince: stored.fetchedAt } : { error };
+}
+
+async function fetchTreeWithRetry(base: string, version: string, options: { fetcher?: typeof fetch; timeoutMs?: number; retryDelayMs?: number }):
+  Promise<{ tree?: LiveTree; error?: string }> {
   const timeoutMs = options.timeoutMs ?? TREE_FETCH_DEADLINE_MS;
   const url = `${base}/api/tree${version === "current" ? "" : `?version=${encodeURIComponent(version)}`}`;
+  const failures: string[] = [];
+  for (let attempt = 1; attempt <= TREE_FETCH_ATTEMPTS; attempt++) {
+    if (attempt > 1) await new Promise((resolve) => setTimeout(resolve, options.retryDelayMs ?? TREE_RETRY_DELAY_MS));
+    try {
+      const body = await withDeadline(async () => {
+        const response = await (options.fetcher ?? fetch)(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json() as Record<string, unknown>;
+      }, timeoutMs, "CrowdCode capability tree");
+      const number = typeof body.version === "number" ? body.version : Number(body.version);
+      const l0 = typeof body.l0 === "string" ? body.l0.trim() : "";
+      if (!Number.isInteger(number) || number < 0 || !l0) throw new Error("the answer had no version or no l0");
+      return { tree: { version: number, l0, source: `${base}/api/tree`, ...(typeof body.built_at === "string" ? { builtAt: body.built_at } : {}) } };
+    } catch (error) {
+      failures.push((error as Error).message);
+    }
+  }
+  return { error: `CrowdCode capability tree unavailable after ${TREE_FETCH_ATTEMPTS} attempts of ${Math.round(timeoutMs / 1000)} s: ${[...new Set(failures)].join("; ")}` };
+}
+
+async function readPersistedTree(path: string, base: string): Promise<PersistedTree | undefined> {
   try {
-    const body = await withDeadline(async () => {
-      const response = await (options.fetcher ?? fetch)(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return await response.json() as Record<string, unknown>;
-    }, timeoutMs, "CrowdCode capability tree");
-    const number = typeof body.version === "number" ? body.version : Number(body.version);
-    const l0 = typeof body.l0 === "string" ? body.l0.trim() : "";
-    if (!Number.isInteger(number) || number < 0 || !l0) throw new Error("the answer had no version or no l0");
-    const tree: LiveTree = { version: number, l0, source: `${base}/api/tree`,
-      ...(typeof body.built_at === "string" ? { builtAt: body.built_at } : {}) };
-    if (!options.fresh) treeCache.set(key, { until: now() + TREE_CACHE_MS, tree });
-    return { tree };
-  } catch (error) {
-    const reason = `CrowdCode capability tree unavailable: ${(error as Error).message}`;
-    if (!options.fresh) treeCache.set(key, { until: now() + TREE_FAILURE_CACHE_MS, error: reason });
-    return { error: reason };
+    const stored = JSON.parse(await readFile(path, "utf8")) as Partial<PersistedTree>;
+    return stored.base === base && Number.isInteger(stored.version) && typeof stored.l0 === "string" && stored.l0
+      && typeof stored.source === "string" && typeof stored.fetchedAt === "string" && !Number.isNaN(Date.parse(stored.fetchedAt))
+      ? stored as PersistedTree : undefined;
+  } catch {
+    return undefined;
   }
 }
+
+const liveTree = ({ version, l0, source, builtAt }: LiveTree): LiveTree => ({ version, l0, source, ...(builtAt ? { builtAt } : {}) });
 
 const NODE_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const nodeCache = new Map<string, { until: number; result: ToolResult }>();
