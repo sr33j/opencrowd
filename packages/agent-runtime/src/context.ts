@@ -29,6 +29,17 @@ export interface ContextState {
    * trigger is set from what the cache actually did rather than from hope.
    */
   cachedFraction?: number;
+  /**
+   * What the last compaction got the request down to, in estimated tokens.
+   *
+   * A price-driven compaction aims at a target it cannot always reach: the
+   * system instructions, the tools and the requests it must keep are not its
+   * to remove. Without this, a request still over its trigger is compacted
+   * again on the very next turn, and the turn after, each one taking the
+   * exchange the model has just made. The next price trigger is measured from
+   * here instead, so every compaction is followed by room to work in.
+   */
+  compactedTo?: number;
 }
 
 /** What the seller charges, for deciding how much history a turn can afford. */
@@ -138,6 +149,13 @@ const SUMMARY_SHARE = 0.25;
  * is one line of digest (SRI-81).
  */
 const EXTERNALIZE_MIN_CHARS = 4096;
+/**
+ * The request a chat opened with is what the work is for, and is not pasted
+ * material until it is several times that long. A 4,164-character brief was
+ * filed as if it were a log, and the model's every next act was to read it
+ * back (2026-11-13).
+ */
+const EXTERNALIZE_REQUEST_MIN_CHARS = 16_384;
 /** How much of a saved message the pointer quotes, so the model knows what is in it. */
 const EXTERNALIZE_PREVIEW_CHARS = 240;
 
@@ -248,15 +266,34 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   // price was. Whichever binds first decides, and on a seller whose prompt
   // cache is hitting the price trigger relaxes on its own, because resending
   // a cached history is what is actually cheap.
+  //
+  // The price buys *history*. System instructions and tool definitions are
+  // sent on every turn whatever is compacted, so they are counted beside the
+  // allowance and not inside it. On 2026-11-13 they were counted inside: a
+  // hosted run on a $2-a-million model had 24,000 tokens to trigger at and
+  // 12,000 to aim for, its instructions and tools alone came to more than
+  // that, and so every compaction removed everything it was allowed to — each
+  // exchange, the summary of them, and finally the owner's request itself. The
+  // model woke with a pointer to a file 35 times in 91 calls and spent $10
+  // re-reading its own archive.
   const cost = costTriggerTokens({ ...options.prices, cachedFraction: options.state.cachedFraction });
-  const ceiling = cost === undefined ? limits.trigger : Math.min(limits.trigger, cost);
+  const fixed = count(messages.filter((message) => message.role === "system"));
+  // Never sooner than half an allowance past where the last compaction ended.
+  const priced = cost === undefined ? undefined
+    : Math.max(fixed + cost, (options.state.compactedTo ?? 0) + Math.floor(cost / 2));
+  const ceiling = priced === undefined ? limits.trigger : Math.min(limits.trigger, priced);
   // What this attempt aims at. A retry follows a refusal the catalogue did not
   // predict, so it aims at half of what is measurably here as well as half of
   // the window: halving a trigger derived from a window that claims a million
   // tokens leaves a 147,000-token conversation untouched and spends the retry
   // on the very same refusal.
   const trigger = retry ? Math.min(Math.floor(limits.trigger * 0.5 ** retry), Math.floor(tokensBefore * 0.5)) : ceiling;
-  const target = Math.min(limits.target, Math.floor(trigger * 0.5));
+  // What the window, the transport or a refusal demand, and what the price
+  // would like. The first is worth saving the owner's own request to a file
+  // for; the second is not (see the last resorts below).
+  const hardTarget = Math.min(limits.target, Math.floor((retry ? trigger : limits.trigger) * 0.5));
+  const target = retry || cost === undefined || ceiling === limits.trigger ? hardTarget
+    : Math.min(hardTarget, fixed + Math.floor(cost / 2));
   const transportLimit = retry ? Math.floor(Math.min(byteCeiling, bytes(messages) * 0.5)) : byteCeiling;
   if (tokensBefore <= trigger && bytes(messages) <= transportLimit && messages.length <= MODEL_MAX_MESSAGES && !retry)
     return { tokensBefore, tokensAfter: tokensBefore };
@@ -287,7 +324,8 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   const carried = summaryLines(messages.find((message) => message.contextArchive)?.content);
   const list = messages.map((m, index) => ({ message: structuredClone(m), index })).filter(({ message }) => !message.contextArchive);
   const current = () => list.map(({ message }) => message);
-  const fitsTarget = () => count(current()) <= target && bytes(current()) <= transportLimit * 0.5 && list.length <= MODEL_MAX_MESSAGES / 2;
+  const fits = (tokens: number) => count(current()) <= tokens && bytes(current()) <= transportLimit * 0.5 && list.length <= MODEL_MAX_MESSAGES / 2;
+  const fitsTarget = () => fits(target), fitsHard = () => fits(hardTarget);
   // The pointer's own words are budgeted from the start, so what is left for
   // the running summary is what trimming actually freed.
   const reference: LlmMessage = { role: "user", contextArchive: archivePath, content: archiveReference(archivePath, []) };
@@ -298,12 +336,25 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   const toolNames = new Map(messages.flatMap((message) => message.toolCalls?.map((call) => [call.id, call.name] as const) ?? []));
   const dropped: LlmMessage[] = [];
 
-  // Old tool results first. Never edit tool call IDs or arguments.
-  for (const entry of list) {
-    if (fitsTarget()) break;
-    if (entry.message.role === "tool" && entry.message.content.length > 512)
-      entry.message.content = await externalize(entry.message, entry.index);
+  // The calls the model has just made and has not yet read the results of.
+  // They are what its next turn is about, so they are the last tool results to
+  // be saved to a file and the last exchange to be removed: a model handed a
+  // pointer where its command's output should be spends the turn fetching it.
+  const unread = new Set<(typeof list)[number]>();
+  for (let i = list.length - 1; i >= 0 && list[i].message.role !== "assistant"; i--) {
+    if (list[i].message.role !== "tool") continue;
+    unread.add(list[i]);
+    if (list[i - 1]?.message.role === "assistant") unread.add(list[i - 1]);
   }
+  const externalizeResults = async (which: (entry: (typeof list)[number]) => boolean) => {
+    for (const entry of list) {
+      if (fitsTarget()) break;
+      if (entry.message.role === "tool" && entry.message.content.length > 512 && which(entry))
+        entry.message.content = await externalize(entry.message, entry.index);
+    }
+  };
+  // Old tool results first. Never edit tool call IDs or arguments.
+  await externalizeResults((entry) => !unread.has(entry));
 
   const users = list.filter(({ message }) => message.role === "user" && !message.contextArchive);
   const first = users[0], latest = users.at(-1);
@@ -317,7 +368,7 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   // The current request is left to the checks below.
   for (const entry of users) {
     if (fitsTarget()) break;
-    if (entry !== latest && entry.message.content.length > EXTERNALIZE_MIN_CHARS)
+    if (entry !== latest && entry.message.content.length > (entry === first ? EXTERNALIZE_REQUEST_MIN_CHARS : EXTERNALIZE_MIN_CHARS))
       entry.message.content = await externalize(entry.message, entry.index);
   }
   for (const entry of [...new Set([first, latest])]) {
@@ -348,19 +399,23 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   // handful of lines however much was removed.
   const removed: { message: LlmMessage; index: number }[] = [];
   const running = [...carried], reserve = target * SUMMARY_SHARE;
-  const reserveSummary = () => {
+  const reserved = (lines: readonly string[]) => {
     let tokens = 0, keep = 0;
-    for (let k = running.length - 1; k >= 0 && keep < SUMMARY_MAX_LINES; k--, keep++) {
-      tokens += estimateContextTokens(running[k]) * scale;
+    for (let k = lines.length - 1; k >= 0 && keep < SUMMARY_MAX_LINES; k--, keep++) {
+      tokens += estimateContextTokens(lines[k]) * scale;
       if (tokens > reserve) break;
     }
-    reference.content = archiveReference(archivePath, keep ? running.slice(-keep) : []);
+    return archiveReference(archivePath, keep ? lines.slice(-keep) : []);
   };
+  const reserveSummary = () => { reference.content = reserved(running); };
   reserveSummary();
   for (const spare of [true, false]) {
+    // Everything older has gone and it still does not fit: now the unread
+    // results are saved to files, before the calls that made them are removed.
+    if (!spare) await externalizeResults(() => true);
     for (let i = 0; i < list.length && !fitsTarget();) {
       const entry = list[i];
-      if (entry.message.role === "system" || entry.message.contextArchive || entry === first || entry === latest || (spare && newest.has(entry))) { i++; continue; }
+      if (entry.message.role === "system" || entry.message.contextArchive || entry === first || entry === latest || (spare && (newest.has(entry) || unread.has(entry)))) { i++; continue; }
       let end = i + 1;
       if (entry.message.role === "assistant") {
         while (list[end]?.message.role === "tool") end++;
@@ -390,11 +445,23 @@ export async function compactContext(session: SessionState, messages: LlmMessage
       reference.content = wanted;
       if (!fitsTarget()) { reference.content = fallback; break; }
     }
+    // A price that cannot be met is not a reason to forget. What is left is
+    // what had to be kept, and the summary's own share is a few hundred tokens
+    // against a model that otherwise has no idea what it has already done.
+    if (!summaryLines(reference.content).length && target < hardTarget) {
+      const without = reference.content;
+      reference.content = reserved(lines);
+      if (!fitsHard()) reference.content = without;
+    }
   }
   // A protected user input can itself exceed the entire model window. Store it
   // verbatim, preserving its role and an actionable reference instead of cutting it.
+  //
+  // Only for the window: turning the request the model is working on into a
+  // pointer saves a fraction of a cent a turn and costs the turn, because the
+  // model's next act is to go and read it back.
   for (const entry of [...new Set([first, latest])]) {
-    if (fitsTarget()) break;
+    if (fitsHard()) break;
     if (entry && entry.message.content.length > 512)
       entry.message.content = await externalize(entry.message, entry.index);
   }
@@ -407,5 +474,6 @@ export async function compactContext(session: SessionState, messages: LlmMessage
   if (tokensAfter > Math.max(trigger, limits.trigger) || bytes(current()) > byteCeiling || list.length > MODEL_MAX_MESSAGES)
     throw new Error(`Context cannot fit after compaction: system instructions, tools and required references exceed the input budget. Original context: ${archivePath}`);
   messages.splice(0, messages.length, ...current());
+  options.state.compactedTo = tokensAfter;
   return { tokensBefore, tokensAfter, archivePath, summarized: dropped.length, saved: saved.size };
 }

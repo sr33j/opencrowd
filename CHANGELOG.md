@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.21 — 2026-11-18
+
+- **A dear model no longer forgets its task every two turns.** Compaction's price trigger (two cents of input a turn, never below 24,000 tokens) was compared against the whole request, system instructions and tool definitions included. A hosted agent's come to about 15,000 estimated tokens, so on `moonshot/kimi-k3.1-pro` at $2 a million the 12,000-token target was smaller than what can never be removed. Every compaction took each exchange, then the running summary, then the owner's 4,164-character request, and fired again two or three turns later: 35 times in 91 calls, a $10 budget spent re-reading its own archive. Now:
+  - The allowance is for history. The trigger is the instructions and tools plus the allowance; the target is the same plus half of it.
+  - A price-driven compaction keeps the running summary's reserved share and never saves the original or the current request to a file to meet its target. Those last resorts are for the window, the transport and a seller's refusal.
+  - It does not fire again until half an allowance of new history has arrived since the last compaction ended (`ContextState.compactedTo`, checkpointed with the rest of that state).
+  - The tool results the model has not read yet are the last to be saved to files, and their exchange the last removed, for any compaction.
+  - The request a chat opened with is treated as pasted material only above 16,384 characters (other user messages: 4,096).
+- A cheap model's price trigger moves out by the size of its instructions and tools, since they are no longer counted inside the two cents.
+
 ## 0.16.20 — 2026-11-18
 
 - **A seller that is down no longer ends the run in one turn (SRI-119).** A run stops after three paid-service failures in a row, and three parallel calls to one endpoint used to count as all three: on 2026-11-18 a Reddit research run sent three searches to a seller answering 502 in one reply and was stopped before it could try another service. Failures of one endpoint (method and URL, query aside) within one reply now count once; three failing turns, or three different failing endpoints, still stop the run.

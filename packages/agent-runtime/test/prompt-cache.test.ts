@@ -238,3 +238,107 @@ it("budgets for the snapshot note without letting compaction remove it", async (
   });
   expect(withSnapshot.tokensBefore).toBeGreaterThan(without.tokensBefore);
 });
+
+/**
+ * The hosted run of 2026-11-13, at its real sizes: `moonshot/kimi-k3.1-pro` at
+ * $2 a million inside a million-token window, system instructions and tool
+ * definitions that come to about 15,000 estimated tokens between them, a
+ * 4,164-character request, and a tool result of a couple of thousand tokens
+ * every turn.
+ */
+const DEAR = { contextWindowTokens: 1_048_576, maxOutputTokens: 4096, prices: { inputPriceUsdPerMillion: 2 } };
+const DEAR_TOOLS = [{ name: "run_shell", description: "d".repeat(30_000) }];
+const DEAR_TASK = "complete this task end to end\n---\n" + "I'm offering a reward for pre-2020 human text a detector flags. ".repeat(64);
+const dearRun = (): LlmMessage[] => [
+  { role: "system", content: "Hosted rules. " + "r".repeat(14_000) },
+  { role: "user", content: DEAR_TASK },
+];
+const dearStep = (i: number): LlmMessage[] => [
+  { role: "assistant", content: `Step ${i}: testing candidate ${i} against the detector.`,
+    toolCalls: [{ id: `s${i}`, name: "run_shell", arguments: { command: `./score candidate-${i}.txt` } }] },
+  { role: "tool", toolCallId: `s${i}`, content: JSON.stringify({ ok: true, data: { candidate: i, output: `score ${i}% ` + "line of output\n".repeat(400) } }) },
+];
+
+it("does not count a dear model's instructions and tools as history it may remove", async () => {
+  const s = await session(), messages = dearRun(), state: ContextState = {};
+  expect(DEAR_TASK.length).toBeGreaterThan(4096);
+  let compactions = 0;
+  for (let turn = 0; turn < 60; turn++) {
+    messages.push(...dearStep(turn));
+    const result = await compactContext(s, messages, { ...DEAR, tools: DEAR_TOOLS, state });
+    if (!result.archivePath) continue;
+    compactions++;
+    // The request is still the request, not a pointer to a file holding it.
+    expect(messages.some(m => m.content === DEAR_TASK)).toBe(true);
+    // What it has just done is still in front of it, word for word…
+    expect(messages.some(m => m.content.startsWith(`Step ${turn}:`))).toBe(true);
+    expect(messages.some(m => m.role === "tool" && m.content.includes(`score ${turn}% `))).toBe(true);
+    expect(messages.filter(m => m.role === "assistant").length).toBeGreaterThanOrEqual(3);
+    // …and what it did before that is a file it can search, not nothing.
+    expect(messages.some(m => m.role === "tool" && m.content.includes("saved verbatim to context/"))).toBe(true);
+    expect(result.tokensAfter).toBeLessThan(result.tokensBefore);
+  }
+  // It compacted once every two or three turns, 35 times in 91 calls.
+  expect(compactions).toBeGreaterThan(0);
+  expect(compactions).toBeLessThanOrEqual(12);
+});
+
+it("keeps the summary and the request when a price target cannot be reached", async () => {
+  const s = await session(), state: ContextState = {};
+  // The model's own prose cannot be saved to a file, so exchanges are removed;
+  // and what must be kept is, with the instructions and tools, over the target.
+  const messages = dearRun();
+  for (let i = 0; i < 12; i++)
+    messages.push({ role: "assistant", content: `Finding ${i}: the 1911 almanac scored ${i}%. ` + "Reasoning in prose. ".repeat(160),
+      toolCalls: [{ id: `p${i}`, name: "save_file", arguments: { path: `finding-${i}.md` } }] },
+    { role: "tool", toolCallId: `p${i}`, content: JSON.stringify({ ok: true, data: { path: `finding-${i}.md` } }) });
+  const current = "Now check these passages. " + "A pasted passage of ordinary prose. ".repeat(1_100);
+  messages.push({ role: "user", content: current });
+
+  const result = await compactContext(s, messages, { ...DEAR, tools: DEAR_TOOLS, state });
+  expect(result.archivePath).toBeTruthy();
+  expect(messages.some(m => m.content === DEAR_TASK)).toBe(true);
+  expect(messages.at(-1)!.content).toBe(current);
+  const summary = messages.find(m => m.contextArchive)!.content;
+  expect(summary).toContain("What has already happened, oldest first:");
+  expect(summary).toContain("the 1911 almanac scored");
+});
+
+it("does not compact for price again until there is room to work in", async () => {
+  const s = await session(), state: ContextState = {};
+  const messages = dearRun();
+  for (let i = 0; i < 12; i++) messages.push(...dearStep(i));
+  // A request large enough that everything else can go and the price is still not met.
+  messages.push({ role: "user", content: "Check these. " + "A pasted passage of ordinary prose. ".repeat(2_000) });
+  const request = messages.at(-1)!.content;
+  const first = await compactContext(s, messages, { ...DEAR, tools: DEAR_TOOLS, state });
+  expect(first.archivePath).toBeTruthy();
+  expect(messages.at(-1)!.content).toBe(request);
+  // Still over what this model's price triggers at: with no memory of having
+  // just compacted, the very next turn would be compacted too.
+  const forgetful = structuredClone([...messages, ...dearStep(99)]);
+  expect((await compactContext(s, forgetful, { ...DEAR, tools: DEAR_TOOLS, state: {} })).archivePath).toBeTruthy();
+
+  // The next turns are left alone, exchange and all…
+  let quiet = 0;
+  for (let turn = 100; ; turn++) {
+    messages.push(...dearStep(turn));
+    const next = await compactContext(s, messages, { ...DEAR, tools: DEAR_TOOLS, state });
+    if (next.archivePath) break;
+    expect(messages.some(m => m.content.startsWith(`Step ${turn}:`))).toBe(true);
+    quiet++;
+  }
+  // …for half an allowance of new history, which is several turns of it.
+  expect(quiet).toBeGreaterThanOrEqual(3);
+});
+
+it("still compacts a cheap model's chat at its price, counted over the instructions and tools", async () => {
+  const s = await session(), state: ContextState = {};
+  const messages = [...dearRun(), ...longChat().slice(2)];
+  const window = { contextWindowTokens: 1_000_000, maxOutputTokens: 4096, tools: DEAR_TOOLS, prices: { inputPriceUsdPerMillion: 0.396 } };
+  const result = await compactContext(s, messages, { ...window, state });
+  expect(result.archivePath).toBeTruthy();
+  // Half the 50,505-token allowance, beside about 15,000 tokens nothing can remove.
+  expect(result.tokensAfter).toBeLessThanOrEqual(15_500 + 25_300);
+  expect(result.tokensAfter).toBeGreaterThan(15_000);
+});

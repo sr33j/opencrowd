@@ -25,6 +25,53 @@ removed together. If protected content plus tools cannot fit the input budget,
 the run fails clearly without sending an oversized request. The 40% target is
 best effort when protected overhead exceeds it.
 
+## Compacting for price
+
+A window is not the only reason to compact. A chat resends its whole history on
+every turn, so on a model with a million-token window the price binds long
+before the window does. When the model's input price is known, compaction also
+triggers once the *history* costs more than two cents a turn
+(`CONTEXT_COST_BUDGET_USD`), and never below 24,000 estimated tokens of it
+(`CONTEXT_MIN_HISTORY_TOKENS`). While the seller's prompt cache is hitting and
+its cached price is published, the allowance grows accordingly.
+
+```text
+request = system instructions + tools + note   (fixed: sent whatever happens)
+        + history                              (what the allowance is for)
+
+price trigger = fixed + allowance
+price target  = fixed + allowance / 2
+```
+
+The allowance is for history alone. System instructions and tool definitions
+are counted beside it, because nothing compaction does can make them smaller.
+
+A price is a preference and a window is a limit, and they are held to
+different standards:
+
+| When the target cannot be met by removing history | For the window | For price |
+| --- | --- | --- |
+| Drop the running summary | yes | no, its reserved share is kept |
+| Save the original or the current request to a file | yes | no |
+| Compact again on the next turn | n/a | not until half an allowance of new history |
+
+Two things hold for either reason. The tool results the model has not read yet
+(the calls it has just made) are the last to be saved to files and theirs is
+the last exchange removed. And the request a chat opened with is treated as
+pasted material only above 16,384 characters; other user messages at 4,096.
+
+`ContextState.compactedTo` records where the last compaction ended, and is part
+of the worker checkpoint with the rest of that state.
+
+Why this is written down: on 2026-11-13 a hosted run on a $2-a-million model
+had its instructions and tools counted as history. They alone exceeded the
+12,000-token target, so each compaction removed every exchange, then the
+summary, then the owner's request, and fired again two turns later. The model
+restarted from a file pointer 35 times in 91 calls and spent its $10 budget
+re-reading its own archive.
+
+## Archives
+
 Archives live under `sessions/<session-id>/context/<content-sha256>/`:
 
 - `transcript.jsonl` contains every original message, including previous archive
