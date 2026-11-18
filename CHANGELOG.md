@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.23 — 2026-11-18
+
+- **A run that ends short of its task asks for the service that would have finished it (SRI-122).** Before, a run that answered "I couldn't find a service for this" after three turns, with no purchase and no failed tool, got no reflection at all. Now `endedShort()` reads the answer (first person or explicit: could not, partial, a workaround, no service could) and SRI-119's `countShortfall` against the task's own count. A run that ended short gets `SHORT_RUN_NUDGE`: call `request_service` once for the paid service that would have let it finish. No review is asked: CrowdCode's gateway already judges every settled hosted purchase. It comes after SRI-119's early-stop question, and like it is asked once; the held answer is delivered as before. `CompletionSignals` carries `task`.
+
 ## 0.16.22 — 2026-11-18
 
 - **Control can declare tools and instructions per run (SRI-121).** A hosted `run.start` may carry `payload.tools` (up to 16 `{name, description, parameters}`, named `control.<name>`) and `payload.instructions` (up to 8 prompt sections, 16 KB in total). The worker offers each tool to the model as `<name>`, sends its calls to the supervisor as `POST /tool {name: "control.<name>"}` with the control-tool timeout, and returns the answer or the error to the model. Instructions follow the hosted system prompt. Both are kept in the run's checkpoint, so a resumed, unpaused or restarted run has the same tools and instructions. A name that a runtime tool already uses is dropped, a chat-only model gets neither, and payloads without the fields behave exactly as before. Changing these tools is now a CrowdCode deploy, not an opencrowd release.
