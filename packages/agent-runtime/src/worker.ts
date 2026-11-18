@@ -12,6 +12,7 @@ import {
   type EventPayload, type RunOutcome
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
+import { repairToolPairs } from "./tool-pairs.js";
 import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { toolDeadlineError, toolDeadlineMs } from "./tool-deadlines.js";
@@ -516,8 +517,8 @@ export class MachineWorker {
 
   private async history(session: SessionState): Promise<LoopCheckpoint["messages"]> {
     try {
-      return (await readFile(join(session.sessionDir, "messages.jsonl"), "utf8")).split("\n").filter(Boolean)
-        .map(line => JSON.parse(line).message).filter(Boolean);
+      return repairToolPairs((await readFile(join(session.sessionDir, "messages.jsonl"), "utf8")).split("\n").filter(Boolean)
+        .map(line => JSON.parse(line).message).filter(Boolean));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
