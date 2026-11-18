@@ -304,6 +304,8 @@ export class EconomyGateway {
     if (!endpoint) {
       return { ok: false, error: "inspect_paid_service requires `url`" };
     }
+    const malformedInspect = endpointProblem(endpoint);
+    if (malformedInspect) return { ok: false, error: malformedInspect };
     const method = (stringArg(args.method) ?? "POST").toUpperCase();
     const schema = await this.options.agentcash.checkEndpointSchema({
       url: endpoint,
@@ -367,6 +369,10 @@ export class EconomyGateway {
     if (!endpoint) {
       return { ok: false, error: "call_paid_service requires `url`" };
     }
+    // Before any lookup or payment: a search phrase pasted into `url` is not
+    // an endpoint, and "inspect it first" would be the wrong advice (SRI-119).
+    const malformed = endpointProblem(endpoint);
+    if (malformed) return { ok: false, error: `${malformed} Nothing was paid.` };
     const method = (stringArg(args.method) ?? "POST").toUpperCase();
     // GET carries its inputs in the query string: a body on GET fails before payment.
     const { url: target, body } = requestFor(endpoint, method, args.body);
@@ -1094,3 +1100,22 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
     }
   }
 ];
+
+/**
+ * Why `url` cannot be a paid endpoint, or undefined when it can. A run on
+ * 2026-11-17 sent `https://github.com OpenClaw agent builder…` as the url of
+ * a call: a search phrase where an endpoint belongs.
+ */
+export function endpointProblem(url: string): string | undefined {
+  const shown = JSON.stringify(url.length > 120 ? `${url.slice(0, 120)}…` : url);
+  if (/\s/.test(url.trim()))
+    return `\`url\` must be one endpoint URL exactly as find_paid_service or inspect_paid_service returned it, and ${shown} contains spaces. Put search terms in \`body\` (or the query string), never in the URL itself.`;
+  let parsed: URL;
+  try { parsed = new URL(url.trim()); } catch { return `\`url\` ${shown} is not a valid URL; pass the endpoint exactly as find_paid_service or inspect_paid_service returned it.`; }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+    return `\`url\` ${shown} is not an http(s) endpoint.`;
+  const host = parsed.hostname;
+  if (!host || !(host.includes(".") || host === "localhost" || host.startsWith("[")))
+    return `\`url\` ${shown} has no valid host; pass the endpoint exactly as find_paid_service or inspect_paid_service returned it.`;
+  return undefined;
+}
