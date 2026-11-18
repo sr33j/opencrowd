@@ -234,12 +234,50 @@ describe("CrowdCode's live capability tree (C7)", () => {
       expect(RunStartCommandSchema.safeParse(start("latest")).success).toBe(false);
     });
 
+    it("gives a run the last tree served, not the September snapshot, when the backend is slow", async () => {
+      // Two wakes of one agent: the first reads v4; by the second the backend is warming up past the deadline.
+      const agentHome = await mkdtemp(join(tmpdir(), "oc-live-tree-"));
+      const slow = ((_url: string, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(new DOMException("The operation was aborted due to timeout", "TimeoutError")));
+      })) as unknown as typeof fetch;
+      const wake = async (fetcher: typeof fetch) => {
+        clearTreeCache();
+        const events: Event[] = [];
+        let system = "";
+        const provider: LlmProvider = { async complete(messages) {
+          system = messages.find((m) => m.role === "system")?.content ?? "";
+          return { content: "4", toolCalls: [{ id: "c", name: "complete_session", arguments: { final_message: "4" } }] };
+        } };
+        const worker = new MachineWorker({ agentHome, output: (line) => { events.push(JSON.parse(line)); }, provider: () => provider,
+          liveTree: { base: BASE, fetcher, timeoutMs: 200, retryDelayMs: 1, now: () => Date.now() + (fetcher === slow ? 2 * 60 * 60_000 : 0) },
+          economy: (_run, current) => new EconomyGateway({ session: current, agentcash: new MockAgentCashAdapter(), crowdcode: new MockCrowdCodeAdapter(),
+            approvalMode: "auto", approvalRulesPath: join(agentHome, "rules.json") }) });
+        await worker.initialize();
+        const command = { ...start(), id: `command-${events.length}${fetcher === slow ? "b" : "a"}`, runId: fetcher === slow ? "run-2" : "run-1" };
+        await worker.handleLine(JSON.stringify(command)); await worker.drain();
+        const finished = events.filter((e) => e.type === "run.finished").at(-1) as Extract<Event, { type: "run.finished" }>;
+        return { system, finished: finished.payload };
+      };
+      try {
+        expect((await wake(treeFetcher())).finished.knowledge).toEqual({ version: "capability-tree-v4", tree: 4 });
+        const second = await wake(slow);
+        expect(second.finished.outcome).toBe("completed");
+        expect(second.system).toContain(L0);
+        expect(second.system).not.toContain("Service knowledge base (derived from CrowdCode reviews");
+        expect(second.finished.knowledge).toMatchObject({ version: "capability-tree-v4", tree: 4 });
+        expect(second.finished.knowledge?.fallback).toMatch(/unavailable after 2 attempts.*using the last tree served, v4, fetched 20/);
+      } finally {
+        await rm(agentHome, { recursive: true, force: true });
+      }
+    });
+
     it("completes on the bundled snapshot when CrowdCode is unreachable", async () => {
       const hanging = (() => new Promise<Response>(() => undefined)) as unknown as typeof fetch;
       const started = Date.now();
       const result = await run(hanging);
       expect(result.outcome).toBe("completed");
-      expect(Date.now() - started).toBeLessThan(8_000);
+      // Two attempts of 4 s and the pause between them: never much more than 8.3 s.
+      expect(Date.now() - started).toBeLessThan(10_000);
       expect(result.system).toContain("Service knowledge base (derived from CrowdCode reviews");
       expect(result.knowledge?.fallback).toMatch(/capability tree unavailable/);
       expect(result.reported?.version).toBe(result.knowledge?.version);

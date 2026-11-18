@@ -34,8 +34,13 @@ export interface LiveTreeOptions extends CrowdCodeApiOptions {
   /** current (default), candidate, or a version number; OPENCROWD_TREE_VERSION when absent. */
   version?: string;
   timeoutMs?: number;
-  /** Bypass the per-process cache (a run pinned to a tree version). */
+  /** Bypass the caches (a run pinned to a tree version). */
   fresh?: boolean;
+  /** Keep the last tree served here and fall back to it when the backend is slow (the agent's volume). */
+  persistPath?: string;
+  /** Tests: the pause before the retry, and the clock. */
+  retryDelayMs?: number;
+  now?: () => number;
 }
 
 export interface KnowledgeOptions {
@@ -85,11 +90,14 @@ export async function loadKnowledgeTree(session: SessionState, options: Knowledg
   let fallback: string | undefined;
   if (options.live && !options.dir && !process.env.OPENCROWD_KNOWLEDGE_DIR?.trim()) {
     const live = options.live === true ? {} : options.live;
-    const { tree, error } = await fetchLiveTree({ ...live, version: treeVersionPin(live.version) });
+    const { tree, error, staleSince } = await fetchLiveTree({ ...live, version: treeVersionPin(live.version) });
     if (tree) {
       const version = `capability-tree-v${tree.version}`;
-      if (session.knowledge?.version !== version || session.knowledge?.source !== tree.source || session.knowledge?.tree !== tree.version) {
-        session.knowledge = { version, source: tree.source, loadedAt: new Date().toISOString(), tree: tree.version };
+      // A persisted copy stands in for a slow backend; the session still says the fetch failed.
+      const stale = error ? `${error}; using the last tree served, v${tree.version}, fetched ${staleSince}` : undefined;
+      if (session.knowledge?.version !== version || session.knowledge?.source !== tree.source || session.knowledge?.tree !== tree.version
+        || session.knowledge?.fallback !== stale) {
+        session.knowledge = { version, source: tree.source, loadedAt: new Date().toISOString(), tree: tree.version, ...(stale ? { fallback: stale } : {}) };
         await saveSession(session);
       }
       return { version, source: tree.source, l0: tree.l0, tree: tree.version };

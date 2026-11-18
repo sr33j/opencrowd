@@ -491,7 +491,8 @@ export class MachineWorker {
     if (resuming) return { knowledge: false };
     const treeVersion = run.start.payload.treeVersion;
     const live = this.options.liveTree;
-    const options: KnowledgeOptions = live === false ? {} : { live: { ...live, ...(treeVersion ? { version: treeVersion, fresh: true } : {}) } };
+    const options: KnowledgeOptions = live === false ? {} : { live: { persistPath: join(this.paths.metadata, "capability-tree.json"), ...live,
+      ...(treeVersion ? { version: treeVersion, fresh: true } : {}) } };
     let loaded;
     try {
       loaded = await loadKnowledgeTree(session, options);

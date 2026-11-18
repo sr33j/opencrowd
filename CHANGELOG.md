@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.19 — 2026-11-18
+
+- **A slow CrowdCode backend no longer puts a run on the September snapshot.** On 2026-11-17 at 23:45 UTC a hosted run's 2 s tree fetch timed out because the backend's new instance was still warming its search index (Render p95 latency 165 s that minute). The run went out on the bundled 2026-09-14 tree instead of the served v31.
+  - **Fetch:** the session-start fetch now gets 4 s per attempt and one retry, so a run waits at most about 8.3 s.
+  - **Persisted tree:** the last tree served is kept on the agent's volume (`<agent home>/metadata/capability-tree.json`; for the CLI, `capability-tree.json` in the config directory). A run whose fetch fails reads that tree, not the bundled one. `knowledge.fallback` records the failure and which tree stood in (`…; using the last tree served, v33, fetched <time>`), and `knowledge.tree` is the version the run actually read.
+  - **Fewer fetches:** a hosted worker is a new process on every wake, so the disk copy also spares a run the fetch for an hour.
+  - **Scope:** only the published tree is persisted. A run pinned with `treeVersion` neither reads nor writes it.
+
 ## 0.16.18 — 2026-11-18
 
 Research runs change strategy instead of repeating themselves (SRI-119). On 2026-11-17 a GTM-leads run stopped at 32 of 100 leads with $2.56 of its $3 left, and its continuation called one Reddit user-search endpoint eight times, every answer `{"data":{}}`, never tried the content search it had inspected, and stopped at 29 rows with $2.26 of $2.50 left.
