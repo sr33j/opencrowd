@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.25 — 2026-11-19
+
+- **A model call's input is recorded as a change from the last (SRI-127).** A hosted run captured every model call's whole input: the same system prompt, knowledge and history on every turn, three quarters of the daily diagnostic budget, and for a long run more than the 96 KB a diagnostic holds, so only a short preview survived. The worker now records a keyframe (`{ input }`) for a session's first call and every 24 calls when it fits in 64 KB, and otherwise an `inputDelta`: the earlier call it refers to (`base: { runId, callId }`) and its parts, each either messages taken from that call (`{ from, count }`) or new ones (`{ messages }`). `InputTrail`, `diffInput` and `applyInputDelta` are exported from the protocol; CrowdCode's admin trace uses them to rebuild each exact input. Owner-facing events do not change.
+
 ## 0.16.24 — 2026-11-18
 
 - **A conversation survives a run that stopped between a tool call and its result.** The loop guard can stop a run in the middle of a tool batch ("failed repeatedly"), and a worker can stop mid-turn. Either leaves tool calls with no result in `messages.jsonl`, and every provider then refuses the conversation ("No tool output found for function call …"), so it was lost for good. The worker now repairs the history it replays (`repairToolPairs`): a call with no result gets a short "not run" result, and a result with no call is dropped. A sound history is unchanged.

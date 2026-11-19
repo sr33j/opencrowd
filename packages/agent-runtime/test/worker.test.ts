@@ -256,6 +256,23 @@ it("captures every model/tool input and exact failure output while redacting cre
   expect(results[0].payload).toMatchObject({toolCallId:calls[0].payload.toolCallId,status:'error',details:{value:{output:{data:{stdout:'exact stdout\n',stderr:'exact stderr\n',exit_code:17}}}}});
 });
 
+it("records the second model call's input as a change from the first (SRI-127)", async () => {
+  const home = await root(), events: Event[] = [];
+  let turn = 0;
+  const provider = { complete: async () => ++turn === 1
+    ? {content:"",toolCalls:[{id:"shell-1",name:"run_shell",arguments:{command:"printf hi"}}]}
+    : {content:"done",toolCalls:[]} };
+  const worker=new MachineWorker({agentHome:home,provider:()=>provider,
+    toolExecutor:async()=>({ok:true,data:{stdout:"hi"}}), output:line=>events.push(JSON.parse(line))});
+  await worker.initialize();await worker.handleLine(JSON.stringify(start()));await worker.drain();
+  const [first, second] = events.filter(e=>e.type==='model.started') as any[];
+  expect(Array.isArray(first.payload.details.value.input)).toBe(true);
+  const delta = second.payload.details.value.inputDelta;
+  expect(delta.base).toEqual({ runId: first.runId, callId: first.payload.callId });
+  expect(delta.parts[0]).toMatchObject({ from: 0 });
+  expect(delta.total).toBeGreaterThan(first.payload.details.value.input.length);
+});
+
 it("abandons a tool that never returns and lets the model carry the turn on", async () => {
   // The backstop below every tool's own deadline. Without it one tool that
   // never answers is a run the owner never hears back from — run 47a629fc

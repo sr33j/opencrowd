@@ -1,4 +1,4 @@
-import { capStrings, captureDetail, DeadlineExceeded, MAX_EXTERNAL_STRING_CHARS, scrubText, stripReasoning, withDeadline } from "@opencrowd/protocol";
+import { capStrings, captureDetail, DeadlineExceeded, InputTrail, MAX_EXTERNAL_STRING_CHARS, scrubText, stripReasoning, withDeadline } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -129,6 +129,8 @@ export class MachineWorker {
   readonly paths: AgentPaths;
   private state: WorkerState = { version: 1, seq: 0, commands: Object.create(null), runs: Object.create(null) };
   private writes: Promise<void> = Promise.resolve();
+  /** Each model call's input is recorded as a change from the last (SRI-127). */
+  private readonly inputs = new InputTrail();
   private running?: Promise<void>;
   private controller?: AbortController;
   private shuttingDown = false;
@@ -378,7 +380,7 @@ export class MachineWorker {
         complete: async (messages, context) => {
           const callId = randomUUID(), started = Date.now(), turn = run.checkpoint?.turn ?? 0;
           await this.emit("model.started", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn,
-            details: captureDetail({ input: messages }) }, runId, run.commandId);
+            details: captureDetail(this.inputs.record({ sessionId: session.sessionId, runId, callId }, messages)) }, runId, run.commandId);
           try {
             const result = await baseProvider.complete(messages, context);
             await this.emit("model.finished", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn, status: "ok",
