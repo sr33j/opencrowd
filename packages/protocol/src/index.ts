@@ -6,6 +6,7 @@ export * from "./events.js";
 export * from "./redact.js";
 export * from "./limits.js";
 export * from "./telemetry.js";
+export * from "./input-delta.js";
 export * from "./seq.js";
 export * from "./codec.js";
 export * from "./context.js";
