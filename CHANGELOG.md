@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.25 — 2026-11-19
+
+- **Every hosted turn carries one line of money (SRI-128).** Tool results used to carry the whole financial snapshot as JSON twice, before and after the tool (about 1,200 bytes), with no model prices. Org agents also saw a "remaining budget" left over from the run's $10 cap. Agents found out they were short only when a call was refused. A hosted turn now carries one `Money:` line on its newest message: the tool result's `money` field, or the note on the latest user message. It gives the free wallet, this run's spend and model calls, the cost of one call and of the next on the current model, and about how many calls are left. At a few calls left it adds `LOW:` and what control is doing about it. The protocol's financial state gains an optional `runway`, which control fills in with the model markup included. Without one, the line falls back to the run's own per-call inference costs. Nothing is written into older messages, so the cached prefix is unchanged. Local runs are unchanged.
+
 ## 0.16.24 — 2026-11-18
 
 - **A conversation survives a run that stopped between a tool call and its result.** The loop guard can stop a run in the middle of a tool batch ("failed repeatedly"), and a worker can stop mid-turn. Either leaves tool calls with no result in `messages.jsonl`, and every provider then refuses the conversation ("No tool output found for function call …"), so it was lost for good. The worker now repairs the history it replays (`repairToolPairs`): a call with no result gets a short "not run" result, and a result with no call is dropped. A sound history is unchanged.
