@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.26 — 2026-11-19
+
+- **The Money line leads with calls left and a tier, and names no fixed cost per call (SRI-128, revised by the owner).**
+  - It now reads `Money: ≈52 calls left (HIGH) · wallet … free · this run spent … · next call ≈… on <model>`.
+  - The tiers follow Budget Tracker's HIGH/MEDIUM/LOW/CRITICAL. LOW adds "verify before branching" and CRITICAL adds "wrap up". Control sends its tier in `runway.tier` and `runway.action`; without them, the same thresholds apply here (`tierOf`).
+  - Calls left are counted at the next call's cost, never at an average of earlier, shorter calls. A call costs more as the history grows.
+  - The system prompt says once that the wallet is sized for the task, so the agent shouldn't hold back out of caution. It also says that if money runs out, CrowdCode pauses the run with its work kept and arranges more; the agent doesn't ask.
+  - `runway.money_line: false` (an operator A/B control) shows no line at all.
+  - The line is still attached to the newest message only.
+
 ## 0.16.25 — 2026-11-19
 
 - **A model call's input is recorded as a change from the last (SRI-127).** A hosted run captured every model call's whole input: the same system prompt, knowledge and history on every turn, three quarters of the daily diagnostic budget, and for a long run more than the 96 KB a diagnostic holds, so only a short preview survived. The worker now records a keyframe (`{ input }`) for a session's first call and every 24 calls when it fits in 64 KB, and otherwise an `inputDelta`: the earlier call it refers to (`base: { runId, callId }`) and its parts, each either messages taken from that call (`{ from, count }`) or new ones (`{ messages }`). `InputTrail`, `diffInput` and `applyInputDelta` are exported from the protocol; CrowdCode's admin trace uses them to rebuild each exact input. Owner-facing events do not change.

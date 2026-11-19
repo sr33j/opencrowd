@@ -37,8 +37,13 @@ export const RunwaySchema = z.object({
   /** At or below `ask_at_calls` calls left, money is asked for (see `advice`). */
   ask_at_calls: z.number().int().min(0).max(999).optional(),
   low: z.boolean(),
-  /** One sentence on what is being done about it, or what the agent should do. */
+  /** One sentence on what is being done about it, or what the agent should do (shown by 0.16.25). */
   advice: z.string().max(400).optional(),
+  /** Calls-left tier, and the one action at LOW or CRITICAL ("verify before branching", "wrap up"). */
+  tier: z.enum(["HIGH", "MEDIUM", "LOW", "CRITICAL"]).optional(),
+  action: z.string().max(60).optional(),
+  /** False: show the agent no money line at all (the operator's A/B control). */
+  money_line: z.boolean().optional(),
   /** Share of this run's input tokens the seller served from its prompt cache. */
   cache_hit_rate: z.number().min(0).max(1).optional(),
 });

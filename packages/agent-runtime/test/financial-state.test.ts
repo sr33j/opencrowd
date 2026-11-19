@@ -41,7 +41,7 @@ it("refreshes model and service spending, replaces local budgets and keeps one a
       expect(messages[0].content).toContain("Inference and paid tools debit its USDC wallet.");
       if (calls === 1) {
         const tool = JSON.parse(messages.at(-1)!.content);
-        expect(tool.money).toBe("Money: wallet $1.9499 free · this run spent $0.0501 over 1 model call · ≈$0.000123 per model call · ≈999 calls left · paid calls above $0.1000 need approval.");
+        expect(tool.money).toBe("Money: ≈999+ calls left (HIGH) · wallet $1.9499 free · this run spent $0.0501 over 1 model call · last call $0.000123 · paid calls above $0.1000 need approval.");
         expect(tool).not.toHaveProperty("budget_before_tool_call");
       }
       if (calls === 2) expect(JSON.parse(messages.at(-1)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
