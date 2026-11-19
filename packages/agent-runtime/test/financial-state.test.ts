@@ -6,6 +6,7 @@ import { afterEach, expect, it } from "vitest";
 import { createSession } from "@opencrowd/core";
 import { atomicUsdc, type FinancialState } from "@opencrowd/protocol";
 import { runAgentTaskDetailed, type LoopCheckpoint } from "../src/index.js";
+import { usd } from "../src/money-line.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map(p => rm(p, { recursive: true, force: true }))); });
@@ -30,22 +31,18 @@ it("refreshes model and service spending, replaces local budgets and keeps one a
     dynamicTools: { definitions: [{ name: "call_paid_service", description: "test", parameters: {} }],
       execute: async () => { services += 50_000n; return { ok: true }; } },
     provider: { complete: async messages => {
-      // One authoritative snapshot per request: a note on the latest user
-      // message, or the latest tool result's own budget_after_tool_call.
-      const snapshots = messages.filter(m => m.content.includes("Current hosted financial snapshot: "));
+      // One money line per request, on the newest message only: a note on
+      // the latest user message, or the latest tool result's own `money`.
       const last = messages.at(-1)!;
-      expect(snapshots).toEqual(last.role === "user" ? [last] : []);
-      const snapshot = last.role === "user"
-        ? JSON.parse(last.content.slice(last.content.indexOf("{"), last.content.indexOf("]\n\n")))
-        : JSON.parse(last.content).budget_after_tool_call;
-      expect(snapshot.current_run.inference_spent_usdc).toBe(atomicUsdc(inference));
-      expect(snapshot.current_run.service_spent_usdc).toBe(atomicUsdc(services));
+      const line: string = last.role === "user" ? last.content : JSON.parse(last.content).money;
+      expect(line).toContain(`this run spent ${usd(Number(atomicUsdc(inference + services)))}`);
+      expect(messages.filter(m => m.role === "user").every(m => m === last || !m.content.includes("Money: "))).toBe(true);
       expect(messages[0].content).toContain("You operate this service for its owner.");
       expect(messages[0].content).toContain("Inference and paid tools debit its USDC wallet.");
       if (calls === 1) {
         const tool = JSON.parse(messages.at(-1)!.content);
-        expect(tool.budget_before_tool_call.current_run.inference_spent_usdc).toBe("0.000123");
-        expect(tool.budget_after_tool_call.current_run.service_spent_usdc).toBe("0.050000");
+        expect(tool.money).toBe("Money: wallet $1.9499 free · this run spent $0.0501 over 1 model call · ≈$0.000123 per model call · ≈999 calls left · paid calls above $0.1000 need approval.");
+        expect(tool).not.toHaveProperty("budget_before_tool_call");
       }
       if (calls === 2) expect(JSON.parse(messages.at(-1)!.content).result.data.current_run.inference_spent_usdc).toBe("0.000246");
       inference += 123n;
@@ -62,7 +59,7 @@ it("marks financial reads unavailable without retrying a paid response or return
     financialState: async () => { throw new Error("control offline"); },
     provider: { complete: async messages => {
       calls++;
-      expect(messages.at(-1)!.content).toContain('"status":"unavailable"');
+      expect(messages.at(-1)!.content).toContain("Money: unknown right now");
       return { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "Done" } }] };
     } },
   });

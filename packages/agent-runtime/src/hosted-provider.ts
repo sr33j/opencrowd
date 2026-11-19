@@ -31,7 +31,7 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
   chatOnly?: boolean }): LlmProvider {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
   const tools = options.chatOnly ? [] : [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
-    ? { ...tool, description: "Read authoritative hosted finances: live USDC wallet balance, settled inference and service spending, pending holds, and remaining authorized budget for this run." } : tool), ...(options.extraTools ?? [])];
+    ? { ...tool, description: "Read authoritative hosted finances in full: live USDC wallet balance per network, settled inference and service spending for this run, pending holds, and the runway (what a model call costs and how many are left)." } : tool), ...(options.extraTools ?? [])];
   return {
     async complete(messages, context) {
       const operationId = context?.operationId;

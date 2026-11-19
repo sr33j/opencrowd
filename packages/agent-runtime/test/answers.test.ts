@@ -49,7 +49,7 @@ describe("SRI-65: the financial snapshot is not the owner's turn", () => {
   const suggestible: LlmProvider = { complete: async messages => {
     const last = messages.at(-1)!;
     if (last.role === "tool") return complete(answer);
-    if (last.content.startsWith("Current hosted financial snapshot: "))
+    if (last.content.startsWith("Money: "))
       return complete("Snapshot received and noted as authoritative. No additional action taken.");
     return { content: "", toolCalls: [{ id: "sh", name: "run_shell", arguments: { command: "printf hello | sha256sum" } }] };
   } };
@@ -84,7 +84,7 @@ describe("SRI-65: the financial snapshot is not the owner's turn", () => {
     const last = requests[1].at(-1)!;
     expect(last).toMatchObject({ role: "user" });
     expect(last.content).toMatch(/^\[Automatic note from CrowdCode[\s\S]*\]\n\nAlso say hi\.$/);
-    expect(requests[1].filter(m => m.content.includes("Current hosted financial snapshot: "))).toHaveLength(1);
+    expect(requests[1].filter(m => m.role === "user" && m.content.includes("Money: "))).toHaveLength(1);
   });
 });
 
