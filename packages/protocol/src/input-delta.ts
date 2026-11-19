@@ -64,7 +64,7 @@ export function applyInputDelta(base: unknown[] | undefined, delta: InputDelta):
     if (!("from" in part)) continue;
     for (let i = 0; i < part.count; i++) {
       const message = base?.[part.from + i];
-      if (message === undefined) { missing++; messages.push(null); } else messages.push(message);
+      if (message === undefined || message === null) { missing++; messages.push(null); } else messages.push(message);
     }
   }
   return { messages, missing };
