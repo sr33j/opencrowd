@@ -1,7 +1,7 @@
 import { expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
 import { FinancialStateSchema, type FinancialState } from "@opencrowd/protocol";
-import { moneyLine, newMoneyTrack, trackModelCall, usd } from "../src/money-line.js";
+import { moneyLine, newMoneyTrack, tierOf, trackModelCall, usd } from "../src/money-line.js";
 
 const state = (runway?: object): FinancialState => FinancialStateSchema.parse({
   status: "available", run_id: randomUUID(), currency: "USDC", observed_at: new Date().toISOString(),
@@ -14,24 +14,33 @@ const state = (runway?: object): FinancialState => FinancialStateSchema.parse({
   ...(runway ? { runway } : {}),
 });
 
-it("says what is in the wallet, what a call costs and how many are left, in one line", () => {
+it("leads with calls left and the tier, and names the next call's cost, not a per-call cost", () => {
   const track = newMoneyTrack();
   for (let i = 0; i < 9; i++) trackModelCall(track, 0, 0.0158);
-  expect(moneyLine(state({ model: "openai/gpt-5.6-luna", next_call_usdc: "0.016000", per_call_usdc: "0.015800", calls_left: 52, low: false }), track))
-    .toBe("Money: wallet $0.8400 free (base $0.5000, solana $0.3400) · this run spent $0.1420 over 9 model calls · ≈$0.0158 per call on openai/gpt-5.6-luna, next ≈$0.0160 · ≈52 calls left · paid calls above $0.1000 need approval.");
+  expect(moneyLine(state({ model: "openai/gpt-5.6-luna", next_call_usdc: "0.016000", per_call_usdc: "0.015800", calls_left: 52, low: false, tier: "HIGH" }), track))
+    .toBe("Money: ≈52 calls left (HIGH) · wallet $0.8400 free (base $0.5000, solana $0.3400) · this run spent $0.1420 over 9 model calls · next call ≈$0.0160 on openai/gpt-5.6-luna · paid calls above $0.1000 need approval.");
 });
 
-it("says LOW with control's advice at a few calls left", () => {
-  const line = moneyLine(state({ model: "openai/gpt-5.6-luna", next_call_usdc: "0.016000", per_call_usdc: "0.015800", calls_left: 3, low: true,
-    advice: "your chief of staff has been asked for $0.50." }));
-  expect(line.endsWith(" LOW: your chief of staff has been asked for $0.50.")).toBe(true);
+it("gives the one action at LOW and CRITICAL", () => {
+  const line = moneyLine(state({ model: "m", next_call_usdc: "0.016000", per_call_usdc: "0.015800", calls_left: 3, low: true, tier: "CRITICAL", action: "wrap up" }));
+  expect(line!.startsWith("Money: ≈3 calls left (CRITICAL: wrap up) · ")).toBe(true);
+  expect(line).not.toContain("per call");
+  expect(tierOf(60)).toEqual({ tier: "HIGH" });
+  expect(tierOf(20)).toEqual({ tier: "MEDIUM" });
+  expect(tierOf(8)).toEqual({ tier: "LOW", action: "verify before branching" });
+  expect(tierOf(4)).toEqual({ tier: "CRITICAL", action: "wrap up" });
 });
 
-it("falls back to the run's own call costs when control sends no runway", () => {
+it("counts calls left at the newest call's cost when control sends no runway", () => {
   const track = newMoneyTrack();
-  trackModelCall(track, 0.1, 0.12);
-  trackModelCall(track, 0.12, 0.14);
-  expect(moneyLine(state(), track)).toContain("≈$0.0200 per model call · ≈42 calls left");
+  trackModelCall(track, 0.1, 0.11);
+  trackModelCall(track, 0.11, 0.13);
+  expect(moneyLine(state(), track)).toContain("Money: ≈42 calls left (HIGH) · ");
+  expect(moneyLine(state(), track)).toContain("last call $0.0200");
+});
+
+it("shows nothing at all when the operator turned the line off", () => {
+  expect(moneyLine(state({ model: "m", next_call_usdc: "0.001000", per_call_usdc: "0.001000", calls_left: 5, low: false, money_line: false }))).toBeUndefined();
 });
 
 it("never turns an unknown balance into zero", () => {
