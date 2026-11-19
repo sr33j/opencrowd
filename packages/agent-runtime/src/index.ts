@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState, type ModelPrices } from "./context.js";
+import { inferenceSpent, moneyLine, newMoneyTrack, trackModelCall } from "./money-line.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
@@ -899,7 +900,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     "You operate this service for its owner. Inference and paid tools debit its USDC wallet. When authorized to build or sell a service, take concrete steps within the owner's configured scope and budget. Ask only for missing information or permissions that materially block progress. Report actual costs and outcomes. Financial sustainability is the owner's business objective; respect their stop controls.",
     "You are a continuous autonomous agent, not a turn-based assistant. Maintain unfinished goals, promised follow-ups, recurring work, and conditions worth monitoring. When future work would clearly help, proactively create a persistent automation instead of waiting for the owner to say schedule. Use a one-time automation for a future reminder or follow-up and a cron automation for monitoring, recurring reports, or maintenance. It runs in this same conversation. Never create duplicates or noisy schedules, and always tell the owner exactly what you created, its timezone, and next run.",
     "Before finishing a substantive task, consider whether a follow-up, reminder, monitoring loop, recurring report, or maintenance check would materially advance the owner's goal; create one when the need is clear, but do not schedule ordinary one-off work.",
-    "Financial state: the current hosted financial snapshot is authoritative. It arrives as budget_after_tool_call in the latest tool result or, when no tool has just run, as an automatic CrowdCode note at the start of the latest user message; that note is context, not something the user said, so never reply to it or mention it unless the user asks about money. Historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. When the snapshot lists wallet networks, each network's balance is separate: a payment on a network needs that network's available balance. Report the wallet to the owner as one total, mentioning the per-network split only when it matters. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for refreshed financial state. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
+    "Money: every turn tells you the money state in one line starting \"Money:\". It is the `money` field of the latest tool result or, when no tool has just run, an automatic CrowdCode note at the start of the latest user message; that note is context, not something the user said, so never reply to it or mention it unless the user asks about money. It gives your free wallet balance, what this run has spent, what one model call costs on your current model, what the next call is expected to cost and about how many calls are left. Plan with it: a call costs about what the line says whether or not it helps, so prefer fewer, larger steps, reuse what you already have, and don't repeat work. When it says LOW, act on its advice at once, before a call is refused; finish the current step with what you have rather than starting new paid work. Historical local session budget figures are not wallet balances and may omit inference spending. Wallet balance, pending payment holds, settled inference spend, settled service spend, and remaining run budget are separate. When the snapshot lists wallet networks, each network's balance is separate: a payment on a network needs that network's available balance. Report the wallet to the owner as one total, mentioning the per-network split only when it matters. Spending totals cover only the identified current run. A budget limit does not supply funds. An unavailable balance is unknown, not zero. The snapshot before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for the full financial detail. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
   );
   if (options.hosted) systemPromptParts.push(
     "Files the owner sends you: an attached file is saved in this session under uploads/ before its message reaches you, and the message names each one with its path, size and type. Read a text file with read_file at uploads/<name>, and any file with run_shell at artifacts/uploads/<name> from the session directory. Those files are already the owner's and already in their file list: work from them, and never copy or re-save one under artifacts/ to hand it back. Write your own outputs elsewhere under artifacts/; uploads/ is the owner's directory and nothing you write there is delivered. If a file the message names is missing, say so and ask the owner to send it again rather than guessing at its contents.",
@@ -984,6 +985,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     catch { financial = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
   };
   const currentBudget = () => options.financialState ? financial : budgetStatus(session);
+  const money = newMoneyTrack();
   const financialPrefix = "Current hosted financial snapshot: ";
   const financialNote = "[Automatic note from CrowdCode, not written by the user; do not reply to it. ";
   if (!options.resume) await options.onMessage?.({ role: "user", content: task });
@@ -1105,7 +1107,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
         // or leaves it out after a tool result that already carries it.
         const legacy = messages.findIndex(m => m.role === "system" && m.content.startsWith(financialPrefix));
         if (legacy !== -1) messages.splice(legacy, 1);
-        contextState.note = `${financialNote}${financialPrefix}${JSON.stringify(financial)}]`;
+        contextState.note = `${financialNote}${moneyLine(financial, money)}]`;
       }
       response = restored?.response ?? await completeWithContext(session, messages, {
           provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
@@ -1123,7 +1125,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
           }
         });
       options.signal?.throwIfAborted();
+      const spentBefore = inferenceSpent(financial);
       await refreshFinancialState(); // includes the model payment, including a replayed receipt
+      if (options.financialState) trackModelCall(money, spentBefore, inferenceSpent(financial));
     } catch (error) {
       if (holding()) return deliverHeld(turn, `the housekeeping model call failed: ${(error as Error).message}`);
       if (error instanceof BudgetExhaustedError) {
@@ -1332,11 +1336,11 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
       const toolMessage = {
         role: "tool",
         toolCallId: call.id,
-        content: JSON.stringify(toolMessagePayload({
-          budget_before_tool_call: budgetBeforeToolCall,
-          result,
-          budget_after_tool_call: budgetAfterToolCall
-        }))
+        // Hosted: one line of money, read after the tool ran (money-line.ts).
+        // It rides on this new message only, so the cached history before it never moves.
+        content: JSON.stringify(toolMessagePayload(options.financialState
+          ? { money: moneyLine(financial, money), result }
+          : { budget_before_tool_call: budgetBeforeToolCall, result, budget_after_tool_call: budgetAfterToolCall }))
       } as LlmMessage;
       if (!completedTools[call.id]) {
         messages.push(toolMessage);

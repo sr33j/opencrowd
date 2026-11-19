@@ -17,6 +17,33 @@ export const NetworkBalanceSchema = z.object({
   available_usdc: usdc.nullable().optional(),
 });
 export type NetworkBalance = z.infer<typeof NetworkBalanceSchema>;
+/**
+ * How far the wallet goes at the run's model, as control estimates it from
+ * this session's own charges and the catalogue (SRI-128). Prices include
+ * CrowdCode's markup: they are what the wallet actually loses per call. The
+ * runtime renders it as one short line on every turn, so an agent knows what
+ * its next call costs and asks for money before a call is refused.
+ */
+export const RunwaySchema = z.object({
+  model: z.string().min(1).max(200),
+  /** What the next model call is expected to cost. */
+  next_call_usdc: usdc,
+  /** What must be free on the paying network for the next call to start (the seller's hold). */
+  next_hold_usdc: usdc.optional(),
+  /** The recent average cost of one model call in this conversation. */
+  per_call_usdc: usdc,
+  /** About how many more model calls the wallet covers. */
+  calls_left: z.number().int().min(0).max(999),
+  /** At or below `ask_at_calls` calls left, money is asked for (see `advice`). */
+  ask_at_calls: z.number().int().min(0).max(999).optional(),
+  low: z.boolean(),
+  /** One sentence on what is being done about it, or what the agent should do. */
+  advice: z.string().max(400).optional(),
+  /** Share of this run's input tokens the seller served from its prompt cache. */
+  cache_hit_rate: z.number().min(0).max(1).optional(),
+});
+export type Runway = z.infer<typeof RunwaySchema>;
+
 export const FinancialStateSchema = z.discriminatedUnion("status", [
   z.object({
     status: z.literal("available"),
@@ -42,6 +69,7 @@ export const FinancialStateSchema = z.discriminatedUnion("status", [
       per_call_approval_threshold_usdc: usdc,
       approval_mode: z.enum(["auto", "ask", "off"]),
     }),
+    runway: RunwaySchema.optional(),
   }),
   z.object({ status: z.literal("unavailable"), reason: z.string() }),
 ]);
