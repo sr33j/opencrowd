@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.32 — 2026-11-20
 
 - **Reviews capture task fit, once per endpoint (SRI-135).** On 2026-11-20 an org made a one-minute cartoon from six 10 s BlockRun clips. Its six reviews all came from CrowdCode's purchase judge, which was never told the task needed 60 s, so each said "no buyer-specific task was stated".
   - `call_paid_service` takes a one-sentence `purpose` (required in its schema): what the task needs from the call and any requirement the result must meet ("a 60 s cartoon; this is clip 1 of 6"). The hosted gateway gives it to the judge, outside the request digest, so restating it never makes a purchase a different one. A job's collect step called by its `job:` handle reuses the submit's purpose. It is kept on the purchase record as the default `task_context` of a review.
