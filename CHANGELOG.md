@@ -2,7 +2,7 @@
 
 ## 0.16.31 — 2026-11-20
 
-- **An async job's collect step is registered for the run (SRI-96 follow-up).** BlockRun's video submit answers with a `poll_url` of about 1,700 characters whose query string is part of it. On production an agent inspected it without that query, was told GET is not offered, and could not collect two clips it had already ordered. When a paid call's answer names a `poll_url` (or `status_url`) on the same origin, `call_paid_service` now registers the GET inspection for its absolute URL, with the same rail, payee and price ceiling. The result carries `collect: { method, url, inspected: true, note }`, and the run calls exactly that, with no `inspect_paid_service`.
+- **An async job's collect step is registered for the run (SRI-96 follow-up).** BlockRun's video submit answers with a `poll_url` of about 1,700 characters whose query string is part of it. On production an agent inspected it without that query, was told GET is not offered, and could not collect two clips it had already ordered. When a paid call's answer names a `poll_url` (or `status_url`) on the same origin, `call_paid_service` now registers the GET inspection for its absolute URL, with the same rail, payee and price ceiling. The result carries `collect: { method, job, url, inspected: true, note }`. `job` is a short handle (`job:` plus 12 hex digits of the URL's SHA-256, exported as `jobHandle`) that `call_paid_service` accepts as its `url`, defaulting to GET, so the model never copies the URL; it dropped a character from one on production. CrowdCode's wake for an uncollected job names the same handle.
 
 ## 0.16.30 — 2026-11-20
 

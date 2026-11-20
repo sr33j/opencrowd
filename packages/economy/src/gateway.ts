@@ -1,5 +1,6 @@
 import { CrowdCodePreferences } from "./crowdcode-preferences.js";
 import { readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { extractMedia } from "./media.js";
 import { capStrings, MAX_EXTERNAL_STRING_CHARS } from "@opencrowd/protocol";
@@ -367,7 +368,11 @@ export class EconomyGateway {
         error: "external-service purchases are disabled (approval mode `off`). Local tools and LLM inference remain available; switch with /approval ask|auto."
       };
     }
-    const endpoint = stringArg(args.url);
+    // `job:<handle>`: a job's collect URL, which a model copies wrong at 1,700 characters.
+    const asked = stringArg(args.url);
+    const endpoint = asked && JOB_HANDLE.test(asked) ? (await this.loadInspections()).get(`job ${asked}`)?.endpoint : asked;
+    if (asked && JOB_HANDLE.test(asked) && !endpoint)
+      return { ok: false, error: `${asked} is not a job this conversation started; use the collect url its submit returned. Nothing was paid.` };
     if (!endpoint) {
       return { ok: false, error: "call_paid_service requires `url`" };
     }
@@ -375,7 +380,7 @@ export class EconomyGateway {
     // an endpoint, and "inspect it first" would be the wrong advice (SRI-119).
     const malformed = endpointProblem(endpoint);
     if (malformed) return { ok: false, error: `${malformed} Nothing was paid.` };
-    const method = (stringArg(args.method) ?? "POST").toUpperCase();
+    const method = (stringArg(args.method) ?? (asked !== endpoint ? "GET" : "POST")).toUpperCase();
     // GET carries its inputs in the query string: a body on GET fails before payment.
     const { url: target, body } = requestFor(endpoint, method, args.body);
     const inspection = (await this.loadInspections()).get(inspectionKey(endpoint, method));
@@ -622,9 +627,12 @@ export class EconomyGateway {
     let url: string;
     try { url = new URL(poll, target).href; } catch { return undefined; }
     if (originOf(url) !== originOf(target)) return undefined;
-    await this.rememberInspection(inspectionKey(url, "GET"), { ...inspection, endpoint: url, method: "GET", inspectedAt: new Date().toISOString() });
-    return { method: "GET", url, inspected: true,
-      note: "Collect this job with call_paid_service using exactly this method and url (already inspected; no inspect_paid_service needed). Poll until it reports completed: a poll before then is not charged." };
+    const registered = { ...inspection, endpoint: url, method: "GET", inspectedAt: new Date().toISOString() };
+    const job = jobHandle(url);
+    await this.rememberInspection(inspectionKey(url, "GET"), registered);
+    await this.rememberInspection(`job ${job}`, registered);
+    return { method: "GET", job, url, inspected: true,
+      note: `Collect this job with call_paid_service method GET and url "${job}" (a short handle for this url, already inspected; no inspect_paid_service needed). Poll until it reports completed: a poll before then is not charged.` };
   }
 
   /**
@@ -929,6 +937,14 @@ function requestFor(endpoint: string, method: string, body: unknown): { url: str
   }
   return { url: url.href, body: undefined };
 }
+
+/**
+ * A short, stable name for an async job's collect URL: `job:` and the first
+ * twelve hex digits of the URL's SHA-256. CrowdCode's wake after an
+ * uncollected job names the same handle (hold-wakes.ts).
+ */
+export const jobHandle = (url: string) => `job:${createHash("sha256").update(url).digest("hex").slice(0, 12)}`;
+const JOB_HANDLE = /^job:[0-9a-f]{12}$/;
 
 function inspectionKey(endpoint: string, method: string): string {
   return `${method} ${endpoint}`;

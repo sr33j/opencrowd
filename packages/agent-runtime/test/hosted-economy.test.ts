@@ -9,7 +9,7 @@ import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parseP
 import { createHostedProvider, readHostedFinancialState } from "../src/hosted-provider.js";
 import { HOSTED_DECLARED_TOOL_BUDGET, MODEL_MAX_TOOLS } from "@opencrowd/protocol";
 import { unresolvedHoldsNote, withHoldsNote } from "../src/unresolved-holds.js";
-import { BASE_USDC, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
+import { BASE_USDC, jobHandle, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
 
 const discovery = vi.hoisted(() => ({ check: vi.fn(), discover: vi.fn() }));
@@ -424,9 +424,11 @@ describe("hosted economy: payment over the bridge", () => {
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const submit = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { prompt: "a cat" }, max_cost_cents: 26 });
     const collect = (submit.data as any).collect;
-    expect(collect).toMatchObject({ method: "GET", inspected: true, url: new URL(poll, SEARCH).href });
-    // No inspect_paid_service for the collect URL: the run calls it as told.
-    const done = await gateway.execute("call_paid_service", { url: collect.url, method: "GET", max_cost_cents: 26 });
+    expect(collect).toMatchObject({ method: "GET", inspected: true, url: new URL(poll, SEARCH).href, job: jobHandle(new URL(poll, SEARCH).href) });
+    expect(collect.job).toMatch(/^job:[0-9a-f]{12}$/);
+    // No inspect_paid_service for the collect URL, and no 1,700 characters to copy: the run passes the handle.
+    expect(await gateway.execute("call_paid_service", { url: "job:000000000000" })).toMatchObject({ ok: false, error: expect.stringContaining("is not a job this conversation started") });
+    const done = await gateway.execute("call_paid_service", { url: collect.job, max_cost_cents: 26 });
     expect(done.ok).toBe(true);
     expect(done.data).toMatchObject({ outcome: "paid_success", data: { status: "completed" } });
     expect(requests.filter(r => r.name === "economy.pay").at(-1)!.arguments).toMatchObject({ url: collect.url, method: "GET" });
