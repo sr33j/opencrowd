@@ -292,6 +292,22 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
           note: "This is your own service, so CrowdCode ran this call as a free owner test: nothing was paid or earned. Buyers pay the listed price as usual."
         };
       }
+      // The seller answered and took nothing (SRI-96 follow-up): an async job
+      // accepted on a verified payment, charged when collected, or an answer
+      // it does not charge for. The gateway released the authorization at
+      // once; the note says how to collect a job.
+      if (data.outcome === "unsettled") {
+        const ok = status !== undefined && status < 400;
+        return {
+          ok,
+          ambiguous: false,
+          status,
+          data: decodeBody(data.body, data.content_type),
+          authMode: "free",
+          error: ok ? undefined : `the service answered HTTP ${status ?? "?"}`,
+          note: stringValue(data.note) ?? "Not charged: the seller answered without taking the payment, so nothing is held."
+        };
+      }
       // Free but signed: the seller asked which wallet was calling, the
       // gateway answered with a zero-amount identity proof, and nothing was
       // paid on any network (SRI-88). There is no purchase to review.

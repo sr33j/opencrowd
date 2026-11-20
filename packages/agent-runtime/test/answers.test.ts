@@ -10,6 +10,7 @@ import { economyTools } from "../src/economy-tools.js";
 import type { CompletionSignals } from "../src/index.js";
 import { isNonAnswer, runAgentTaskDetailed, type LlmMessage, type LlmProvider, type LlmResponse, type ToolExecutor } from "../src/index.js";
 import { MachineWorker, RuntimePause } from "../src/worker.js";
+import { heldStopNudge } from "../src/unresolved-holds.js";
 
 /**
  * A finished answer has to reach the owner. These are the four ways the
@@ -346,5 +347,33 @@ describe("a paid call still resolving is in the answer (SRI-96)", () => {
     const text = String(result.summary.final_message);
     expect(text.startsWith("Bought the Arteche post for $1.00, within the $1.00 limit.\n\nPayment still resolving: $1.00 for https://drip.example/posts/arteche.")).toBe(true);
     expect(text).not.toContain("old.example");
+  });
+});
+
+describe("stopping for money that is only held (SRI-96 follow-up)", () => {
+  const held = (reserved: string): FinancialState => {
+    const state = financial();
+    return { ...state, wallet: { ...(state as any).wallet, reserved_usdc: reserved }, current_run: { ...(state as any).current_run, reserved_usdc: reserved } } as FinancialState;
+  };
+  const comedy = "Clip 1 is done. Clips 2 to 6 were sent but not collected yet. About $3.01 is on hold until roughly 09:44 UTC. About $0.51 is free; new money will wake me.";
+  it("asks once, saying the held money is not spent and that CrowdCode wakes the run", () => {
+    const nudge = heldStopNudge(held("3.012000"), comedy);
+    expect(nudge).toContain("$3.01 of this wallet is only held");
+    expect(nudge).toContain("CrowdCode wakes you once");
+    expect(heldStopNudge(held("0.000000"), comedy)).toBeUndefined();
+    expect(heldStopNudge(held("3.012000"), "Here is the finished one-minute cartoon: artifacts/cartoon.mp4.")).toBeUndefined();
+  });
+  it("holds the run's completion once, then lets it finish", async () => {
+    let turn = 0;
+    const requests: LlmMessage[][] = [];
+    const result = await runAgentTaskDetailed(await session(), "Make a one-minute cartoon.", {
+      hosted: true, runId, knowledge: false, financialState: async () => held("3.012000"),
+      provider: { complete: async (messages) => { requests.push(structuredClone(messages)); turn += 1;
+        return turn === 1 ? complete(comedy) : complete("Waited; the money came back and all six clips are stitched: artifacts/cartoon.mp4."); } },
+    });
+    expect(result.outcome).toBe("completed");
+    expect(String(result.summary.final_message)).toContain("all six clips are stitched");
+    expect(requests[1].at(-1)!.content).toContain("only held by payments still resolving");
+    expect(turn).toBe(2);
   });
 });

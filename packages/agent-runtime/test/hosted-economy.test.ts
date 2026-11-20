@@ -395,6 +395,19 @@ describe("hosted economy: payment over the bridge", () => {
     expect(await unresolvedHoldsNote(session, new Date(Date.now() + 60_000).toISOString())).toBeUndefined();
   });
 
+  it("hands over an async job the seller accepted without charging, with nothing held and how to collect it (SRI-96 follow-up)", async () => {
+    const { fetcher } = fakeFetch();
+    const note = "Not charged: the seller accepted this as an asynchronous job (queued, payment verified) and took nothing, so the $0.50 authorization was released at once; nothing is held. It charges when you collect the result: call_paid_service GET https://blockrun.ai/api/v1/videos/generations/v1_x until it reports completed.";
+    const { socketPath } = await bridge(() => ({ ok: true, data: { outcome: "unsettled", status: 202, content_type: "application/json", amount_atomic: "0", attempt_id: "a9",
+      body: JSON.stringify({ id: "v1_x", status: "queued", payment_status: "verified", poll_url: "/api/v1/videos/generations/v1_x" }), note } }));
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { prompt: "a cat" }, max_cost_cents: 51 });
+    expect(call.ok).toBe(true);
+    expect(call.data).toMatchObject({ outcome: "free", status: 202, charged_cost_cents: 0, note, data: { id: "v1_x", status: "queued" } });
+    expect((await gateway.listPurchasesRedacted())[0]).toMatchObject({ outcome: "free", charged_cost_cents: 0 });
+  });
+
   it("passes the gateway's refusal of a second purchase of an unresolved request to the model in its own words (SRI-96)", async () => {
     const { fetcher } = fakeFetch();
     const said = "An earlier payment for this same request (attempt a1, $1.00 on Base, made at 00:54 UTC) has not resolved. Buying it again is refused until then.";

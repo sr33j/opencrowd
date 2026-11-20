@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.30 — 2026-11-20
+
+- **An async job a seller accepts without charging is free, and money that is only held no longer ends a task (SRI-96 follow-up).** On 2026-11-20 an org's chief of staff was making a one-minute cartoon. BlockRun's video submit (`POST …/videos/generations`) answered 202 with `payment_status: "verified"` and no settlement, and each submit was held at $0.50 until its authorization expired. Seeing $0.51 free of $5, the chief collected one clip and finished. The holds came back uncharged ten minutes later; nothing woke it.
+  - `call_paid_service` understands the hosted gateway's new `outcome: "unsettled"`: the seller answered and took nothing, the authorization was released at once, and nothing is held. The purchase is recorded `free`, and the gateway's note says how to collect a job (`call_paid_service GET <poll_url>`).
+  - The Money line now says held money is not spent: `$3.01 held for payments in flight (not spent: returned if the sellers don't take it)`. It counts the whole wallet's holds, not only this run's.
+  - A run about to finish for lack of money while some of its wallet is held is asked once to wait for that money instead. It is told CrowdCode wakes it once when the held money comes back (`heldStopNudge`; resumable through `heldStopNudges` in the checkpoint).
+
 ## 0.16.29 — 2026-11-20
 
 - **`request_secret` and `vault_request` say how HTTP Basic auth works with the vault (SRI-94).** The vault substitutes a secret exactly as stored and never encodes it. An agent that stored `user:password` and sent `Authorization: Basic {{NAME}}` got a 401 on production and reported that it did not authenticate. Both descriptions now say to store `base64(user:password)` (computed with `run_shell`) and send `Authorization: Basic {{NAME}}`, and `vault_request` says a placeholder never goes in the host as `user:password@`.
