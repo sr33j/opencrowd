@@ -56,7 +56,7 @@ export * from "./context.js";
 export * from "./tool-deadlines.js";
 export * from "./non-answer.js";
 import { isNonAnswer } from "./non-answer.js";
-import { unresolvedHoldsNote, withHoldsNote } from "./unresolved-holds.js";
+import { heldStopNudge, unresolvedHoldsNote, withHoldsNote } from "./unresolved-holds.js";
 
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */
@@ -692,6 +692,8 @@ export interface LoopCheckpoint {
   serviceLog?: ServiceLog;
   /** Times the run was asked about stopping early with most of its budget left. */
   earlyStopNudges?: number;
+  /** Times the run was told its money was only held, not gone, as it stopped for money (SRI-96 follow-up). */
+  heldStopNudges?: number;
 }
 
 /** Static fallback capability index; replaced by `AgentRunOptions.capabilityIndex` when a knowledge base is supplied. */
@@ -1023,11 +1025,12 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
   const serviceLog: ServiceLog = structuredClone(options.resume?.serviceLog ?? emptyServiceLog());
   let earlyStopNudges = options.resume?.earlyStopNudges ?? 0;
+  let heldStopNudges = options.resume?.heldStopNudges ?? 0;
   const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
     await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState, deliveredMessageIds: [...deliveredMessageIds],
       completionNudges, pendingFinalMessage, finalAnswerHeld, answerNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
-      repeatedFailures: [...repeatedFailures.entries()], serviceLog, earlyStopNudges }));
+      repeatedFailures: [...repeatedFailures.entries()], serviceLog, earlyStopNudges, heldStopNudges }));
   };
   const injectMessages = async (turn: number) => {
     const pending = await options.inbox?.pending() ?? [];
@@ -1411,6 +1414,20 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
           const earlyMessage = { role: "user", content: early } as LlmMessage;
           messages.push(earlyMessage);
           await options.onMessage?.(earlyMessage);
+          await checkpoint(turn + 1);
+          continue;
+        }
+      }
+      // Stopping for money that is only held, not spent, is asked about once:
+      // a chief of staff that saw $0.51 free while $3 was held by payments
+      // that came back ten minutes later gave up on its owner's task.
+      if (heldStopNudges < 1 && !finalAnswerHeld && options.financialState && !options.chatOnly && !placeholder()) {
+        const held = await options.financialState().then(state => heldStopNudge(state, pendingFinalMessage)).catch(() => undefined);
+        if (held) {
+          heldStopNudges += 1;
+          const heldMessage = { role: "user", content: held } as LlmMessage;
+          messages.push(heldMessage);
+          await options.onMessage?.(heldMessage);
           await checkpoint(turn + 1);
           continue;
         }

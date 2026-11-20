@@ -1,5 +1,6 @@
 import { listPurchases } from "@opencrowd/economy";
 import type { SessionState } from "@opencrowd/core";
+import type { FinancialState } from "@opencrowd/protocol";
 
 /**
  * Paid calls in this run whose payment state is still unknown, said in the
@@ -35,4 +36,33 @@ export async function unresolvedHoldsNote(session: SessionState, since: string):
 export function withHoldsNote(message: string, note: string | undefined): string {
   if (!note || message.includes(note)) return message;
   return message.trim() ? `${message.trimEnd()}\n\n${note}` : note;
+}
+
+/**
+ * A final answer that stops for money (SRI-96 follow-up): short, out, waiting
+ * for money to come back or arrive. CrowdCode's reconciler reads the same
+ * words to decide whether to wake the run when its holds are released.
+ */
+export const STOPS_FOR_MONEY = new RegExp([
+  String.raw`\bout of (?:money|funds|usdc|budget)\b`, String.raw`\bran out\b`, String.raw`\brunning (?:low|out)\b`,
+  String.raw`\bnot enough (?:money|funds|usdc|balance)\b`, String.raw`\binsufficient (?:funds|balance|money)\b`,
+  String.raw`\bcan(?:'|no)?t afford\b`, String.raw`\b(?:money|funds|wallet|budget|balance)\b[^.]{0,40}\b(?:low|short|tight|exhausted)\b`,
+  String.raw`\bnot (?:yet )?collected\b`, String.raw`\buncollected\b`, String.raw`\b(?:new|more) (?:money|funds|usdc)\b`,
+  String.raw`\b(?:once|until|when)\b[^.]{0,60}\b(?:released|returned|freed|comes? back)\b`, String.raw`\btop[- ]?up\b`,
+].join("|"), "i");
+
+/**
+ * Asked once when a run is about to finish for lack of money while some of
+ * its wallet is only held by payments still resolving: that money has not been
+ * spent and usually comes back within minutes.
+ */
+export function heldStopNudge(financial: FinancialState, finalMessage: string | undefined): string | undefined {
+  if (financial.status !== "available" || !finalMessage || !STOPS_FOR_MONEY.test(finalMessage)) return undefined;
+  const held = Math.max(Number(financial.wallet.reserved_usdc ?? 0), Number(financial.current_run.reserved_usdc ?? 0));
+  if (!(held > 0)) return undefined;
+  return `Before you stop for money: $${held.toFixed(2)} of this wallet is only held by payments still resolving. It is not spent: ` +
+    "whatever the sellers don't take comes back, usually within about ten minutes, and a seller that did not settle never takes it. " +
+    "Don't give up on the task for that. If the rest of the work needs that money, wait for it: check the Money line again after a few minutes " +
+    "(run_shell sleep 120, then get_wallet_status) and continue when it is free. If you finish now anyway, say what is left to do: " +
+    "CrowdCode wakes you once when the held money comes back.";
 }

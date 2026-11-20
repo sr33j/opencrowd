@@ -85,7 +85,9 @@ export function moneyLine(financial: FinancialState, track: MoneyTrack = newMone
   parts.push(`this run spent ${usd(run.total_spent_usdc)}${calls}`);
   if (runway) parts.push(`next call ≈${usd(runway.next_call_usdc)} on ${runway.model}`);
   else if (last) parts.push(`last call ${usd(last)}`);
-  if (Number(run.reserved_usdc) > 0) parts.push(`${usd(run.reserved_usdc)} held for payments in flight`);
+  // Held is not spent: what the sellers do not take comes back (SRI-96 follow-up).
+  const held = Math.max(Number(run.reserved_usdc ?? 0), Number(wallet.reserved_usdc ?? 0));
+  if (held > 0) parts.push(`${usd(held.toFixed(6))} held for payments in flight (not spent: returned if the sellers don't take it)`);
   if (run.approval_mode !== "auto" || Number(run.per_call_approval_threshold_usdc) > 0)
     parts.push(run.approval_mode === "off" ? "paid calls are off" : `paid calls above ${usd(run.per_call_approval_threshold_usdc)} need approval`);
   return `Money: ${parts.join(" · ")}.`;
