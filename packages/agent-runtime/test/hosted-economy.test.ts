@@ -434,6 +434,47 @@ describe("hosted economy: payment over the bridge", () => {
     expect(requests.filter(r => r.name === "economy.pay").at(-1)!.arguments).toMatchObject({ url: collect.url, method: "GET" });
   });
 
+  it("states the task's need on each call, carries it to the collect step, and reviews an endpoint at most once per run (SRI-135)", async () => {
+    const { fetcher } = fakeFetch();
+    const purpose = "a 60 s cartoon with the same two characters; this is clip 1 of 6";
+    let pays = 0;
+    const { socketPath, requests } = await bridge((name) => {
+      if (name === "economy.review") return { ok: true, data: { review: "submitted" } };
+      if (name !== "economy.pay") return { ok: true, data: {} };
+      pays++;
+      return pays % 2 === 1
+        ? { ok: true, data: { outcome: "unsettled", status: 202, content_type: "application/json", amount_atomic: "0", note: "Not charged.",
+          body: JSON.stringify({ id: `v1_${pays}`, status: "queued", poll_url: `/api/v1/videos/generations/v1_${pays}AbC123xyz${"Q".repeat(40)}` }) } }
+        : { ok: true, data: { outcome: "paid_success", status: 200, content_type: "application/json", amount_atomic: "502000", transaction: `0x${String(pays).repeat(64).slice(0, 64)}`, network: "eip155:8453",
+          body: JSON.stringify({ status: "completed", data: [{ duration_seconds: 10 }] }) } };
+    });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const clips = [];
+    for (let clip = 0; clip < 2; clip++) {
+      const submit = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { prompt: "a cat", duration: 10 }, max_cost_cents: 51, purpose });
+      const done = await gateway.execute("call_paid_service", { url: (submit.data as any).collect.job, max_cost_cents: 51 });
+      expect(done.ok).toBe(true);
+      clips.push(done.data as any);
+    }
+    const pays_ = requests.filter(r => r.name === "economy.pay").map(r => r.arguments);
+    // The submit states it, and the collect step, called by handle with no purpose, inherits it.
+    expect(pays_.map(args => args.purpose)).toEqual([purpose, purpose, purpose, purpose]);
+    expect(clips[0]).toMatchObject({ review: "automatic", if_short: expect.stringContaining("review_paid_service once for this endpoint") });
+    const first = await gateway.execute("review_paid_service", { purchase_id: clips[0].purchase_id, rating: 4,
+      reason: "Good 10 s clip; each generation is capped at 10 s, so the 60 s cartoon needs six calls and stitching." });
+    expect(first).toMatchObject({ ok: true, data: { review: "submitted" } });
+    // The second clip is the same endpoint (another job id): no second review, and no hint to write one.
+    const again = await gateway.execute("review_paid_service", { purchase_id: clips[1].purchase_id, rating: 4, reason: "same" });
+    expect(again).toMatchObject({ ok: true, data: { review: "skipped" } });
+    const reviews = requests.filter(r => r.name === "economy.review").map(r => r.arguments);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({ task_context: purpose, payment_reference: expect.stringMatching(/^0x/) });
+    const third = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { prompt: "a dog" }, max_cost_cents: 51, purpose });
+    const collected = await gateway.execute("call_paid_service", { url: (third.data as any).collect.job, max_cost_cents: 51 });
+    expect(collected.data).not.toHaveProperty("if_short");
+  });
+
   it("passes the gateway's refusal of a second purchase of an unresolved request to the model in its own words (SRI-96)", async () => {
     const { fetcher } = fakeFetch();
     const said = "An earlier payment for this same request (attempt a1, $1.00 on Base, made at 00:54 UTC) has not resolved. Buying it again is refused until then.";

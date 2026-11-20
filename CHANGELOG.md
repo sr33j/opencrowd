@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.32 — 2026-11-20
+
+- **Reviews capture task fit, once per endpoint (SRI-135).** On 2026-11-20 an org made a one-minute cartoon from six 10 s BlockRun clips. Its six reviews all came from CrowdCode's purchase judge, which was never told the task needed 60 s, so each said "no buyer-specific task was stated".
+  - `call_paid_service` takes a one-sentence `purpose` (required in its schema): what the task needs from the call and any requirement the result must meet ("a 60 s cartoon; this is clip 1 of 6"). The hosted gateway gives it to the judge, outside the request digest, so restating it never makes a purchase a different one. A job's collect step called by its `job:` handle reuses the submit's purpose. It is kept on the purchase record as the default `task_context` of a review.
+  - When a paid call worked but fell short of the task (a cap, partial coverage, a workaround), the agent reviews that endpoint once with the limit stated. The system prompt, the `review_paid_service` description and the short-run nudge say so, and a reviewable result carries an `if_short` hint until the endpoint is reviewed. A second review of the same endpoint (method and route template) in one run is skipped without a call.
+  - `routeTemplate` (`crowdcode.route.v1`): the endpoint a URL belongs to, with ids in its path written `{id}`. CrowdCode, the hosted gateway and the CrowdCode MCP client apply the same rule.
+
 ## 0.16.31 — 2026-11-20
 
 - **An async job's collect step is registered for the run (SRI-96 follow-up).** BlockRun's video submit answers with a `poll_url` of about 1,700 characters whose query string is part of it. On production an agent inspected it without that query, was told GET is not offered, and could not collect two clips it had already ordered. When a paid call's answer names a `poll_url` (or `status_url`) on the same origin, `call_paid_service` now registers the GET inspection for its absolute URL, with the same rail, payee and price ceiling. The result carries `collect: { method, job, url, inspected: true, note }`. `job` is a short handle (`job:` plus 12 hex digits of the URL's SHA-256, exported as `jobHandle`) that `call_paid_service` accepts as its `url`, defaulting to GET, so the model never copies the URL; it dropped a character from one on production. CrowdCode's wake for an uncollected job names the same handle.

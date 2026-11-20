@@ -51,6 +51,11 @@ export interface PurchaseRecord {
    * or normal CLI output.
    */
   evidence?: PaymentEvidence;
+  /**
+   * What the task needed from this call, as the agent stated it on
+   * call_paid_service (SRI-135). The default task context of its review.
+   */
+  purpose?: string;
   notes?: string;
 }
 
