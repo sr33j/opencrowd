@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.29 — 2026-11-20
+
+- **`request_secret` and `vault_request` say how HTTP Basic auth works with the vault (SRI-94).** The vault substitutes a secret exactly as stored and never encodes it. An agent that stored `user:password` and sent `Authorization: Basic {{NAME}}` got a 401 on production and reported that it did not authenticate. Both descriptions now say to store `base64(user:password)` (computed with `run_shell`) and send `Authorization: Basic {{NAME}}`, and `vault_request` says a placeholder never goes in the host as `user:password@`.
+
 ## 0.16.28 — 2026-11-20
 
 - **A paid call whose seller answered without a receipt hands over the answer and is never bought twice by accident (SRI-96).** On 2026-11-06 a hosted agent bought a $1.00 article and was told the call "failed in transport" with no article, because the gateway could not verify a settlement receipt. It bought the same article again seconds later. The seller had served the post free on an earlier purchase and never settled either attempt; had it settled them, a "$1.00 at most" task would have cost $3.00, and the answer said $1.00.
