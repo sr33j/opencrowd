@@ -266,11 +266,11 @@ describe("a run that ends short of its task asks for the service that would have
     expect(reflectionTrigger({ ...plain, paidCalls: 2, finalMessage: "I could not get the tables." })).toBe("ended short of its task");
   });
 
-  it("a task that fails for lack of a service ends with one request, and no review asked", async () => {
+  it("a task that fails for lack of a service ends with one request, and at most one review of an endpoint that fell short", async () => {
     const prompt = await gate().completionGate(false, { ...plain, finalMessage: "I couldn't find any service that does this." });
     expect(prompt).toBe(SHORT_RUN_NUDGE);
     expect(prompt).toContain("Call request_service once");
-    expect(prompt).toContain("no review is needed");
+    expect(prompt).toContain("call review_paid_service once");
     // Asked once: the next completion goes through.
     const tools = gate();
     await tools.completionGate(false, { ...plain, finalMessage: "I couldn't do it." });

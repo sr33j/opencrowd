@@ -17,6 +17,7 @@ import {
 import type { AgentCashAdapter, PaidFetchResult, PaymentRail } from "./agentcash.js";
 import type { CrowdCodeAdapter, ServiceEvidence } from "./crowdcode.js";
 import { describeRails } from "./offers.js";
+import { routeTemplate } from "./route.js";
 import { reliabilityNote, type CrowdCodeApi, type Reliability } from "./tree.js";
 import { documentedHeader, findFollowUpTokens, followUpKey, loadFollowUps, saveFollowUp, sellerOpenApi } from "./follow-ups.js";
 import {
@@ -76,6 +77,8 @@ interface Inspection {
   priceCeilingCents?: number;
   /** Payee of the inspected offer, for reviews whose receipt omits it. */
   payTo?: string;
+  /** A registered collect step's: the purpose its submit was called for. */
+  purpose?: string;
   evidence: ServiceEvidence;
   inspectedAt: string;
 }
@@ -128,6 +131,13 @@ export class EconomyGateway {
    * honours the inspect-before-call rule instead of failing its first call.
    */
   private inspections?: Map<string, Inspection>;
+
+  /**
+   * Endpoints (method and route template) this run has reviewed: an agent
+   * reviews an endpoint at most once per run, however many calls it made
+   * to it (SRI-135). Six clips from one video model are one review.
+   */
+  private readonly reviewedEndpoints = new Set<string>();
 
   constructor(private readonly options: EconomyGatewayOptions) {}
 
@@ -376,6 +386,9 @@ export class EconomyGateway {
     if (!endpoint) {
       return { ok: false, error: "call_paid_service requires `url`" };
     }
+    // What the task needs from this call, for the judge (SRI-135). A job's
+    // collect step inherits its submit's when the model names none.
+    const statedPurpose = purposeArg(args.purpose);
     // Before any lookup or payment: a search phrase pasted into `url` is not
     // an endpoint, and "inspect it first" would be the wrong advice (SRI-119).
     const malformed = endpointProblem(endpoint);
@@ -387,6 +400,7 @@ export class EconomyGateway {
     if (!inspection) {
       return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
     }
+    const purpose = statedPurpose ?? inspection.purpose;
     // Only rails CrowdCode verifies end-to-end, and this payer can settle, may pay automatically.
     const rails = this.options.paymentRails ?? VERIFIED_RAILS;
     if (!rails.includes(inspection.rail)) {
@@ -454,6 +468,7 @@ export class EconomyGateway {
         body,
         maxAmountUsd: quotedCostCents / 100,
         rail: inspection.rail,
+        ...(purpose ? { purpose } : {}),
         ...(crowdcode ? {} : { review: false })
       });
     } catch (error) {
@@ -519,6 +534,7 @@ export class EconomyGateway {
       evidence: result.payment && !result.payment.payTo && inspection.payTo && railUsed === inspection.rail
         ? { ...result.payment, payTo: inspection.payTo }
         : result.payment,
+      ...(purpose ? { purpose } : {}),
       notes: result.ambiguous
         ? `${result.ambiguityReason ?? "ambiguous"}: payment state unknown; never auto-retried`
         : result.error
@@ -586,7 +602,8 @@ export class EconomyGateway {
       };
     }
     const followUp = result.ok && paid ? await this.keepFollowUp(target, method, result.data, purchaseId) : undefined;
-    const collect = result.ok ? await this.registerCollect(target, inspection, result.data) : undefined;
+    const collect = result.ok ? await this.registerCollect(target, { ...inspection, ...(purpose ? { purpose } : {}) }, result.data) : undefined;
+    const reviewable = paid && supportedRail && !result.callerError && crowdcode;
     return {
       ok: result.ok,
       data: {
@@ -597,9 +614,12 @@ export class EconomyGateway {
         artifact_path: artifact?.path,
         // Nothing is owed. Hosted: CrowdCode's judge reviews a settled
         // purchase from the platform's own record, with no call from the
-        // agent. Elsewhere a review is the agent's choice.
-        ...(paid && supportedRail && !result.callerError && crowdcode
-          ? { review: this.options.hostedSpending ? "automatic" : "optional" }
+        // agent. Elsewhere a review is the agent's choice. Either way, a call
+        // that worked but fell short of the task is worth one review of the
+        // endpoint, naming the limit (SRI-135).
+        ...(reviewable
+          ? { review: this.options.hostedSpending ? "automatic" : "optional",
+            ...(this.reviewedEndpoints.has(reviewKey(method, endpoint)) ? {} : { if_short: SHORTFALL_REVIEW_HINT }) }
           : {}),
         ...(result.note ? { note: result.note } : {}),
         ...(followUp ? { follow_up: followUp } : {}),
@@ -793,6 +813,12 @@ export class EconomyGateway {
         error: `purchase ${purchaseId} never reached ${state.record.endpoint}: it was refused before the request was sent (${state.record.notes ?? "no payment was made"}). That is not something the service did, so there is nothing to review. Fix the cause and call the service again.`
       };
     }
+    // One review per endpoint per run: the first says what the endpoint is
+    // like for this task, and a second about the same route adds nothing.
+    const key = reviewKey(state.record.method, state.record.endpoint);
+    if (this.reviewedEndpoints.has(key))
+      return { ok: true, data: { purchase_id: purchaseId, review: "skipped",
+        note: `This run already reviewed ${state.record.method} ${routeTemplate(state.record.endpoint)}; one review per endpoint per run is enough. Carry on with the task.` } };
     const evidence = state.record.evidence;
     // Review evidence comes from the immutable stored receipt, never the model.
     const result = await this.options.crowdcode.reviewService({
@@ -806,7 +832,7 @@ export class EconomyGateway {
       paymentTargetRef: evidence?.reference ? evidence.payTo : undefined,
       // Solana pays from a different address than the EVM reviewer key.
       ...(state.record.rail === "x402-solana" && evidence?.payer ? { payer: evidence.payer } : {}),
-      taskContext: stringArg(args.task_context)
+      taskContext: purposeArg(args.task_context) ?? state.record.purpose
     });
     if (!result.ok) {
       // A rejection CrowdCode decided from what is already registered will be
@@ -825,8 +851,10 @@ export class EconomyGateway {
       // Optional notes: nothing waits on them, so never spend turns retrying.
       return { ok: false, error: `CrowdCode did not take this review (${result.error}). The review is optional and nothing waits on it; carry on with the task.` };
     }
+    this.reviewedEndpoints.add(key);
     await recordReviewSubmitted(this.options.session, purchaseId, rating);
-    return { ok: true, data: { purchase_id: purchaseId, review: "submitted", rating } };
+    const raw = result.raw && typeof result.raw === "object" ? result.raw as Record<string, unknown> : {};
+    return { ok: true, data: { purchase_id: purchaseId, review: typeof raw.review === "string" ? raw.review : "submitted", rating } };
   }
 
   private async bridgeUsdc(args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
@@ -945,6 +973,20 @@ function requestFor(endpoint: string, method: string, body: unknown): { url: str
  */
 export const jobHandle = (url: string) => `job:${createHash("sha256").update(url).digest("hex").slice(0, 12)}`;
 const JOB_HANDLE = /^job:[0-9a-f]{12}$/;
+
+/** Longest purpose kept: one sentence is the point, and the judge reads 300 characters of it. */
+export const MAX_PURPOSE_CHARS = 300;
+/** A stated purpose, trimmed to one line of at most MAX_PURPOSE_CHARS; undefined when blank. */
+export function purposeArg(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const text = value.replace(/\s+/g, " ").trim();
+  if (!text) return undefined;
+  return text.length <= MAX_PURPOSE_CHARS ? text : `${text.slice(0, MAX_PURPOSE_CHARS - 1)}…`;
+}
+/** The endpoint a review is about: method and route template (SRI-135). */
+export const reviewKey = (method: string, url: string) => `${method.toUpperCase()} ${routeTemplate(url)}`;
+/** Shown once per endpoint on a reviewable paid result. */
+export const SHORTFALL_REVIEW_HINT = "If this worked but falls short of what the task needs (a cap such as clip length or result count, partial coverage, a workaround like stitching or several calls), call review_paid_service once for this endpoint, now, naming the limit against the task. Otherwise do nothing.";
 
 function inspectionKey(endpoint: string, method: string): string {
   return `${method} ${endpoint}`;
@@ -1126,22 +1168,23 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
         url: { type: "string", description: "Exact endpoint URL from inspect_paid_service" },
         method: { type: "string", description: "HTTP method (default POST)" },
         body: { description: "Request inputs matching the inspected schema; for GET they are sent as query parameters" },
-        max_cost_cents: { type: "integer", minimum: 1, description: "Price ceiling in cents; defaults to the inspected price" }
+        max_cost_cents: { type: "integer", minimum: 1, description: "Price ceiling in cents; defaults to the inspected price" },
+        purpose: { type: "string", maxLength: MAX_PURPOSE_CHARS, description: "One sentence: what the task needs from this call, with any requirement the result must meet (length, count, format, coverage). Example: \"a 60 s cartoon with the same two characters; this is clip 1 of 6\". CrowdCode's judge reads it to say how well the service fits tasks like this. No names, contact details, URLs or secrets. A job's collect step reuses its submit's." }
       },
-      required: ["url"],
+      required: ["url", "purpose"],
       additionalProperties: false
     }
   },
   {
     name: "review_paid_service",
-    description: "Optional. Add notes about a stored service interaction to CrowdCode. Never required: on hosted agents CrowdCode's platform judge already reviews every paid purchase by itself, from the platform's own record of the request, the response and the payment, within a minute or two of the call. Use this only when you observed something that record cannot show — the answer was wrong for the task, stale, or in the wrong units — and call it right after the purchase, because notes that arrive after the automatic review are not used. Your rating and notes are evidence the judge weighs, not the published verdict, so report what you observed rather than arguing for a score. Unpaid interactions are reviewed as unverified community evidence. Distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
+    description: "Review an endpoint you paid, once per endpoint per run, when it worked but fell short of the task: a cap (clip length, result count, page size), partial coverage, or a workaround it forced (stitching, several calls, a second service). Call it right after that call, naming the limit against the task, e.g. \"good 10 s clip with consistent characters, but each generation is capped at 10 s; the task needed 60 s, so six calls plus stitching\". Skip it when the call simply did what the task needed: on hosted agents CrowdCode's judge already reviews every paid purchase from the platform's own record and the purpose you stated. Your rating and notes are evidence the judge weighs, so report what you observed rather than arguing for a score. Distinguish provider faults from caller errors, insufficient funds, and uncertain failures.",
     parameters: {
       type: "object",
       properties: {
         purchase_id: { type: "string", description: "The purchase_id returned by call_paid_service" },
-        rating: { type: "integer", minimum: 1, maximum: 5, description: "1-5: your own judgement of whether the response helped the original task" },
-        reason: { type: "string", description: "Concrete notes on what worked or failed, for the judge and for unpaid reviews" },
-        task_context: { type: "string", description: "Optional: the task this purchase served" }
+        rating: { type: "integer", minimum: 1, maximum: 5, description: "1-5: how well the response served the task" },
+        reason: { type: "string", description: "What came back and the concrete limit against the task (\"max 10 s per clip; needed 60 s\")" },
+        task_context: { type: "string", description: "Optional: what the task needed; defaults to the purpose stated on the call" }
       },
       required: ["purchase_id", "rating", "reason"],
       additionalProperties: false

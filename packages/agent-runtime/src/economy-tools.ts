@@ -50,12 +50,13 @@ export const REFLECTION_NUDGE = "Before this run ends, reflect once: what concre
 
 /**
  * Asked instead when the run ends short of its task (SRI-122): one request for
- * the service that would have let it finish. No review: CrowdCode's gateway
- * already judges every settled hosted purchase, empty answers included. It
+ * the service that would have let it finish, and one review of an endpoint
+ * that worked but fell short of the task, if the run has not written it
+ * (SRI-135). CrowdCode's gateway judges every settled purchase anyway. It
  * comes after SRI-119's early-stop question, never instead of it, and like it
  * is asked once.
  */
-export const SHORT_RUN_NUDGE = "This run is ending short of its task: it could not finish, delivered a partial result or needed a costly workaround. Call request_service once, for the paid service that would have let you finish this task: input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required, and no review is needed: CrowdCode already judges every paid call you made. Skip the request only if the task did in fact finish without a workaround. Then call complete_session again to finish.";
+export const SHORT_RUN_NUDGE = "This run is ending short of its task: it could not finish, delivered a partial result or needed a costly workaround. Call request_service once, for the paid service that would have let you finish this task: input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If a paid call worked but fell short of the task (a cap, partial coverage, a workaround) and you have not reviewed that endpoint in this run, also call review_paid_service once for it, stating the limit against the task; CrowdCode already judges every other paid call you made. Skip the request only if the task did in fact finish without a workaround. Then call complete_session again to finish.";
 
 /**
  * The paid tools, and the one thing they ask of a run before it completes:

@@ -248,6 +248,8 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
       method,
       body,
       max_cost_cents: Math.ceil(request.maxAmountUsd * 100),
+      // For the judge, outside the request digest (SRI-135).
+      ...(request.purpose ? { purpose: request.purpose } : {}),
       // The owner turned CrowdCode off: no automatic review of this purchase.
       ...(request.review === false ? { crowdcode_review: false } : {})
     };

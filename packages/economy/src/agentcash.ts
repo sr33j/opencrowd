@@ -29,6 +29,12 @@ export interface PaidFetchRequest {
    * one. Absent means reviews are on.
    */
   review?: false;
+  /**
+   * What the task needs from this call, as the agent stated it (SRI-135).
+   * The hosted gateway gives it to the purchase judge; it never changes the
+   * request or its price.
+   */
+  purpose?: string;
 }
 
 /**
