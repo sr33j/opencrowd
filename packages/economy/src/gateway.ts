@@ -537,14 +537,34 @@ export class EconomyGateway {
       const missingReceipt = result.ambiguityReason === "missing_receipt";
       const unsupportedReceipt = result.ambiguityReason === "unsupported_receipt";
       const timedOut = result.ambiguityReason === "timeout";
+      // The seller answered without a receipt: its answer is the run's to use,
+      // and buying the same thing again is the mistake to prevent (SRI-96).
+      // Hosted, the gateway says what is held and refuses a second purchase
+      // of the same request until this one resolves.
+      if (missingReceipt) {
+        const held = `$${(quotedCostCents / 100).toFixed(2)}`;
+        return {
+          ok: false,
+          data: {
+            purchase_id: purchaseId,
+            outcome,
+            status: result.status,
+            held_cost_cents: quotedCostCents,
+            artifact_path: artifact?.path,
+            data: result.data
+          },
+          error: [
+            `the call to ${endpoint} returned${result.status !== undefined ? ` HTTP ${result.status}` : ""} without a verifiable settlement receipt (recorded as purchase ${purchaseId}).`,
+            this.options.hostedSpending && result.error
+              ? `CrowdCode: ${result.error}`
+              : `Its payment state is unknown, and up to ${held} counts as spent until it is reconciled. Use the answer below; do not buy this same request again, and tell the owner ${held} is held pending.`,
+            artifact?.path ? `The answer is saved at ${artifact.path}.` : ""
+          ].filter(Boolean).join(" ")
+        };
+      }
       return {
         ok: false,
-        error: missingReceipt
-          ? [
-            `the call to ${endpoint} returned but indicated payment without a verifiable settlement receipt (recorded as purchase ${purchaseId}).`,
-            "Its payment state is unknown. It was NOT retried and must not be retried automatically; inspect the saved artifact and reconcile with AgentCash before continuing."
-          ].join(" ")
-          : unsupportedReceipt
+        error: unsupportedReceipt
             ? [
               `the call to ${endpoint} returned a settlement receipt on an unsupported payment rail (recorded as purchase ${purchaseId}).`,
               "It was NOT retried and must not be retried automatically; reconcile the payment manually before continuing."

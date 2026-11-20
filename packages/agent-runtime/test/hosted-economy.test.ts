@@ -8,6 +8,7 @@ import type { Command, Event } from "@opencrowd/protocol";
 import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired, planFundingMove } from "../src/hosted-economy.js";
 import { createHostedProvider, readHostedFinancialState } from "../src/hosted-provider.js";
 import { HOSTED_DECLARED_TOOL_BUDGET, MODEL_MAX_TOOLS } from "@opencrowd/protocol";
+import { unresolvedHoldsNote, withHoldsNote } from "../src/unresolved-holds.js";
 import { BASE_USDC, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
 
@@ -365,6 +366,44 @@ describe("hosted economy: payment over the bridge", () => {
     await dead.gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const lost = await dead.gateway.execute("call_paid_service", { url: SEARCH, method: "POST" });
     expect(lost.ok).toBe(false); expect(lost.error).toMatch(/failed in transport/);
+  });
+
+  it("hands the model a seller's answer that came without a receipt, with what is held, and says so in the final answer (SRI-96)", async () => {
+    const { fetcher } = fakeFetch();
+    const said = "the seller answered HTTP 200 and its answer is included, but sent no settlement receipt CrowdCode could verify. The $1.00 stays held. Do not buy this same request again: CrowdCode refuses it until this payment resolves.";
+    const { socketPath } = await bridge(() => ({ ok: false, error: said, code: "payment_unknown",
+      data: { status: 200, body: JSON.stringify({ slug: "arteche", unlocked: true }), content_type: "application/json",
+        hold: { attemptId: "a1", amountAtomic: "1000000", network: "base" } } }));
+    const { gateway, session } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const since = new Date(Date.now() - 1000).toISOString();
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { post: "arteche" }, max_cost_cents: 100 });
+    expect(call.ok).toBe(false);
+    // The answer, not "failed in transport" without it.
+    expect(call.error).toContain("without a verifiable settlement receipt");
+    expect(call.error).toContain(`CrowdCode: ${said}`);
+    expect(call.error).not.toMatch(/transport/);
+    expect(call.data).toMatchObject({ outcome: "unknown", status: 200, held_cost_cents: 100, data: { slug: "arteche", unlocked: true } });
+    expect((call.data as { artifact_path?: string }).artifact_path).toMatch(/service-calls\//);
+    expect((await gateway.listPurchasesRedacted())[0]).toMatchObject({ outcome: "unknown", charged_cost_cents: 100 });
+    // The harness, not the model, puts the hold in the final answer.
+    const note = await unresolvedHoldsNote(session, since);
+    expect(note).toContain(`$1.00 for ${SEARCH}`);
+    expect(note).toContain("counts as spent until it resolves");
+    expect(withHoldsNote("Bought one article for $1.00.", note)).toBe(`Bought one article for $1.00.\n\n${note}`);
+    expect(withHoldsNote(withHoldsNote("Done.", note), note)).toBe(`Done.\n\n${note}`);
+    expect(await unresolvedHoldsNote(session, new Date(Date.now() + 60_000).toISOString())).toBeUndefined();
+  });
+
+  it("passes the gateway's refusal of a second purchase of an unresolved request to the model in its own words (SRI-96)", async () => {
+    const { fetcher } = fakeFetch();
+    const said = "An earlier payment for this same request (attempt a1, $1.00 on Base, made at 00:54 UTC) has not resolved. Buying it again is refused until then.";
+    const { socketPath } = await bridge(() => ({ ok: false, error: said, code: "payment_unresolved", data: { hold: { attemptId: "a1" } } }));
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", max_cost_cents: 100 });
+    expect(call).toMatchObject({ ok: false, error: expect.stringContaining(said) });
+    expect(call.error).toContain("payment_unresolved");
   });
 
   it("recovers a slow paid result by replaying the same purchase after the socket wait expires", async () => {

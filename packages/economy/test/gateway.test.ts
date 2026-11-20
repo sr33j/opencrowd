@@ -177,7 +177,10 @@ describe("purchase lifecycle", () => {
 
     expect(result.ok).toBe(false);
     expect(result.error).toContain("without a verifiable settlement receipt");
-    expect(result.error).toContain("NOT retried");
+    // The answer it did return is the run's to use, and buying it again is the mistake (SRI-96).
+    expect(result.error).toContain("do not buy this same request again");
+    expect(result.error).toContain("$0.10 is held pending");
+    expect(result.data).toMatchObject({ outcome: "unknown", status: 200, held_cost_cents: 10, data: { transcript: "done" } });
     const purchases = await listPurchases(session);
     expect(purchases[0].record).toMatchObject({ outcome: "unknown" });
     expect(purchases[0].record).not.toHaveProperty("review_required");

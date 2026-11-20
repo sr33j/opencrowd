@@ -191,7 +191,9 @@ export async function postHostedTool(options: HostedBridgeOptions, name: string,
   if (typeof result?.ok !== "boolean") throw new Error("Invalid hosted tool response");
   return result.ok
     ? { ok: true, data: result.data }
-    : { ok: false, error: String(result.error ?? "tool failed"), ...(typeof result.code === "string" ? { code: result.code } : {}) };
+    : { ok: false, error: String(result.error ?? "tool failed"), ...(typeof result.code === "string" ? { code: result.code } : {}),
+      // What a refusal carries besides its words: a paid call's answer and hold (SRI-96).
+      ...(result.data !== undefined ? { data: result.data } : {}) };
 }
 
 /**
