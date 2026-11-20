@@ -2,6 +2,7 @@ import { budgetStatus, createSession } from "./session.js";
 import { listArtifacts, listOtherChatArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
 import { readLedger, appendLedgerEntry } from "./ledger.js";
 import { maxShellTimeoutMs, runShell } from "./shell.js";
+import { recordLocalHarnessFeedback } from "./harness-feedback.js";
 import type { ToolName } from "./tool-definitions.js";
 import type { ProgressEvent, SessionState, ToolResult } from "./types.js";
 
@@ -70,6 +71,9 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         return { ok: false, error: `${name} is only available to hosted OpenCrowd agents` };
       case "automations":
         return { ok: false, error: `${name} is only available to hosted OpenCrowd agents` };
+      case "submit_harness_feedback":
+        // Hosted runs send it to CrowdCode through the supervisor; here it stays on this machine.
+        return ok(await recordLocalHarnessFeedback(context.session, args));
     }
   } catch (error) {
     context.signal?.throwIfAborted();

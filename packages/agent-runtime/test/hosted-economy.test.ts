@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSession, loadSession } from "@opencrowd/core";
 import type { Command, Event } from "@opencrowd/protocol";
 import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parsePaymentRequired, planFundingMove } from "../src/hosted-economy.js";
-import { readHostedFinancialState } from "../src/hosted-provider.js";
+import { createHostedProvider, readHostedFinancialState } from "../src/hosted-provider.js";
+import { HOSTED_DECLARED_TOOL_BUDGET, MODEL_MAX_TOOLS } from "@opencrowd/protocol";
 import { BASE_USDC, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
 
@@ -532,6 +533,35 @@ describe("hosted economy: payment over the bridge", () => {
   });
 });
 
+describe("hosted economy: the tools one model request carries", () => {
+  // The gateway refuses a request with more than MODEL_MAX_TOOLS tools, and a
+  // chief of staff's run.start declares HOSTED_DECLARED_TOOL_BUDGET of its own.
+  // A new runtime tool has to replace one (SRI-113: submit_harness_feedback
+  // came in as crowdcode_status folded into set_crowdcode_enabled).
+  it("sends the runtime's tools and a full set of declared tools within the gateway's limit", async () => {
+    const home = await root(), socketPath = join(home, "bridge.sock");
+    let sent: { name: string }[] = [];
+    const server = createServer(async (req, res) => {
+      const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+      sent = JSON.parse(Buffer.concat(chunks).toString()).tools;
+      res.end(JSON.stringify({ status: "complete", response: { content: "ok", toolCalls: [] } }));
+    });
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    servers.push(server);
+    const { fetcher } = fakeFetch();
+    const { gateway } = await economy(fetcher, socketPath);
+    const declared = Array.from({ length: HOSTED_DECLARED_TOOL_BUDGET }, (_, i) => ({ name: `org_tool_${i}`, description: "x", parameters: { type: "object" } }));
+    await createHostedProvider({ socketPath, runId: "run-1", sessionId: "session-1", extraTools: [...hostedDynamicTools(gateway).definitions, ...declared] })
+      .complete([{ role: "user", content: "hello" }], { operationId: "run-1:llm:0" });
+    const names = sent.map((tool) => tool.name);
+    expect(names).toContain("submit_harness_feedback");
+    expect(names).toContain("set_crowdcode_enabled");
+    expect(names).not.toContain("crowdcode_status");
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toHaveLength(MODEL_MAX_TOOLS);
+  });
+});
+
 describe("hosted economy: worker wiring", () => {
   it("advertises the economy tools to the hosted model, records their calls, and prompts for hosted paid services", async () => {
     const home = await root(); const events: Event[] = []; let turn = 0; let advertised: string[] = []; let systemPrompt = "";
@@ -549,7 +579,7 @@ describe("hosted economy: worker wiring", () => {
       provider: (_run, _session, extraTools) => { advertised = extraTools.map(t => t.name); return provider; },
       economy: (run, session) => createHostedEconomy({ socketPath: awaitBridgePath, runId: run.runId, sessionId: session.sessionId, session, fetcher, crowdcodeBase: CROWDCODE }) });
     await worker.initialize(); await worker.handleLine(JSON.stringify(command)); await worker.drain();
-    expect(advertised).toEqual(["crowdcode_status", "set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "browse_services", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service", "bridge_usdc", "plan_funding"]);
+    expect(advertised).toEqual(["set_crowdcode_enabled", "request_service", "list_my_reviews", "delete_my_review", "read_service", "get_wallet_status", "browse_services", "find_paid_service", "inspect_paid_service", "call_paid_service", "review_paid_service", "bridge_usdc", "plan_funding"]);
     expect(systemPrompt).toContain("hosted OpenCrowd agent running in the cloud with your own USDC wallets on Base, Solana and Tempo");
     expect(systemPrompt).toContain("Payable: x402 USDC on Base or Solana and MPP USDC.e on Tempo");
     expect(systemPrompt).toContain("Other networks, including Monad, are not payable here");
@@ -707,6 +737,8 @@ it("persists CrowdCode controls, skips remote activity while off, and still mana
   const { gateway, session } = await economy(fetcher, socketPath);
   const wrapper = hostedDynamicTools(gateway);
   expect(await gateway.execute("crowdcode_status", {})).toMatchObject({ ok: true, data: { enabled: true } });
+  // The model reads the setting through set_crowdcode_enabled without `enabled` (SRI-113).
+  expect(await gateway.execute("set_crowdcode_enabled", {})).toMatchObject({ ok: true, data: { enabled: true } });
   expect(await gateway.execute("set_crowdcode_enabled", { enabled: false, scope: "default" })).toMatchObject({ data: { enabled: false, default_enabled: false } });
   expect(await wrapper.completionGate()).toBeUndefined();
   expect(await gateway.execute("request_service", { input: "x" })).toMatchObject({ ok: false });

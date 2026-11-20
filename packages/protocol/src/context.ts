@@ -21,6 +21,16 @@ export const MODEL_REQUEST_MAX_BYTES = 16 * 1024 * 1024;
 export const MODEL_SELLER_REQUEST_MAX_BYTES = 5 * 1024 * 1024;
 export const MODEL_MAX_MESSAGES = 1000;
 /**
+ * The most tools one hosted model request may carry (CrowdCode's gateway
+ * refuses more), and how many of them a run's control-declared tools
+ * (`run.start.tools`) may take: the rest are the runtime's own, 24 of them
+ * on a hosted run with paid tools. A ninth declared tool failed every chief
+ * of staff run on production (2026-11-19); a runtime tool added without
+ * removing one would do the same, so hosted-economy.test.ts pins the sum.
+ */
+export const MODEL_MAX_TOOLS = 32;
+export const HOSTED_DECLARED_TOOL_BUDGET = 8;
+/**
  * How long a paid model call may take at the seller, at least. Non-streaming
  * generation can take minutes; outer hops also allow quoting, signing and
  * receipt verification, and must not abandon a live paid call.

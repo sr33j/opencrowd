@@ -217,6 +217,15 @@ eval runner uses.
 | Approval rules | `~/.config/opencrowd/approvals.json` |
 | Sessions, conversation, ledger, artifacts | `./sessions/<session-id>/` |
 | Purchase receipts (append-only) | `./sessions/<session-id>/purchases.jsonl` |
+| Harness feedback the agent wrote (append-only) | `./harness-feedback.jsonl` |
+
+When the harness itself gets in the agent's way (a missing or broken tool, a
+limit, a confusing error or instruction), the agent may call
+`submit_harness_feedback`. On the CLI that only appends a redacted line to
+`./harness-feedback.jsonl`, at most five a day: nothing is sent anywhere, and
+there is no setting to send it. Read the file, and if a report is useful,
+open an issue on this repository with it. Hosted CrowdCode agents send the
+same report to CrowdCode, which is the only place it goes.
 
 Conversations persist per session and are automatically compacted when they
 outgrow the model's context window (archives kept under

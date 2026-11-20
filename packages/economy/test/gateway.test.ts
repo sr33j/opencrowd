@@ -77,7 +77,8 @@ describe("gateway surface", () => {
   it("exposes exactly the six stable tools with no proof/identity inputs", async () => {
     const { gateway } = await setup();
     const definitions = gateway.definitions();
-    expect(definitions.map((tool) => tool.name)).toEqual([...GATEWAY_TOOL_NAMES]);
+    // crowdcode_status still executes but is read through set_crowdcode_enabled (SRI-113).
+    expect(definitions.map((tool) => tool.name)).toEqual(GATEWAY_TOOL_NAMES.filter((name) => name !== "crowdcode_status"));
     const schemaText = JSON.stringify(definitions.map(tool => tool.parameters));
     expect(schemaText).not.toMatch(/payment_proof|tx_hash|signature|private/i);
   });
