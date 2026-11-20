@@ -32,6 +32,7 @@ describe("route templates (SRI-135)", () => {
       "https://x402helper.xyz/c8239c/api/v1/x402/x402-payment-header-shape",
       "https://api.example/v1/models/claude-3-5-sonnet-20241022",
       "https://api.twitter.com/2/tweets",
+      "https://stationfx.com/economic-data/interest-rates/market-yield-on-u-s-treasury-securities-at-10-year-constant-maturity-quoted-on-an-investment-basis",
       "https://api.example/getTokenPriceByAddressV2"
     ]) expect(routeTemplate(kept)).toBe(kept);
   });
