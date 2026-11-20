@@ -13,18 +13,17 @@
  *  - a UUID,
  *  - 16 or more hex digits, optionally 0x-prefixed (hashes, EVM addresses),
  *  - an opaque token of 24 or more URL-safe characters mixing upper case,
- *    lower case and at least three digits (base64url job ids, Solana keys), or
- *  - any URL-safe run of 64 or more characters with a digit.
- * Lower-case slugs are left alone on purpose: marketplaces name distinct
- * services by them (`payanagent.com/x402/kh71792ee7x7w59d…`), and those must
- * stay separate listings.
+ *    lower case and at least three digits (base64url job ids, Solana keys).
+ * Lower-case slugs are left alone on purpose, however long: marketplaces name
+ * distinct services by them (`payanagent.com/x402/kh71792ee7x7w59d…`) and data
+ * APIs their series (`stationfx.com/…/market-yield-on-…-10-year-…`), and those
+ * must stay separate listings.
  */
 export const ID_SEGMENT = new RegExp([
   "^(?:[0-9]{4,}",
   "|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
   "|(?:0x)?[0-9a-fA-F]{16,}",
-  "|(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])(?=(?:[A-Za-z_-]*[0-9]){3})[A-Za-z0-9_-]{24,}",
-  "|(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{64,})$"
+  "|(?=[A-Za-z0-9_-]*[a-z])(?=[A-Za-z0-9_-]*[A-Z])(?=(?:[A-Za-z_-]*[0-9]){3})[A-Za-z0-9_-]{24,})$"
 ].join(""));
 
 /** A URL path with identifier segments replaced by `{id}`. */
