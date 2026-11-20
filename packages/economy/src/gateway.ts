@@ -581,6 +581,7 @@ export class EconomyGateway {
       };
     }
     const followUp = result.ok && paid ? await this.keepFollowUp(target, method, result.data, purchaseId) : undefined;
+    const collect = result.ok ? await this.registerCollect(target, inspection, result.data) : undefined;
     return {
       ok: result.ok,
       data: {
@@ -597,11 +598,33 @@ export class EconomyGateway {
           : {}),
         ...(result.note ? { note: result.note } : {}),
         ...(followUp ? { follow_up: followUp } : {}),
+        ...(collect ? { collect } : {}),
         data: result.data,
         ...(result.ok ? {} : { error: result.error })
       },
       ...(result.ok ? {} : { error: result.error })
     };
+  }
+
+  /**
+   * An asynchronous job's collect step, registered so the run can call it
+   * without inspecting a URL it would have to copy exactly (SRI-96 follow-up).
+   * BlockRun's video submit answers with a `poll_url` of 1,700 characters
+   * whose query is part of it; an agent that inspected it without the query
+   * was told GET is not offered and could not collect two clips it had
+   * already ordered. The collect step is the same seller, rail, payee and
+   * price as the call that started the job, which is what it advertises.
+   */
+  private async registerCollect(target: string, inspection: Inspection, data: unknown) {
+    const body = data && typeof data === "object" && !Array.isArray(data) ? data as Record<string, unknown> : undefined;
+    const poll = typeof body?.poll_url === "string" ? body.poll_url : typeof body?.status_url === "string" ? body.status_url : undefined;
+    if (!poll) return undefined;
+    let url: string;
+    try { url = new URL(poll, target).href; } catch { return undefined; }
+    if (originOf(url) !== originOf(target)) return undefined;
+    await this.rememberInspection(inspectionKey(url, "GET"), { ...inspection, endpoint: url, method: "GET", inspectedAt: new Date().toISOString() });
+    return { method: "GET", url, inspected: true,
+      note: "Collect this job with call_paid_service using exactly this method and url (already inspected; no inspect_paid_service needed). Poll until it reports completed: a poll before then is not charged." };
   }
 
   /**

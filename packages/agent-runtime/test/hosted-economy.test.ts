@@ -408,6 +408,30 @@ describe("hosted economy: payment over the bridge", () => {
     expect((await gateway.listPurchasesRedacted())[0]).toMatchObject({ outcome: "free", charged_cost_cents: 0 });
   });
 
+  it("registers an async job's collect URL so the run can collect it without inspecting a URL it must copy exactly (SRI-96 follow-up)", async () => {
+    const { fetcher } = fakeFetch();
+    const poll = `/api/v1/videos/generations/v1_${"x".repeat(1500)}?model=xai%2Fgrok-imagine-video&duration=5&sig=abc`;
+    let pays = 0;
+    const { socketPath, requests } = await bridge((name) => {
+      if (name !== "economy.pay") return { ok: true, data: {} };
+      return ++pays === 1
+        ? { ok: true, data: { outcome: "unsettled", status: 202, content_type: "application/json", amount_atomic: "0", note: "Not charged.",
+          body: JSON.stringify({ id: "v1_x", status: "queued", payment_status: "verified", poll_url: poll }) } }
+        : { ok: true, data: { outcome: "paid_success", status: 200, content_type: "application/json", amount_atomic: "252000", transaction: "0xtx", network: "eip155:8453",
+          body: JSON.stringify({ id: "v1_x", status: "completed", url: "https://cdn.example/v.mp4" }) } };
+    });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const submit = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { prompt: "a cat" }, max_cost_cents: 26 });
+    const collect = (submit.data as any).collect;
+    expect(collect).toMatchObject({ method: "GET", inspected: true, url: new URL(poll, SEARCH).href });
+    // No inspect_paid_service for the collect URL: the run calls it as told.
+    const done = await gateway.execute("call_paid_service", { url: collect.url, method: "GET", max_cost_cents: 26 });
+    expect(done.ok).toBe(true);
+    expect(done.data).toMatchObject({ outcome: "paid_success", data: { status: "completed" } });
+    expect(requests.filter(r => r.name === "economy.pay").at(-1)!.arguments).toMatchObject({ url: collect.url, method: "GET" });
+  });
+
   it("passes the gateway's refusal of a second purchase of an unresolved request to the model in its own words (SRI-96)", async () => {
     const { fetcher } = fakeFetch();
     const said = "An earlier payment for this same request (attempt a1, $1.00 on Base, made at 00:54 UTC) has not resolved. Buying it again is refused until then.";
