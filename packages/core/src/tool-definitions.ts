@@ -1,3 +1,4 @@
+import { HARNESS_FEEDBACK_CATEGORIES, HARNESS_FEEDBACK_LIMITS, HARNESS_FEEDBACK_SEVERITIES } from "@opencrowd/protocol";
 import { maxShellTimeoutMs } from "./shell.js";
 
 /**
@@ -16,7 +17,8 @@ export type ToolName =
   | "deploy_service"
   | "request_secret"
   | "vault_request"
-  | "automations";
+  | "automations"
+  | "submit_harness_feedback";
 
 export const TOOL_NAMES: ToolName[] = [
   "get_budget_status",
@@ -30,7 +32,8 @@ export const TOOL_NAMES: ToolName[] = [
   "deploy_service",
   "request_secret",
   "vault_request",
-  "automations"
+  "automations",
+  "submit_harness_feedback"
 ];
 
 /**
@@ -104,6 +107,8 @@ function toolDescription(name: ToolName): string {
       return "Use action=list first when you need to see this agent's vault secret titles and statuses (values are never exposed). Use action=create to ask the user to add a named API key or token to the encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into chat. Use action=store to save a credential you obtained yourself (for example an API key from a sign-up) with name, value, allowed_hosts and reason: it is write-only, you can never read it back, and it cannot replace a secret the user added. Prefer vault_request capture when the key arrives in an API response, so you never see it. Reference an active secret by name in deploy_service `secrets` and read it in service code as env.NAME, or as {{NAME}} in vault_request; the real value is substituted only on requests to allowed_hosts.";
     case "vault_request":
       return "Send one HTTPS request to an external API with vault secrets injected by the platform. Write {{SECRET_NAME}} anywhere in the url, headers, or body and the real value is substituted at the network boundary, only for hosts the user approved for that secret; you never see the value and the response is blocked if it echoes one. Use it to call APIs on the user's behalf (for example posting to X with an OAuth token). The body is a string (JSON, form encoding, or text), or a workspace file up to 25 MB via body_artifact (sent raw, or as one multipart/form-data file part when body_field is set, with form_fields alongside). Returns the status, content-type, and the response body text (truncated at 64 KB). Check request_secret action=list for available secret names first. Set capture {name, json_path or header} to store a credential from the response (such as the api_key a sign-up returns) in the vault: you get {{NAME}} back in place of the value, usable on the host that issued it.";
+    case "submit_harness_feedback":
+      return "Tell CrowdCode's engineers about a problem with your harness, not with the user's task: a tool that is missing, broken or confusing, a limit or timeout that blocked reasonable work, an error message that did not say what to do, a system-prompt instruction that misled you, or a concrete code change that would have helped. Free, and it does not touch the budget. Write only what the fields ask for, in your own words: no secrets, keys, personal data or the user's content. At most 5 a day; repeating a summary does nothing. Do not use it to report the user's task outcome or a paid service's quality (that is review_paid_service), and keep working on the task after it.";
     case "automations":
       return "Create, list, update, pause, resume, run now, or delete persistent automations for this hosted agent. Use create proactively when the user's goal clearly needs a future follow-up, reminder, monitoring loop, recurring report, or maintenance task. Automations run in this same conversation. A schedule runs at most every 15 minutes; each run spends at most run_budget_usd (default 0.25) and the schedule at most daily_cap_usd (default 1) per 24 hours. Anything more often than hourly or above $1 a day waits for the owner's approval in the Schedules tab; tell the user. Never create duplicates or hide a schedule from the user.";
   }
@@ -193,6 +198,15 @@ function toolParameters(name: ToolName): JsonSchema {
         reason: stringSchema("One short sentence shown to the user describing what this request does."),
         capture: { type: "object", description: "Store a credential from the response in the vault: { name, json_path (e.g. data.api_key) or header, allowed_hosts? }. The value is replaced by {{NAME}} in what you receive.", additionalProperties: true }
       }, ["url"]);
+    case "submit_harness_feedback":
+      return objectSchema({
+        category: { type: "string", enum: [...HARNESS_FEEDBACK_CATEGORIES], description: "bug: a tool or the runtime misbehaved. missing_tool: a capability the harness should have. limit: a cap, quota or timeout. prompt: an instruction that misled you. docs: a tool description or error that was unclear. other." },
+        summary: stringSchema(`One line, at most ${HARNESS_FEEDBACK_LIMITS.summary} characters: what got in your way.`),
+        details: stringSchema(`At most ${HARNESS_FEEDBACK_LIMITS.details} characters: what you tried, what happened, what you expected, and what it cost you (turns, money, a failed task).`),
+        suggested_change: stringSchema(`Optional, at most ${HARNESS_FEEDBACK_LIMITS.suggested_change} characters: the change you would make, as a diff, a code snippet or a precise description.`),
+        tool_name: stringSchema("Optional: the tool the feedback is about, for example run_shell."),
+        severity: { type: "string", enum: [...HARNESS_FEEDBACK_SEVERITIES], description: "high: it blocked the task or wasted real money. medium: it cost several turns. low: a papercut." }
+      }, ["category", "summary", "details", "severity"]);
     case "automations":
       return automationSchema({ action: { type: "string", description: "create, list, update, pause, resume, run, or delete." }, automation_id: stringSchema("Automation ID, except for create and list.") }, ["action"]);
   }
@@ -223,6 +237,9 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ method: text(args.method ?? "GET", 10), url: text(args.url), body_artifact: text(args.body_artifact), reason: text(args.reason, 120) });
     case "automations":
       return pick({ action: text(args.action), automation_id: text(args.automation_id), name: text(args.name), prompt: text(args.prompt, 120) });
+    case "submit_harness_feedback":
+      // The summary is the agent's own words about the harness, bounded; details and code never leave the run.
+      return pick({ category: text(args.category, 20), severity: text(args.severity, 10), tool_name: text(args.tool_name, 100) });
     case "complete_session":
       return pick({ summary: text(args.final_message ?? args.summary ?? args.message) });
     case "browse_services":

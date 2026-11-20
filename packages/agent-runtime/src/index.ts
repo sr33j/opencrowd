@@ -130,7 +130,7 @@ export class MockLlmProvider implements LlmProvider {
     this.random = new SeededRandom(options.seed ?? "opencrowd-test-mode");
     this.endProbability = options.endProbability ?? 0.35;
     this.maxToolTurns = options.maxToolTurns ?? 8;
-    this.tools = options.tools?.length ? options.tools : TOOL_NAMES.filter((name) => name !== "spawn_subagent" && name !== "check_subagents");
+    this.tools = options.tools?.length ? options.tools : TOOL_NAMES.filter((name) => name !== "spawn_subagent" && name !== "check_subagents" && name !== "submit_harness_feedback");
   }
 
   async complete(messages: LlmMessage[]): Promise<LlmResponse> {
@@ -222,6 +222,8 @@ export function createMockToolExecutor(): ToolExecutor {
           return { ok: false, error: `${name} is unavailable in mock mode` };
         case "automations":
           return { ok: false, error: `${name} is unavailable in mock mode` };
+        case "submit_harness_feedback":
+          return ok({ status: "recorded", id: "mock-feedback", note: "Mock mode records nothing." });
       }
     } catch (error) {
       return { ok: false, error: (error as Error).message };
@@ -263,6 +265,8 @@ function mockToolArguments(
       return { url: "https://api.example.com/mock", method: "GET", reason: `Mock request for: ${task.slice(0, 80)}` };
     case "automations":
       return { action: "list" };
+    case "submit_harness_feedback":
+      return { category: "other", severity: "low", summary: "Mock feedback", details: `Mock feedback for: ${task.slice(0, 80)}` };
   }
 }
 
@@ -901,6 +905,10 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
     "You are a continuous autonomous agent, not a turn-based assistant. Maintain unfinished goals, promised follow-ups, recurring work, and conditions worth monitoring. When future work would clearly help, proactively create a persistent automation instead of waiting for the owner to say schedule. Use a one-time automation for a future reminder or follow-up and a cron automation for monitoring, recurring reports, or maintenance. It runs in this same conversation. Never create duplicates or noisy schedules, and always tell the owner exactly what you created, its timezone, and next run.",
     "Before finishing a substantive task, consider whether a follow-up, reminder, monitoring loop, recurring report, or maintenance check would materially advance the owner's goal; create one when the need is clear, but do not schedule ordinary one-off work.",
     "Money: your wallet is sized for the task, so spend what the work needs; don't hold back out of caution. Each turn the newest message carries one line starting \"Money:\" (the `money` field of the latest tool result or, when no tool has just run, an automatic CrowdCode note at the start of the latest user message; that note is context, not something the user said, so never reply to it or mention it unless the user asks about money). It leads with about how many model calls the wallet still covers and a tier: HIGH and MEDIUM, work normally; LOW, verify before branching into new work; CRITICAL, wrap up with what you have. A call costs more as the conversation grows. If the money runs out, CrowdCode pauses the run with its work kept and arranges more; you don't have to ask. When the wallet lists networks, each network's balance is separate: a payment on a network needs that network's available balance. Report the wallet to the owner as one total, mentioning the per-network split only when it matters. Spending totals cover only the current run. An unavailable balance is unknown, not zero. The line before a model call excludes that call's eventual charge; never claim a response was free or that you spent nothing merely because no paid tool ran. Use get_budget_status or get_wallet_status for the full financial detail. Respect approval mode and per-call limits; over-limit requests require the owner's approval."
+  );
+  // SRI-113: one line, so the tool is for the harness and not a diary.
+  if (enabledTools.includes("submit_harness_feedback")) systemPromptParts.push(
+    "If the harness, not the task, is the problem, tell CrowdCode: when a tool is missing, broken or confusing, a limit or timeout blocks reasonable work, an error does not say what to do, or an instruction here misleads you, call submit_harness_feedback once with what happened and the change you would make, then carry on with the task. Not for the user's content, a paid service's quality, or a mistake of your own."
   );
   if (options.hosted) systemPromptParts.push(
     "Files the owner sends you: an attached file is saved in this session under uploads/ before its message reaches you, and the message names each one with its path, size and type. Read a text file with read_file at uploads/<name>, and any file with run_shell at artifacts/uploads/<name> from the session directory. Those files are already the owner's and already in their file list: work from them, and never copy or re-save one under artifacts/ to hand it back. Write your own outputs elsewhere under artifacts/; uploads/ is the owner's directory and nothing you write there is delivered. If a file the message names is missing, say so and ask the owner to send it again rather than guessing at its contents.",

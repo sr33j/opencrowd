@@ -14,3 +14,4 @@ export * from "./deadlines.js";
 export * from "./spending.js";
 export * from "./financial-state.js";
 export * from "./reasoning.js";
+export * from "./harness-feedback.js";

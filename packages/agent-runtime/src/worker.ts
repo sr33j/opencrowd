@@ -441,7 +441,8 @@ export class MachineWorker {
           }, runId, run.commandId);
         },
         toolExecutor: (name, args, context) => record(name, args, () =>
-          hosted && HOSTED_ONLY_TOOL_NAMES.includes(name) ? hosted(name, args, context) : local(name, args, context))
+          // Harness feedback goes to CrowdCode, which attaches the run, model and image (SRI-113).
+          hosted && (HOSTED_ONLY_TOOL_NAMES.includes(name) || name === "submit_harness_feedback") ? hosted(name, args, context) : local(name, args, context))
       });
       await this.finish(runId, run, result.outcome === "stopped" ? "user_stopped" : result.outcome,
         String(result.summary.final_message ?? ""));

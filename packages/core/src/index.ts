@@ -11,3 +11,4 @@ export * from "./tool-definitions.js";
 export * from "./tools.js";
 export * from "./types.js";
 export * from "./paths.js";
+export * from "./harness-feedback.js";
