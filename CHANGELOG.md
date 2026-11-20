@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.16.27 — 2026-11-20
 
 - **Agents can report problems with their own harness (SRI-113).** A new `submit_harness_feedback` tool takes `category` (bug, missing_tool, limit, prompt, docs, other), `summary` (at most 200 characters), `details` (4,000), optional `suggested_change` (8,000) and `tool_name`, and `severity` (low, medium, high). One line of the system prompt says when to use it: when the harness, not the task, is the problem. It costs nothing and does not touch the budget. Secrets, vault placeholders, email addresses and phone numbers are redacted (`redactHarnessFeedbackText`, exported from the protocol with the limits). On a hosted run the supervisor sends it to CrowdCode, which attaches the run, model and image. On the CLI it is appended to `./harness-feedback.jsonl` and never sent; repeating a summary does nothing, and five a day is the most. Subagents do not get it.
 - **`crowdcode_status` is read through `set_crowdcode_enabled`.** Called without `enabled`, `set_crowdcode_enabled` returns the current setting and saved default. `crowdcode_status` still executes but is no longer offered to the model, so a hosted request with a chief of staff's eight org tools stays at the gateway's 32 (`MODEL_MAX_TOOLS`, `HOSTED_DECLARED_TOOL_BUDGET`; a test pins the sum).
