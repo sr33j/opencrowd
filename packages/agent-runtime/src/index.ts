@@ -56,6 +56,7 @@ export * from "./context.js";
 export * from "./tool-deadlines.js";
 export * from "./non-answer.js";
 import { isNonAnswer } from "./non-answer.js";
+import { unresolvedHoldsNote, withHoldsNote } from "./unresolved-holds.js";
 
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */
@@ -862,6 +863,15 @@ export async function runAgentTask(session: SessionState, task: string, options:
 }
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
+  const started = new Date().toISOString();
+  const result = await runAgentTaskLoop(session, task, options);
+  // Whatever path the run ended by, a paid call still resolving is part of
+  // what it spent, and the owner reads it in the answer (SRI-96).
+  const note = typeof result.summary.final_message === "string" ? await unresolvedHoldsNote(session, started) : undefined;
+  return note ? { ...result, summary: { ...result.summary, final_message: withHoldsNote(String(result.summary.final_message), note) } } : result;
+}
+
+async function runAgentTaskLoop(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools: ToolName[] = options.chatOnly ? [] : options.tools
     ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status"].includes(name))
       : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));

@@ -183,7 +183,7 @@ function toolParameters(name: ToolName): JsonSchema {
         action: { type: "string", description: "list to inspect secret titles/statuses; create to ask the user for a secret; store to save one you obtained yourself." },
         value: stringSchema("store only: the credential to save. It is write-only from here on."),
         name: { type: "string", pattern: "^[A-Z][A-Z0-9_]{1,63}$", description: "Secret name in SCREAMING_SNAKE_CASE, for example OPENAI_API_KEY. This is the env var name your service reads." },
-        allowed_hosts: { type: "array", description: "Hostnames the secret may be sent to, for example api.openai.com. The vault only substitutes the real value on requests to these hosts.", items: stringSchema("Hostname.") },
+        allowed_hosts: { type: "array", description: "Bare hostnames the secret may be sent to, for example api.openai.com (no https://, port, path or wildcard). The vault only substitutes the real value on requests to these hosts. Each covers itself and its subdomains, not its parent. A public suffix such as httpbin.org or github.io cannot be allowed: give the exact host you will call (e.g. www.httpbin.org) and send requests to that host. Entries that cannot be allowed come back in rejected_hosts with the reason.", items: stringSchema("Hostname.") },
         reason: stringSchema("One short sentence shown to the user explaining why the secret is needed.")
       }, []);
     case "vault_request":

@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSession, executeTool } from "@opencrowd/core";
 import { atomicUsdc, stripReasoning, type Command, type Event, type FinancialState } from "@opencrowd/protocol";
-import type { EconomyGateway } from "@opencrowd/economy";
+import { appendPurchase, type EconomyGateway } from "@opencrowd/economy";
 import { economyTools } from "../src/economy-tools.js";
 import type { CompletionSignals } from "../src/index.js";
 import { isNonAnswer, runAgentTaskDetailed, type LlmMessage, type LlmProvider, type LlmResponse, type ToolExecutor } from "../src/index.js";
@@ -328,3 +328,23 @@ async function hostedRun(steps: Step[], options: { gate?: boolean } = {}) {
   await worker.drain();
   return { events };
 }
+
+describe("a paid call still resolving is in the answer (SRI-96)", () => {
+  it("adds the hold to the final answer whatever the model wrote, and only this run's", async () => {
+    const s = await session();
+    const old = { purchase_id: "p_old", session_id: s.sessionId, created_at: new Date(Date.now() - 3_600_000).toISOString(), endpoint: "https://old.example/x",
+      method: "POST", quoted_cost_cents: 50, charged_cost_cents: 50, outcome: "unknown" as const };
+    await appendPurchase(s, old);
+    const result = await runAgentTaskDetailed(s, "Buy the Arteche post, total spend at most $1.00.", {
+      hosted: true, runId, knowledge: false, financialState: async () => financial(),
+      provider: { complete: async () => {
+        await appendPurchase(s, { ...old, purchase_id: "p_new", created_at: new Date().toISOString(), endpoint: "https://drip.example/posts/arteche", charged_cost_cents: 100, quoted_cost_cents: 100 });
+        return complete("Bought the Arteche post for $1.00, within the $1.00 limit.");
+      } },
+    });
+    expect(result.outcome).toBe("completed");
+    const text = String(result.summary.final_message);
+    expect(text.startsWith("Bought the Arteche post for $1.00, within the $1.00 limit.\n\nPayment still resolving: $1.00 for https://drip.example/posts/arteche.")).toBe(true);
+    expect(text).not.toContain("old.example");
+  });
+});

@@ -340,6 +340,21 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     if (reply.code === "funding_required") {
       return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`);
     }
+    // The seller answered, but without a receipt the gateway could verify
+    // (SRI-96): the answer is the run's to use, and the gateway's words say
+    // what is held and until when. Not a transport failure, which is what it
+    // used to read as, without the answer, so the model bought it again.
+    const answered = objectValue(reply.data);
+    if (reply.code === "payment_unknown" && answered && numberValue(answered.status) !== undefined) {
+      return {
+        ok: false,
+        ambiguous: true,
+        ambiguityReason: "missing_receipt",
+        status: numberValue(answered.status),
+        data: decodeBody(answered.body, answered.content_type),
+        error: reply.error ?? "the seller answered without a verifiable settlement receipt"
+      };
+    }
     if (reply.code === "payment_unknown") {
       return {
         ok: false,

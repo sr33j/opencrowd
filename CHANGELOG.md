@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.28 — 2026-11-20
+
+- **A paid call whose seller answered without a receipt hands over the answer and is never bought twice by accident (SRI-96).** On 2026-11-06 a hosted agent bought a $1.00 article and was told the call "failed in transport" with no article, because the gateway could not verify a settlement receipt. It bought the same article again seconds later. The seller had served the post free on an earlier purchase and never settled either attempt; had it settled them, a "$1.00 at most" task would have cost $3.00, and the answer said $1.00.
+  - When the seller answered, `call_paid_service` now returns the answer (`data.data`, `status`, `held_cost_cents`, `artifact_path`) with `outcome: "unknown"`. The error says what is held and that this same request must not be bought again. Hosted, it quotes the gateway, which also refuses a second purchase of the same URL, method and body (`payment_unresolved`) until the first resolves.
+  - The hosted bridge keeps a refusal's `data` (`postHostedTool`), so the answer and the hold reach the runtime.
+  - `request_secret`'s `allowed_hosts` says what an entry may be: a bare hostname that covers its subdomains, never a public suffix such as httpbin.org (use `www.httpbin.org` and call that host), with refused entries returned in `rejected_hosts` (SRI-94).
+  - The final answer of any run that still has a paid call of unknown state ends with a harness-written line: `Payment still resolving: $1.00 for <endpoint>. This $1.00 is held and counts as spent until it resolves…` Only purchases made in that run are listed.
+
 ## 0.16.27 — 2026-11-20
 
 - **Agents can report problems with their own harness (SRI-113).** A new `submit_harness_feedback` tool takes `category` (bug, missing_tool, limit, prompt, docs, other), `summary` (at most 200 characters), `details` (4,000), optional `suggested_change` (8,000) and `tool_name`, and `severity` (low, medium, high). One line of the system prompt says when to use it: when the harness, not the task, is the problem. It costs nothing and does not touch the budget. Secrets, vault placeholders, email addresses and phone numbers are redacted (`redactHarnessFeedbackText`, exported from the protocol with the limits). On a hosted run the supervisor sends it to CrowdCode, which attaches the run, model and image. On the CLI it is appended to `./harness-feedback.jsonl` and never sent; repeating a summary does nothing, and five a day is the most. Subagents do not get it.
