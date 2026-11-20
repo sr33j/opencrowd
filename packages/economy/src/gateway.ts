@@ -1169,7 +1169,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
         method: { type: "string", description: "HTTP method (default POST)" },
         body: { description: "Request inputs matching the inspected schema; for GET they are sent as query parameters" },
         max_cost_cents: { type: "integer", minimum: 1, description: "Price ceiling in cents; defaults to the inspected price" },
-        purpose: { type: "string", maxLength: MAX_PURPOSE_CHARS, description: "One sentence: what the task needs from this call, with any requirement the result must meet (length, count, format, coverage). Example: \"a 60 s cartoon with the same two characters; this is clip 1 of 6\". CrowdCode's judge reads it to say how well the service fits tasks like this. No names, contact details, URLs or secrets. A job's collect step reuses its submit's." }
+        purpose: { type: "string", maxLength: MAX_PURPOSE_CHARS, description: "One sentence: what the whole task needs, then this call's part of it, with the numbers (length, count, format, coverage). Example: \"the task needs a 60 s cartoon with the same two characters; this call makes clip 1 of 6\", not just \"a 10 s clip\". CrowdCode's judge reads it to say how well the service fits tasks like this, so a cap that forces several calls must be visible in it. No names, contact details, URLs or secrets. A job's collect step reuses its submit's." }
       },
       required: ["url", "purpose"],
       additionalProperties: false

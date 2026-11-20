@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.34 — 2026-11-20
+
+- **`purpose` leads with the whole task's need (SRI-135).** On production the first agent to state one wrote "a real 5-second opening cartoon clip…" for a 30-second cartoon, so the judge learned the clip came back a second short but not that the task needed six of them. The `call_paid_service` description and the system prompt now ask for the whole task's need first, then the call's part, with the numbers ("the task needs a 30 s cartoon; this call makes the 5 s opening clip").
+
 ## 0.16.33 — 2026-11-20
 
 - **`routeTemplate` leaves long lower-case slugs alone (SRI-135).** CrowdCode's dry run of folding per-job listings found a data API's series slug (`…/interest-rates/market-yield-on-…-10-year-…`) caught by the "64 or more characters with a digit" rule. The rule is gone here, in CrowdCode, in the hosted gateway and in the CrowdCode MCP client; job ids are still templated by the mixed-case and hex rules.
