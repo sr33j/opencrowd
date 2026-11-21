@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, afterEach, expect, it, vi } from "vitest";
 import { createSession } from "@opencrowd/core";
-import { economyTools, endedShort, reflectionTrigger, REFLECTION_MIN_TURNS, REFLECTION_NUDGE, SHORT_RUN_NUDGE } from "../src/economy-tools.js";
+import { CAPABILITY_CHECK_NUDGE, claimsUnavailable, economyTools, endedShort, reflectionTrigger, REFLECTION_MIN_TURNS, REFLECTION_NUDGE, SHORT_RUN_NUDGE } from "../src/economy-tools.js";
 import { completionSignals, type CompletionSignals } from "../src/index.js";
 import { runAgentTaskDetailed, type LlmResponse, type LoopCheckpoint } from "../src/index.js";
 import { FileSteeringInbox } from "../src/inbox.js";
@@ -230,8 +230,8 @@ describe("the reflection is asked only of runs that earned it (SRI-115 C6)", () 
       { role: "user" as const, content: "earlier task" }, call("a", "call_paid_service"), tool("a", true), call("b", "run_shell"), tool("b", false),
       { role: "user" as const, content: "now" }, call("c", "call_paid_service"), tool("c", true), call("d", "web_fetch"), tool("d", true),
     ];
-    expect(completionSignals(messages, "now", 3, "done")).toEqual({ turns: 3, failedTools: 0, paidCalls: 1, finalMessage: "done", task: "now" });
-    expect(completionSignals(messages.slice(0, 6), "earlier task", 2)).toEqual({ turns: 2, failedTools: 1, paidCalls: 1 });
+    expect(completionSignals(messages, "now", 3, "done")).toEqual({ turns: 3, failedTools: 0, paidCalls: 1, discoveryCalls: 0, finalMessage: "done", task: "now" });
+    expect(completionSignals(messages.slice(0, 6), "earlier task", 2)).toEqual({ turns: 2, failedTools: 1, paidCalls: 1, discoveryCalls: 0 });
   });
 
   it("a one-question run finishes without the reflection turn", async () => {
@@ -325,5 +325,70 @@ describe("a run that ends short of its task asks for the service that would have
     expect(JSON.stringify(provider.complete.mock.calls[1])).toContain("submit_harness_feedback");
     expect(requests).toEqual([]);
     expect(provider.complete).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("an agent searches before it says a capability is unavailable (SRI-159)", () => {
+  // Production, Nov 21: a real owner asked "why can't you use browser use and fill in that information for me?"
+  // and the agent said it had no browser-control access without searching; four browser services were listed.
+  const refusal = "Because this chat agent does not have browser-control access to your device or retailer websites. I can search public listings, but I can’t open an interactive checkout page.";
+  const plain = { turns: 2, failedTools: 0, paidCalls: 0 };
+  const economy = (calls: string[] = []) => economyTools({
+    definitions: () => ["find_paid_service", "browse_services", "request_service"].map((name) => ({ name, description: name, parameters: { type: "object" } })),
+    execute: async (name) => {
+      calls.push(name);
+      return name === "find_paid_service"
+        ? { ok: true, data: { results: [{ endpoint: "https://x402.api.browser-use.com/api/v3/sessions", method: "POST", price_usd: 1, reliability: "unverified" }] } }
+        : { ok: true, data: { enabled: true } };
+    }
+  });
+
+  it("reads a claim that a capability is unavailable, and not an ordinary answer", () => {
+    for (const text of [refusal,
+      "I can’t personally place or pay for the order.",
+      "I don't have access to a browser, so I can't fill in the form.",
+      "Placing phone calls is outside my capabilities.",
+      "There is no browser to open that page with.",
+      "Sending SMS isn't available in this chat."]) expect(claimsUnavailable(text), text).toBe(true);
+    for (const text of ["Here are three lip balms under $5.",
+      "The API can't take more than 100 rows, so I sent them in 3 batches.",
+      "You cannot deduct the fee.",
+      "I opened the page with Browser Use and filled in the form; it is waiting for payment, which I can't make with USDC at a normal retailer. Should I stop here?".replace("I can't make", "can't be made")]) expect(claimsUnavailable(text), text).toBe(false);
+  });
+
+  it("asks once for a search when the run never searched, and not when it did", async () => {
+    expect(await economy().completionGate(false, { ...plain, discoveryCalls: 0, finalMessage: refusal })).toEqual({ nudge: CAPABILITY_CHECK_NUDGE, revise: true });
+    expect(CAPABILITY_CHECK_NUDGE).toContain("find_paid_service");
+    expect(CAPABILITY_CHECK_NUDGE).toContain("can't pay a normal retailer");
+    // A run that searched and still found nothing may say so.
+    expect(await economy().completionGate(false, { ...plain, discoveryCalls: 2, finalMessage: refusal })).not.toEqual({ nudge: CAPABILITY_CHECK_NUDGE, revise: true });
+    // Asked once.
+    expect(await economy().completionGate(true, { ...plain, discoveryCalls: 0, finalMessage: refusal })).toBeUndefined();
+  });
+
+  it("turns the production refusal into a search and an offer", async () => {
+    const calls: string[] = [];
+    const tools = economy(calls);
+    const offer = "I can't pay a normal retailer: I hold USDC, not a card. But I can open the Walgreens page and fill in your details with Browser Use ($1.00 a session, not yet verified on CrowdCode). Want me to?";
+    const provider = { complete: vi.fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "c1", name: "complete_session", arguments: { final_message: refusal } }] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "f1", name: "find_paid_service", arguments: { query: "browser automation fill in a web form" } }] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "c2", name: "complete_session", arguments: { final_message: offer } }] })
+      .mockResolvedValue(empty) };
+    const result = await runAgentTaskDetailed(await session(), "why cant you use browser use and fill in that information for me?",
+      { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
+    expect(result).toMatchObject({ outcome: "completed", summary: { final_message: offer } });
+    expect(JSON.stringify(provider.complete.mock.calls[1])).toContain("has not searched CrowdCode's directory");
+    expect(calls).toContain("find_paid_service");
+    expect(provider.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it("counts directory searches in the run's signals", () => {
+    const messages = [
+      { role: "user", content: "task" },
+      { role: "assistant", content: "", toolCalls: [{ id: "a", name: "browse_services", arguments: { node: "browser" } }, { id: "b", name: "run_shell", arguments: {} }] },
+      { role: "tool", toolCallId: "a", content: "{}" }, { role: "tool", toolCallId: "b", content: "{}" },
+    ] as any;
+    expect(completionSignals(messages, "task", 2, "done").discoveryCalls).toBe(1);
   });
 });

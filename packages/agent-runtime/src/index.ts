@@ -781,7 +781,7 @@ export interface AgentRunOptions {
    * alreadyNudged survives checkpoint replay so optional reflection is not repeated.
    * run describes this run so far, so a gate can ask only when it is worth a turn.
    */
-  completionGate?: (alreadyNudged?: boolean, run?: CompletionSignals) => Promise<string | undefined>;
+  completionGate?: (alreadyNudged?: boolean, run?: CompletionSignals) => Promise<CompletionGateResult>;
 }
 
 /**
@@ -799,7 +799,23 @@ export interface CompletionSignals {
   finalMessage?: string;
   /** The task this run was given, so a gate can compare the answer to it. */
   task?: string;
+  /** Directory searches in this run: find_paid_service, browse_services and inspect_paid_service calls (SRI-159). */
+  discoveryCalls?: number;
 }
+
+/**
+ * What a completion gate asks before a run may finish. A string is
+ * housekeeping: the answer in hand is held and delivered as written. With
+ * `revise`, the answer itself is wrong as it stands (it says a capability is
+ * unavailable without having looked, SRI-159), so it is not held and the
+ * next complete_session replaces it.
+ */
+export type CompletionGateResult = string | { nudge: string; revise: true } | undefined;
+const gateParts = (gate: CompletionGateResult) =>
+  typeof gate === "object" ? { blocker: gate.nudge, revise: true } : { blocker: gate, revise: false };
+
+/** The tools that look a capability up in CrowdCode's directory. */
+export const DISCOVERY_TOOLS = new Set(["find_paid_service", "browse_services", "inspect_paid_service"]);
 
 /** Signals for the run that began at the last user message equal to `task`. */
 export function completionSignals(messages: readonly LlmMessage[], task: string, turns: number, finalMessage?: string): CompletionSignals {
@@ -809,14 +825,18 @@ export function completionSignals(messages: readonly LlmMessage[], task: string,
   const names = new Map<string, string>();
   let failedTools = 0;
   let paidCalls = 0;
+  let discoveryCalls = 0;
   for (const message of own) {
-    for (const call of message.toolCalls ?? []) names.set(call.id, call.name);
+    for (const call of message.toolCalls ?? []) {
+      names.set(call.id, call.name);
+      if (DISCOVERY_TOOLS.has(call.name)) discoveryCalls += 1;
+    }
     if (message.role !== "tool") continue;
     const ok = toolResultOk(message.content);
     if (ok === false) failedTools += 1;
     else if (ok === true && names.get(message.toolCallId ?? "") === "call_paid_service") paidCalls += 1;
   }
-  return { turns, failedTools, paidCalls, ...(finalMessage ? { finalMessage, task } : {}) };
+  return { turns, failedTools, paidCalls, discoveryCalls, ...(finalMessage ? { finalMessage, task } : {}) };
 }
 
 function toolResultOk(content: unknown): boolean | undefined {
@@ -929,6 +949,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   );
   if (options.dynamicTools) {
     systemPromptParts.push(
+      "Never tell the owner that something can't be done, or that you have no browser, phone, email or other capability, before you have searched for it in this run with find_paid_service (or browse_services). CrowdCode's directory sells much of what you lack: remote browsers that open pages, click and fill in forms (browser automation, computer use), calls and SMS, email, posting and more. If a fitting service exists but is unverified, say so and offer it with its price; the spending guard asks the owner before paying. State real limits precisely instead: you pay in USDC, not by card, so you can fill in a retailer's checkout with a browser service but can't pay a normal retailer.",
       "When the local computer is not the right environment, or after one clear local capability failure, buy external capability: find_paid_service to discover (its results come back already inspected, with the input fields each one takes, so call the best fit directly), inspect_paid_service only for an endpoint the search did not return or an exact quote, and call_paid_service to execute through the enforced purchase lifecycle. Give every call_paid_service a one-sentence `purpose`: the whole task's need first, then this call's part, with the numbers (\"the task needs a 30 s cartoon; this call makes the 5 s opening clip\", not \"a 5 s clip\"), never names, contact details or secrets. On hosted agents CrowdCode's platform judge reviews every paid call by itself, from the platform's own record of the request, the response, the payment and that purpose, so no review is owed: go straight on with the task. The exception: when a paid call worked but fell short of the task — a cap (clip length, result count), partial coverage, or a workaround it forced (stitching, several calls, a second service) — call review_paid_service once for that endpoint, right after the call, stating the limit against the task (\"good 10 s clip, but capped at 10 s per generation; the task needed 60 s, so six calls and stitching\"). One review per endpoint per run, never more; your rating and notes are evidence the judge reads, so report accurately and never try to talk it into a rating. Distinguish provider faults from local errors and uncertain failures: a call that never reached the seller is never the seller's fault. funding_required means your USDC is on the wrong network, a cap or a declined approval means the owner's policy stopped you, and an unpayable rail means you could not pay at all — in every one of those the service was never asked, so it gets no review and certainly not a low rating. Fix the cause and call it again instead.",
       "Choosing a service: free first. Local files, shell, Python, a URL you already have and free public APIs come before any purchase, and once one of them has answered, stop: buy nothing more. When a purchase is worth it, choose from CrowdCode's capability tree below (browse_services reads a node) or find_paid_service with a short capability query (for example \"reddit comment search\" or \"object storage\", not the task's subject), which searches every catalog across Base, Solana and Tempo and returns services you can pay, reliable ones first, each with its reliability state and the reason. Use a reliable pick when one fits; it pays automatically within the owner's caps. An unverified service may be used, but its payment may need the owner's approval: tell the owner so when you choose one, and let the spending guard ask rather than asking yourself. Never use an unreliable one. When nothing reliable fits, record the need with request_service before you finish instead of guessing at endpoints. Among equally good fits, prefer the higher-ranked one whatever its network; each result lists `networks`, the networks it can be paid on, and one you can pay from a balance you already hold beats one that needs a transfer, because a move costs about $0.03. When the chosen service is marked transfer_needed, move USDC between your own networks first if you have a tool for that; otherwise tell the user which network needs funds. When the ranking is unavailable, compare candidates yourself with inspect_paid_service (reliability, reputation, price and network) against your per-network balances.",
       ...(options.hosted
@@ -1203,8 +1224,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       const finalMessage = response.content.trim()
         ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
       recordFinalMessage(finalMessage);
-      const blocker = options.chatOnly ? undefined : await options.completionGate?.(completionNudges > 0,
-        completionSignals(messages, task, turn + 1, pendingFinalMessage));
+      const { blocker, revise } = gateParts(options.chatOnly ? undefined : await options.completionGate?.(completionNudges > 0,
+        completionSignals(messages, task, turn + 1, pendingFinalMessage)));
       const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {
@@ -1217,8 +1238,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       }
       if (blocker || unanswered) {
         if (unanswered) answerNudges += 1;
-        hold();
-        const content = blocker ? gateNudge(blocker) : answerNudge();
+        if (!revise) hold();
+        const content = blocker ? (revise ? `You cannot finish yet: ${blocker}` : gateNudge(blocker)) : answerNudge();
         const nudge: LlmMessage = { role: "user", content };
         messages.push(nudge);
         await options.onMessage?.(nudge);
@@ -1434,8 +1455,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
           continue;
         }
       }
-      const blocker = await options.completionGate?.(completionNudges > 0,
-        completionSignals(messages, task, turn + 1, pendingFinalMessage));
+      const { blocker, revise } = gateParts(await options.completionGate?.(completionNudges > 0,
+        completionSignals(messages, task, turn + 1, pendingFinalMessage)));
       const unanswered = answerNudges < 1 && placeholder();
       if (blocker) {
         if (completionNudges >= 1) {
@@ -1448,8 +1469,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       }
       if (blocker || unanswered) {
         if (unanswered) answerNudges += 1;
-        hold();
-        const content = blocker ? gateNudge(blocker) : answerNudge();
+        if (!revise) hold();
+        const content = blocker ? (revise ? `You cannot finish yet: ${blocker}` : gateNudge(blocker)) : answerNudge();
         const gateMessage = {
           role: "user",
           content
