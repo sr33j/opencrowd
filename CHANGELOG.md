@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **A host can run every `run_shell` command as another user.** With `OPENCROWD_SHELL_SANDBOX` set to an absolute path, the shell spawns that program with `/usr/bin/env -i <the shell's environment> /bin/sh -c <command>` instead of `/bin/sh -c` directly, and the runtime writes its files 0660 instead of 0600 so that user's group can use them. Hosted CrowdCode executors set it to a setuid helper that runs the command as an unprivileged `sandbox` user in its own PID namespace, out of reach of the supervisor's tokens and socket. Without the variable nothing changes.
+
 ## 0.16.37 — 2026-11-21
 
 - **An agent searches before it says a capability is unavailable (SRI-159).** A real owner asked "why can't you use browser use and fill in that information for me?". The agent answered that it had no browser-control access without searching, then filed harness feedback for a missing browser tool. Browser Use, Browserbase, StableBrowser and MrScraper were all listed.
