@@ -9,11 +9,19 @@ import { dirname, join } from "node:path";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cliDir = join(root, "apps", "cli");
 const pkg = JSON.parse(await readFile(join(cliDir, "package.json"), "utf8"));
-const outfile = join(cliDir, "bundle", "opencrowd.js");
+const outdir = join(cliDir, "bundle");
+const outfile = join(outdir, "opencrowd.js");
 
+await rm(outdir, { recursive: true, force: true });
 await build({
-  entryPoints: [join(cliDir, "src", "index.ts")],
-  outfile,
+  entryPoints: { opencrowd: join(cliDir, "src", "index.ts") },
+  // Split, so a module only some commands use (the interactive UI, and ink and
+  // React with it) is loaded when it is used rather than by every process: a
+  // single ESM file has to import every external at its top. Chunks sit beside
+  // opencrowd.js, so assets still resolve one level above them.
+  outdir,
+  splitting: true,
+  chunkNames: "[name]-[hash]",
   bundle: true,
   platform: "node",
   format: "esm",

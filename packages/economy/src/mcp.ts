@@ -1,5 +1,6 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+// The MCP SDK is loaded when a server is first connected, not by every process
+// that starts (FAST_START.md).
+import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { McpServerConfig } from "@opencrowd/core";
 
@@ -78,9 +79,10 @@ export class McpConnection {
     if (!this.connecting) {
       this.connecting = (async () => {
         this.options.log?.(`connecting MCP server ${this.name} (${this.config.command} ${this.config.args.join(" ")})`);
+        const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
         const transport = this.options.transportFactory
           ? this.options.transportFactory(this.config)
-          : new StdioClientTransport({ command: this.config.command, args: this.config.args, stderr: "ignore" });
+          : new (await import("@modelcontextprotocol/sdk/client/stdio.js")).StdioClientTransport({ command: this.config.command, args: this.config.args, stderr: "ignore" });
         const client = new Client({ name: "opencrowd", version: "0.1.0" });
         await client.connect(transport);
         this.client = client;

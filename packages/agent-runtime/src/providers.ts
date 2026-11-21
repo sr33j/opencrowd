@@ -1,4 +1,8 @@
-import { VeniceClient, VeniceError } from "venice-x402-client";
+// venice-x402-client brings a wallet SDK tree that takes about 200 ms to load:
+// imported when `venice-direct` is first used, not by every process that starts.
+type VeniceModule = typeof import("venice-x402-client");
+let venice: VeniceModule | undefined;
+const loadVenice = async () => (venice ??= await import("venice-x402-client"));
 import { requireAgentCashWallet } from "@opencrowd/core";
 
 /**
@@ -139,6 +143,7 @@ export class VeniceProvider implements TypedLlmProvider {
           this.client = await this.options.clientFactory();
         } else {
           const wallet = await requireAgentCashWallet();
+          const { VeniceClient } = await loadVenice();
           this.client = new VeniceClient(wallet.privateKey, { timeoutMs: this.options.timeoutMs ?? 600_000 });
         }
         return this.client;
@@ -232,7 +237,8 @@ export class VeniceProvider implements TypedLlmProvider {
 }
 
 function veniceRemediationError(error: unknown): Error {
-  if (error instanceof VeniceError) {
+  // Only a loaded client can have thrown one.
+  if (venice && error instanceof venice.VeniceError) {
     if (error.code === "INSUFFICIENT_BALANCE") {
       const details = (error.details ?? {}) as Record<string, unknown>;
       const minimum = typeof details.minimumTopUpUsd === "number" ? details.minimumTopUpUsd : undefined;
