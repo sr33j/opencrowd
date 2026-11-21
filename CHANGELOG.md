@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.40 — 2026-11-21
+
+- **A job's collect step waits for the job (w107 phase 2).** On 2026-11-20 an org's chief of staff (Opus) spent 11 of its 32 turns collecting five video clips: an inspect and a call each, plus polls of clips still rendering. Calling a job's collect step (`call_paid_service` with `url: "job:…"`, or its registered collect URL) now polls the job until it completes, fails or 4 minutes pass, then answers once with `waited: { polls, seconds }`. After 4 minutes it also says `still` and how to collect again.
+  - Every poll is an ordinary guarded call with its own operation id, so none replays an earlier pending answer and a resumed run replays the same polls. Polls before completion are not charged, as before.
+  - A submit is never waited on. Its `collect.note` now says to submit every job first and collect them all in one turn.
+  - `wait: false` makes a single poll.
+
 ## 0.16.39 — 2026-11-21
 
 - **A hosted reply streams while the model writes it (FAST_START phase 1D, `design-docs/FAST_START.md` in CrowdCode).** The worker asks its bridge for the reply's text as it arrives (`stream: true`). The text goes out as `assistant.delta` events every 300 ms, under the id the turn's `assistant.message` then carries with the whole text, so a conversation can replace one with the other. Housekeeping turns never stream. A call that fails, pauses or is cancelled part-way closes its text with an empty message. The hosted provider reads the bridge's NDJSON (`delta` lines, then a `final` line with the body and status a plain answer has), and a bridge that does not stream still answers with one JSON body.

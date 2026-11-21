@@ -80,6 +80,8 @@ interface Inspection {
   payTo?: string;
   /** A registered collect step's: the purpose its submit was called for. */
   purpose?: string;
+  /** This is an async job's collect step: calling it waits for the job (w107 phase 2). */
+  collect?: boolean;
   evidence: ServiceEvidence;
   inspectedAt: string;
 }
@@ -195,7 +197,7 @@ export class EconomyGateway {
         case "inspect_paid_service":
           return await this.inspectPaidService(args);
         case "call_paid_service":
-          return await this.callPaidService(args, operationId);
+          return await this.callAndCollect(args, operationId);
         case "review_paid_service":
           return await this.reviewPaidService(args);
         case "read_service":
@@ -412,6 +414,46 @@ export class EconomyGateway {
           : { unavailable: true, error: evidence.error }
       }
     };
+  }
+
+  /**
+   * A collect step waits for its job (w107 phase 2). On 2026-11-20 an org's
+   * chief spent 11 of 32 Opus turns collecting five video clips, an inspect
+   * and a call each, and polling clips that were still rendering. Calling a
+   * job's collect step now polls it here until the job completes, fails or
+   * collectTiming.waitMs runs out, so the model makes one call per clip and can
+   * collect every clip in one turn. Each poll is an ordinary guarded call
+   * with its own operation id (a resumed run replays the same polls); polls
+   * before completion are not charged, which the seller and the gateway
+   * already guarantee. `wait: false` makes a single poll.
+   */
+  private async callAndCollect(args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
+    const first = await this.callPaidService(args, operationId);
+    if (args.wait === false || !first.ok || !pendingJob(first) || !(await this.isCollect(args))) return first;
+    const started = Date.now();
+    let result = first;
+    let polls = 1;
+    let status = pendingJob(result);
+    while (status && Date.now() - started < collectTiming.waitMs) {
+      this.options.onProgress?.({ type: "calling_service", message: `Job ${status}; polling again` });
+      await new Promise((resolve) => setTimeout(resolve, collectTiming.pollMs[Math.min(polls - 1, collectTiming.pollMs.length - 1)]));
+      result = await this.callPaidService(args, operationId ? `${operationId}:poll${polls}` : undefined);
+      polls += 1;
+      if (!result.ok) break;
+      status = pendingJob(result);
+    }
+    const seconds = Math.round((Date.now() - started) / 1000);
+    if (!result.data || typeof result.data !== "object") return result;
+    const waited = { polls, seconds, ...(status ? { still: status, note: `Still ${status} after ${seconds}s of polling by CrowdCode. Collect it again later with the same call; polls before it completes are not charged.` } : {}) };
+    return { ...result, data: { ...(result.data as Record<string, unknown>), waited } };
+  }
+
+  /** Whether this call is an async job's registered collect step. */
+  private async isCollect(args: Record<string, unknown>): Promise<boolean> {
+    const asked = stringArg(args.url);
+    if (!asked) return false;
+    if (JOB_HANDLE.test(asked)) return true;
+    return (await this.loadInspections()).get(inspectionKey(asked, (stringArg(args.method) ?? "GET").toUpperCase()))?.collect === true;
   }
 
   private async callPaidService(args: Record<string, unknown>, operationId?: string): Promise<ToolResult> {
@@ -691,12 +733,12 @@ export class EconomyGateway {
     let url: string;
     try { url = new URL(poll, target).href; } catch { return undefined; }
     if (originOf(url) !== originOf(target)) return undefined;
-    const registered = { ...inspection, endpoint: url, method: "GET", inspectedAt: new Date().toISOString() };
+    const registered = { ...inspection, endpoint: url, method: "GET", collect: true, inspectedAt: new Date().toISOString() };
     const job = jobHandle(url);
     await this.rememberInspection(inspectionKey(url, "GET"), registered);
     await this.rememberInspection(`job ${job}`, registered);
     return { method: "GET", job, url, inspected: true,
-      note: `Collect this job with call_paid_service method GET and url "${job}" (a short handle for this url, already inspected; no inspect_paid_service needed). Poll until it reports completed: a poll before then is not charged.` };
+      note: `Collect this job with call_paid_service method GET and url "${job}" (a short handle for this url, already inspected; no inspect_paid_service needed). The call waits for the job by itself, up to ${Math.round(collectTiming.waitMs / 60000)} minutes, and polls before it completes are not charged: submit every job you need first, then collect them all in one turn instead of polling.` };
   }
 
   /**
@@ -1015,6 +1057,24 @@ function requestFor(endpoint: string, method: string, body: unknown): { url: str
  * twelve hex digits of the URL's SHA-256. CrowdCode's wake after an
  * uncollected job names the same handle (hold-wakes.ts).
  */
+/**
+ * How long a collect step waits for its job before handing back "still
+ * running", and the pauses between polls: soon at first (a clip often
+ * finishes in seconds), then every 15 s. Mutable only so tests can shorten it.
+ */
+export const collectTiming = { waitMs: 240_000, pollMs: [5_000, 8_000, 12_000, 15_000] };
+const PENDING_STATUS = /^(queued|pending|in_progress|in-progress|processing|running|submitted|starting|generating|waiting)$/i;
+
+/** The job's state when a collect answer says it is not finished yet, else undefined. */
+export function pendingJob(result: ToolResult): string | undefined {
+  const data = result.ok && result.data && typeof result.data === "object" ? result.data as Record<string, unknown> : undefined;
+  if (!data) return undefined;
+  const inner = data.data && typeof data.data === "object" && !Array.isArray(data.data) ? data.data as Record<string, unknown> : undefined;
+  const state = inner?.status ?? inner?.state;
+  if (typeof state === "string") return PENDING_STATUS.test(state) ? state.toLowerCase() : undefined;
+  return data.status === 202 && (data.charged_cost_cents === 0 || data.outcome === "free") ? "pending" : undefined;
+}
+
 export const jobHandle = (url: string) => `job:${createHash("sha256").update(url).digest("hex").slice(0, 12)}`;
 const JOB_HANDLE = /^job:[0-9a-f]{12}$/;
 
@@ -1291,6 +1351,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
         method: { type: "string", description: "HTTP method (default POST)" },
         body: { description: "Request inputs matching the inspected schema; for GET they are sent as query parameters" },
         max_cost_cents: { type: "integer", minimum: 1, description: "Price ceiling in cents; defaults to the inspected price" },
+        wait: { type: "boolean", description: "For a job's collect step (url job:…): false polls once instead of waiting for the job to finish (default true)." },
         purpose: { type: "string", maxLength: MAX_PURPOSE_CHARS, description: "One sentence: what the whole task needs, then this call's part of it, with the numbers (length, count, format, coverage). Example: \"the task needs a 60 s cartoon with the same two characters; this call makes clip 1 of 6\", not just \"a 10 s clip\". CrowdCode's judge reads it to say how well the service fits tasks like this, so a cap that forces several calls must be visible in it. No names, contact details, URLs or secrets. A job's collect step reuses its submit's." }
       },
       required: ["url", "purpose"],
