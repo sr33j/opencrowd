@@ -17,6 +17,7 @@ import {
 import type { AgentCashAdapter, PaidFetchResult, PaymentRail } from "./agentcash.js";
 import type { CrowdCodeAdapter, ServiceEvidence } from "./crowdcode.js";
 import { describeRails } from "./offers.js";
+import { PROBE } from "./discovery.js";
 import { routeTemplate } from "./route.js";
 import { reliabilityNote, type CrowdCodeApi, type Reliability } from "./tree.js";
 import { documentedHeader, findFollowUpTokens, followUpKey, loadFollowUps, saveFollowUp, sellerOpenApi } from "./follow-ups.js";
@@ -159,8 +160,12 @@ export class EconomyGateway {
   }
 
   private async rememberInspection(key: string, inspection: Inspection): Promise<void> {
+    await this.rememberInspections([[key, inspection]]);
+  }
+
+  private async rememberInspections(entries: [string, Inspection][]): Promise<void> {
     const map = await this.loadInspections();
-    map.set(key, inspection);
+    for (const [key, inspection] of entries) map.set(key, inspection);
     await writeFile(this.inspectionsPath, JSON.stringify(Object.fromEntries(map)), "utf8");
   }
 
@@ -265,9 +270,46 @@ export class EconomyGateway {
       // Six ranked results carry their reliability within about 800 tokens; the agent can ask for more.
       const result = await this.options.agentcash.search(query, { limit: intArg(args.limit) ?? (rank && this.options.crowdcodeApi ? SEARCH_LIMIT : undefined), ...(rank ? { rank } : {}) });
       if (!result.ok) return { ok: false, error: result.error };
-      return { ok: true, data: rank ? await this.withReliability(result.data) : result.data };
+      // Read the probes before compaction copies the rows (a spread drops them).
+      const probes = probesOf(result.data);
+      return { ok: true, data: await this.adoptProbed(rank ? await this.withReliability(result.data) : result.data, probes) };
     }
     return { ok: false, error: "find_paid_service requires `origin` (known origin) or `query` (capability search)" };
+  }
+
+  /**
+   * Search already probed every result it returns, exactly as
+   * inspect_paid_service would (w107 phase 0). Record each probe as that
+   * endpoint's inspection and show its input fields and answer shape, so the
+   * agent goes from a search straight to call_paid_service: one model turn
+   * instead of two. The reputation floor is still checked when it pays, as for
+   * any call; only results the search kept (none `bad` or unreliable) are
+   * recorded.
+   */
+  private async adoptProbed(data: unknown, probes: Map<string, Record<string, unknown>>): Promise<unknown> {
+    const services = (data as { services?: unknown } | undefined)?.services;
+    if (!probes.size || !Array.isArray(services)) return data;
+    const inspectedAt = new Date().toISOString();
+    const recorded: [string, Inspection][] = [];
+    const shown = services.map((service) => {
+      const row = service as Record<string, unknown>;
+      const probe = typeof row.endpoint === "string" ? probes.get(row.endpoint) : undefined;
+      if (!probe || typeof row.endpoint !== "string") return service;
+      const method = String(row.method ?? probe.method ?? "POST").toUpperCase();
+      const free = probe.free === true;
+      recorded.push([inspectionKey(row.endpoint, method), {
+        endpoint: row.endpoint, method, rail: railFromSchema(probe),
+        priceCeilingCents: free ? 0 : priceCeilingFromSchema(probe),
+        ...(typeof probe.pay_to === "string" ? { payTo: probe.pay_to } : {}),
+        evidence: { ok: true, unproven: true, summary: "probed by find_paid_service; reputation is checked when it is paid" },
+        inspectedAt
+      }]);
+      const input = describeInput(probe.input_schema);
+      const output = describeOutput(probe.output_schema);
+      return { ...row, ...(input ? { input } : {}), ...(output ? { returns: output } : {}), ...(free ? { free: true } : {}), inspected: true };
+    });
+    if (recorded.length) await this.rememberInspections(recorded);
+    return { ...(data as Record<string, unknown>), services: shown };
   }
 
   /** One node of the capability tree, at the version this session's instructions were built from. */
@@ -1054,7 +1096,7 @@ const SEARCH_LIMIT = 6;
 const RELIABILITY_NOTE = "Reliable first: it pays automatically within the owner's caps. Unverified may need the owner's approval; say so when you pick one. Unreliable is refused, so it is left out.";
 /** Said once per search over CrowdCode's index (C10, C12, C13). */
 const TIER_NOTE = "Ranked by CrowdCode's evidence: delivery and quality per dollar. tier proven = seen to deliver, popular = many payers and healthy; both pay automatically within the owner's caps. new = little evidence yet: it pays from the exploration allowance, and above it the owner is asked. bad is refused, so it is left out. explore: true means CrowdCode is trying it ahead of the best-known option; prefer the first fit unless the task needs otherwise.";
-const COMPACT_RANKED_NOTE = "Then by quality and effective price on best_network (about $0.03 more if USDC must move there). Between equal fits prefer `networks` you already hold USDC on. Inspect before paying.";
+const COMPACT_RANKED_NOTE = "Then by quality and effective price on best_network (about $0.03 more if USDC must move there). Between equal fits prefer `networks` you already hold USDC on. Results marked inspected were probed just now: call one directly with the fields its `input` lists; inspect_paid_service only for an exact quote (sample_body) or a URL the search did not return.";
 /** The discovery note's word that the probe sweep ran out of time, kept when the note is rewritten. */
 function incompleteNote(data: unknown): string {
   const note = (data as { note?: unknown } | undefined)?.note;
@@ -1090,6 +1132,81 @@ function compactService(service: Record<string, unknown>, reliability: Reliabili
   return { ...rest, reliability: reliability ? describeReliability(reliability) : "unverified (CrowdCode could not say)" };
 }
 const NAME_MAX_CHARS = 48;
+
+/** The probe each search result was verified with, by endpoint (see adoptProbed). */
+function probesOf(data: unknown): Map<string, Record<string, unknown>> {
+  const probes = new Map<string, Record<string, unknown>>();
+  const services = (data as { services?: unknown } | undefined)?.services;
+  for (const service of Array.isArray(services) ? services : []) {
+    const probe = service && typeof service === "object" ? (service as Record<symbol, unknown>)[PROBE] : undefined;
+    const endpoint = (service as { endpoint?: unknown } | undefined)?.endpoint;
+    if (probe && typeof probe === "object" && typeof endpoint === "string") probes.set(endpoint, probe as Record<string, unknown>);
+  }
+  return probes;
+}
+
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+  value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+/** JSON Schema words that describe a schema rather than name an input. */
+const SCHEMA_WORDS = new Set(["type", "required", "additionalProperties", "$schema", "description", "title", "properties", "items", "examples", "example", "default"]);
+const INPUT_FIELDS_MAX = 10;
+const INPUT_CHARS_MAX = 480;
+const SHAPE_CHARS_MAX = 240;
+
+/**
+ * An endpoint's inputs in a few hundred characters: `{ query: "string,
+ * required: Search query", numResults: "number" }`. Reads a plain JSON
+ * Schema and the x402 discovery extension's `{ body | queryParams }` wrappers. Undefined when
+ * the seller described no fields.
+ */
+export function describeInput(schema: unknown): Record<string, string> | undefined {
+  const root = asRecord(schema);
+  if (!root) return undefined;
+  let fields: Record<string, unknown> = { ...(asRecord(root.properties) ?? {}) };
+  const required = new Set<string>(Array.isArray(root.required) ? root.required.map(String) : []);
+  for (const part of ["body", "queryParams", "query", "params"]) {
+    const wrapper = asRecord(fields[part]) ?? asRecord(root[part]);
+    const inner = asRecord(wrapper?.properties) ?? (wrapper && !("type" in wrapper) ? wrapper : undefined);
+    if (!inner) continue;
+    delete fields[part];
+    fields = { ...fields, ...inner };
+    for (const name of Array.isArray(wrapper?.required) ? wrapper!.required as unknown[] : []) required.add(String(name));
+  }
+  if (!Object.keys(fields).length)
+    fields = Object.fromEntries(Object.entries(root).filter(([key]) => !SCHEMA_WORDS.has(key) && !["method", "type", "headers"].includes(key)));
+  delete fields.method;
+  const out: Record<string, string> = {};
+  let chars = 0;
+  for (const [name, value] of Object.entries(fields).slice(0, INPUT_FIELDS_MAX)) {
+    const field = asRecord(value);
+    const type = typeof value === "string" ? value : String(field?.type ?? (Array.isArray(field?.enum) ? "enum" : "any"));
+    const choices = Array.isArray(field?.enum) ? ` one of ${field!.enum.slice(0, 6).map(String).join("|")}` : "";
+    const text = typeof field?.description === "string" ? `: ${field.description.replace(/\s+/g, " ").slice(0, 64)}` : "";
+    const line = `${type}${required.has(name) || field?.required === true ? ", required" : ""}${choices}${text}`;
+    if (chars + name.length + line.length > INPUT_CHARS_MAX) break;
+    out[name] = line;
+    chars += name.length + line.length;
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** The answer's top-level shape, `{results[{title,url,text}],next}`, or undefined when the seller gave none. */
+export function describeOutput(schema: unknown): string | undefined {
+  const root = asRecord(schema);
+  if (!root) return undefined;
+  const shape = (value: unknown, depth: number): string => {
+    const record = asRecord(value);
+    if (!record) return "";
+    const items = asRecord(record.items);
+    if (record.type === "array" && items) return `[${shape(items, depth)}]`;
+    const props = asRecord(record.properties) ?? (record.type === undefined && !("items" in record) ? record : undefined);
+    if (!props || depth > 1) return "";
+    const keys = Object.keys(props).filter((key) => !SCHEMA_WORDS.has(key) || props === record.properties).slice(0, 8);
+    return keys.length ? `{${keys.map((key) => `${key}${shape(props[key], depth + 1)}`).join(",")}}` : "";
+  };
+  const text = shape(asRecord(root.example) ?? root, 0);
+  return text ? text.slice(0, SHAPE_CHARS_MAX) : undefined;
+}
 
 function slugUrl(url: string): string {
   return url.replace(/[^a-z0-9]+/gi, "-").replace(/^-|-$/g, "").slice(0, 80) || "service";
@@ -1147,7 +1264,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "inspect_paid_service",
-    description: "Inspect one endpoint before calling it: exact input schema, price ceiling, supported payment rail, CrowdCode reliability state and reputation evidence. Required before call_paid_service.",
+    description: "Inspect one endpoint before calling it: exact input schema, price ceiling, supported payment rail, CrowdCode reliability state and reputation evidence. Needed before call_paid_service only for an endpoint find_paid_service did not just return (those come back inspected, with their input fields); also gives an exact quote with sample_body.",
     parameters: {
       type: "object",
       properties: {
@@ -1161,7 +1278,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "call_paid_service",
-    description: "Execute one inspected call through the enforced purchase lifecycle (reputation check, approval policy, budget reservation, payment, receipt). Requires a prior inspect_paid_service for the same url+method.",
+    description: "Execute one inspected call through the enforced purchase lifecycle (reputation check, approval policy, budget reservation, payment, receipt). Requires a prior inspect_paid_service for the same url+method, or a find_paid_service result marked inspected.",
     parameters: {
       type: "object",
       properties: {

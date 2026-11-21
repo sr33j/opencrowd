@@ -137,7 +137,7 @@ export function renderCapabilityIndex(l0: string, live = false): string {
   return live
     ? ["Service knowledge (CrowdCode's capability tree, rebuilt nightly from verified purchases and daily probes):",
       l0.trim(),
-      "browse_services(<node>) reads a node; do so before find_paid_service for an unfamiliar capability."].join("\n")
+      "browse_services(<node>) reads a node; do so once before find_paid_service for an unfamiliar capability, not again."].join("\n")
     : [
       "Service knowledge base (derived from CrowdCode reviews of real paid calls):",
       l0.trim(),

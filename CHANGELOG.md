@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.36 — 2026-11-21
+
+- **Search results come back inspected, with their input fields (w107 phase 0, `design-docs/CODE_MODE.md` in CrowdCode).** Over Nov 7–21, owner runs made 3.2 searches and 2.2 inspects per paid call, and find → inspect → call took three model turns. `find_paid_service` already probed every result exactly as `inspect_paid_service` does. Each probed result now carries `inspected: true`, `input` (its fields: type, required, choices, a short description, about 480 characters at most) and `returns` (its answer's top-level shape) when the seller describes them. The probe is recorded as the endpoint's inspection, so `call_paid_service` takes it directly. The reputation floor is still checked when it pays. `inspect_paid_service` remains for URLs a search did not return and for exact quotes with `sample_body`.
+- **Discovery loops stop (w107 phase 0).** On 2026-11-20 an image-research run called `find_paid_service("image generation")` 9 times and `browse_services("image.generate")` 10 times. It also inspected the same four endpoints four or five times each, over 54 turns, and bought nothing.
+  - The same search, tree read or inspection (query-string variants of one endpoint count as one) is refused, unasked and unpaid, the third time in a run.
+  - After six searches and tree reads without a paid call, each further one tells the run to decide: call the best fit, or stop and say what is missing.
+  - The tree prompt says to browse a node once.
+
 ## 0.16.35 — 2026-11-21
 
 - **A gap in CrowdCode's own tools goes to harness feedback, not to a service request (SRI-159).** A chief of staff asked "where did we receive overnight revenue from?" couldn't break the total down by service and said so. The short-run nudge then told it to call `request_service`, and it filed "a per-service revenue breakdown" as a marketplace request. It never called `submit_harness_feedback`, which it had. `SHORT_RUN_NUDGE` and `REFLECTION_NUDGE` now start by deciding what was missing. CrowdCode's own data or tools (an internal API or report, an action a tool lacks, a notice that left something out, a limit or a confusing error) go to `submit_harness_feedback`. `request_service` is only for a paid external service that someone outside could build and sell. `request_service`'s description and the system prompt say the same.

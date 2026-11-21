@@ -20,6 +20,10 @@ export interface ServiceLog {
   emptyStreaks: Record<string, number>;
   /** Empty answers this run received, from every endpoint. */
   emptyResults: number;
+  /** Discovery calls answered so far, by what they asked (see discoveryKey). Absent in older checkpoints. */
+  discovery?: Record<string, number>;
+  /** Searches and tree reads since the last paid call that answered. */
+  searchesSinceCall?: number;
 }
 
 export const emptyServiceLog = (): ServiceLog => ({ inspected: [], called: [], emptyStreaks: {}, emptyResults: 0 });
@@ -29,6 +33,48 @@ export function endpointKey(url: unknown, method: unknown): string | undefined {
   if (typeof url !== "string" || !url.trim()) return undefined;
   const bare = url.trim().replace(/[?#].*$/, "");
   return `${(typeof method === "string" && method.trim() ? method : "POST").toUpperCase()} ${bare}`;
+}
+
+/**
+ * What a discovery call asked, so the same question is not paid for in model
+ * turns again (w107 phase 0). On 2026-11-20 an image-research run called
+ * find_paid_service("image generation") 9 times, browse_services
+ * ("image.generate") 10 times and inspected the same four endpoints four or
+ * five times each, over 54 turns, and bought nothing (run d20be67e).
+ */
+export function discoveryKey(name: string, args: Record<string, unknown>): string | undefined {
+  const words = (value: unknown) => typeof value === "string" ? value.toLowerCase().replace(/\s+/g, " ").trim() : "";
+  if (name === "find_paid_service") {
+    const asked = words(args.origin) || words(args.query);
+    return asked ? `find_paid_service ${asked}` : undefined;
+  }
+  if (name === "browse_services") return words(args.node) ? `browse_services ${words(args.node)}` : undefined;
+  if (name === "inspect_paid_service") {
+    // A quote for a particular body is a different question; query-string variants of one endpoint are not.
+    if (args.sample_body !== undefined) return undefined;
+    const key = endpointKey(args.url, args.method);
+    return key ? `inspect_paid_service ${key}` : undefined;
+  }
+  return undefined;
+}
+
+/** A discovery question may be asked this many times in a run; the next is refused unasked. */
+export const DISCOVERY_REPEATS_MAX = 2;
+/** After this many searches and tree reads without a paid call, each one says to decide. */
+export const SEARCHES_BEFORE_DECIDING = 6;
+
+/**
+ * The refusal for a discovery call this run already made DISCOVERY_REPEATS_MAX
+ * times. Nothing is called and nothing is paid; the earlier answers are in the
+ * conversation.
+ */
+export function repeatedDiscovery(log: ServiceLog, name: string, args: Record<string, unknown>): string | undefined {
+  const key = discoveryKey(name, args);
+  const asked = key ? log.discovery?.[key] ?? 0 : 0;
+  if (!key || asked < DISCOVERY_REPEATS_MAX) return undefined;
+  return `Not run again: this run already made exactly this call (${key}) ${asked} times and the answers are above. `
+    + "Choose from what they returned and call it with call_paid_service, try a different capability, "
+    + "or, if nothing fits, say so and record the need with request_service. Nothing was paid.";
 }
 
 /**
@@ -83,6 +129,18 @@ export function recordServiceResult(
   log: ServiceLog, name: string, args: Record<string, unknown>,
   result: { ok: boolean; data?: unknown }
 ): string | undefined {
+  const asked = discoveryKey(name, args);
+  if (asked && result.ok) {
+    log.discovery = { ...(log.discovery ?? {}), [asked]: (log.discovery?.[asked] ?? 0) + 1 };
+  }
+  if ((name === "find_paid_service" || name === "browse_services") && result.ok) {
+    const searches = (log.searchesSinceCall ?? 0) + 1;
+    log.searchesSinceCall = searches;
+    if (searches >= SEARCHES_BEFORE_DECIDING)
+      return `${searches} searches and tree reads since this run's last paid call. Decide now: call the best fit you have already found `
+        + "(results marked inspected need no inspect_paid_service), or stop and tell the owner what is missing, with request_service if a service would fix it.";
+    return undefined;
+  }
   if (name === "inspect_paid_service") {
     if (!result.ok) return undefined;
     const data = (result.data ?? {}) as Record<string, unknown>;
@@ -96,6 +154,7 @@ export function recordServiceResult(
   if (!log.called.includes(key)) log.called.push(key);
   // Only an answer counts: a refusal, a cap or a failure is a different problem.
   if (!result.ok) return undefined;
+  log.searchesSinceCall = 0;
   const answer = (result.data ?? {}) as Record<string, unknown>;
   if (!isEmptyServiceData(answer.data)) {
     log.emptyStreaks[key] = 0;
