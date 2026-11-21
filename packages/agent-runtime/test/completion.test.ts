@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, afterEach, expect, it, vi } from "vitest";
 import { createSession } from "@opencrowd/core";
-import { economyTools, endedShort, reflectionTrigger, REFLECTION_MIN_TURNS, SHORT_RUN_NUDGE } from "../src/economy-tools.js";
+import { economyTools, endedShort, reflectionTrigger, REFLECTION_MIN_TURNS, REFLECTION_NUDGE, SHORT_RUN_NUDGE } from "../src/economy-tools.js";
 import { completionSignals, type CompletionSignals } from "../src/index.js";
 import { runAgentTaskDetailed, type LlmResponse, type LoopCheckpoint } from "../src/index.js";
 import { FileSteeringInbox } from "../src/inbox.js";
@@ -269,7 +269,10 @@ describe("a run that ends short of its task asks for the service that would have
   it("a task that fails for lack of a service ends with one request, and at most one review of an endpoint that fell short", async () => {
     const prompt = await gate().completionGate(false, { ...plain, finalMessage: "I couldn't find any service that does this." });
     expect(prompt).toBe(SHORT_RUN_NUDGE);
-    expect(prompt).toContain("Call request_service once");
+    expect(prompt).toContain("call request_service once");
+    // A gap in CrowdCode's own tools or data is harness feedback, not a request (SRI-159).
+    expect(prompt).toContain("call submit_harness_feedback once");
+    expect(prompt).toContain("only for a paid external service that someone outside could build and sell");
     expect(prompt).toContain("call review_paid_service once");
     // Asked once: the next completion goes through.
     const tools = gate();
@@ -298,6 +301,29 @@ describe("a run that ends short of its task asks for the service that would have
     expect(requests).toEqual(["request_service"]);
     // The second model call saw the short-run nudge.
     expect(JSON.stringify(provider.complete.mock.calls[1])).toContain("ending short of its task");
+    expect(provider.complete).toHaveBeenCalledTimes(3);
+  });
+
+  it("routes a gap in CrowdCode's own tools to harness feedback, and files no service request (SRI-159)", async () => {
+    expect(REFLECTION_NUDGE).toContain("call submit_harness_feedback once");
+    const requests: string[] = [];
+    const tools = economyTools({
+      definitions: () => [{ name: "request_service", description: "r", parameters: { type: "object" } }],
+      execute: async (name) => { if (name === "request_service") requests.push(name); return { ok: true, data: { enabled: true } }; }
+    });
+    // The chief of staff's answer on production (run a9b1a6b0): "I can't reliably say which endpoint generated that revenue".
+    const short = "The notice only gives an org-wide total, so I can't reliably say which service earned it.";
+    const provider = { complete: vi.fn()
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "c1", name: "complete_session", arguments: { final_message: short } }] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "f1", name: "submit_harness_feedback", arguments: { category: "missing_tool", severity: "medium",
+        summary: "No per-service revenue breakdown for the org", details: "The paid notice gives only a total; I could not attribute it to a service." } }] })
+      .mockResolvedValueOnce({ content: "", toolCalls: [{ id: "c2", name: "complete_session", arguments: { final_message: short } }] })
+      .mockResolvedValue(empty) };
+    const s = await session();
+    const result = await runAgentTaskDetailed(s, "where did we receive overnight revenue from?", { provider, dynamicTools: tools, completionGate: tools.completionGate, knowledge: false });
+    expect(result.outcome).toBe("completed");
+    expect(JSON.stringify(provider.complete.mock.calls[1])).toContain("submit_harness_feedback");
+    expect(requests).toEqual([]);
     expect(provider.complete).toHaveBeenCalledTimes(3);
   });
 });
