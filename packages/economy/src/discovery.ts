@@ -35,7 +35,10 @@ export interface SearchOptions {
   rank?: ServiceRanker;
 }
 
-export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality, then effective price on best_network (about $0.03 more when USDC must move there first), then your balance. `networks` are where each can be paid; between equal fits, prefer one you already hold USDC on. transfer_needed: move USDC between your own networks first if you can, else say which network needs funds. Inspect the chosen endpoint before paying.";
+/** Where a search result keeps the probe it was verified with (see EconomyGateway.adoptProbed). */
+export const PROBE = Symbol.for("opencrowd.discovery.probe");
+
+export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality, then effective price on best_network (about $0.03 more when USDC must move there first), then your balance. `networks` are where each can be paid; between equal fits, prefer one you already hold USDC on. transfer_needed: move USDC between your own networks first if you can, else say which network needs funds. Each result was probed just now: call it directly with the fields in `input`; inspect_paid_service only for an exact quote (sample_body) or the full schema.";
 
 export interface DiscoveryOptions {
   /** Preferred settlement network when a service offers several (default base). */
@@ -163,7 +166,13 @@ export class BaseServiceDiscovery {
           const service: Record<string, unknown> = { endpoint, method, name: c.summary ?? c.name,
             price_usd: schema.price_usd, payment_provider: schema.rail === "mppx" ? "mppx" : "x402", network: schema.network ?? BASE_NETWORK,
             ...(networks.length ? { networks } : {}), payable: true };
-          return c.ranking ? { ...service, ...ranked(c.ranking, schema) } : service;
+          // The probe itself rides along (non-enumerable, never shown as is): the
+          // gateway records it as this endpoint's inspection and shows its
+          // input fields, so the agent can call a result without inspecting it
+          // again (w107 phase 0).
+          const result = c.ranking ? { ...service, ...ranked(c.ranking, schema) } : service;
+          Object.defineProperty(result, PROBE, { value: schema, enumerable: false });
+          return result;
         } catch { return undefined; }
       }));
       services.push(...batch.filter(Boolean));
@@ -218,7 +227,7 @@ export class BaseServiceDiscovery {
     if (!result.ok) return result;
     const verified = await this.verified(candidates, limit);
     return { ok: true, data: { services: verified.services,
-      note: `AgentCash discovery${rank ? " (CrowdCode ranking unavailable)" : ""}, verified ${describeRails(this.rails)}. New/unreviewed services are allowed. Inspect the chosen endpoint before paying.${this.partialNote(verified.incomplete)}` } };
+      note: `AgentCash discovery${rank ? " (CrowdCode ranking unavailable)" : ""}, verified ${describeRails(this.rails)}. New/unreviewed services are allowed. Each result was probed just now: call it directly with the fields its input lists.${this.partialNote(verified.incomplete)}` } };
   }
 
   async discoverEndpoints(origin: string): Promise<McpCallResult> {
