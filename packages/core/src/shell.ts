@@ -107,13 +107,26 @@ function execute(
       cleanupProcessGroup(child, detached);
       resolvePromise(result);
     };
-    const child = spawn(command, {
-      cwd,
-      shell: true,
-      env,
-      detached,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+    const sandbox = shellSandbox();
+    // A host that runs the model's commands as another user names the program
+    // that switches to it. It receives an absolute program and its arguments,
+    // never a shell string, and the environment travels as `env -i` arguments
+    // because a setuid program's loader drops some variables (TMPDIR among
+    // them) on the way in.
+    const child = sandbox
+      ? spawn(sandbox, ["/usr/bin/env", "-i", ...environmentArguments(env), "/bin/sh", "-c", command], {
+        cwd,
+        env: {},
+        detached,
+        stdio: ["ignore", "pipe", "pipe"]
+      })
+      : spawn(command, {
+        cwd,
+        shell: true,
+        env,
+        detached,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
     const abort = () => {
       signalProcessGroup(child, detached, "SIGKILL");
       settle({ command, cwd, exit_code: null, timed_out: false, stdout, stderr });
@@ -179,6 +192,30 @@ function cleanupProcessGroup(child: ReturnType<typeof spawn>, detached: boolean)
  */
 function resolveShellCwd(state: SessionState, cwd: string): string {
   return isAbsolute(cwd) ? resolve(cwd) : resolve(join(state.sessionDir, cwd));
+}
+
+/**
+ * The program a host runs every shell command through, when it has one.
+ *
+ * A hosted CrowdCode executor sets this to a setuid helper that runs the
+ * command as a separate, unprivileged user in its own PID namespace, so a
+ * command the model wrote cannot reach the supervisor's tokens, its Unix
+ * socket or the worker's state, all of which belong to the user this process
+ * runs as. Nothing else changes: the command, its working directory, its
+ * timeout and its output are the same. It is read from this process's own
+ * environment and never passed on to the command.
+ */
+export function shellSandbox(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  const program = env.OPENCROWD_SHELL_SANDBOX;
+  if (!program) return undefined;
+  if (!isAbsolute(program)) throw new Error("OPENCROWD_SHELL_SANDBOX must be an absolute path");
+  return program;
+}
+
+function environmentArguments(env: NodeJS.ProcessEnv): string[] {
+  return Object.entries(env)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(entry[0]))
+    .map(([key, value]) => `${key}=${value}`);
 }
 
 /**

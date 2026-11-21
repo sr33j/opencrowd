@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -285,6 +285,50 @@ describe("shell policy", () => {
       if (secret === undefined) delete process.env.OPENCROWD_SCRATCH_DIR;
       else process.env.OPENCROWD_SCRATCH_DIR = secret;
     }
+  });
+
+  it("runs every command through the host's shell sandbox when one is configured, and keeps it off the command's environment", async () => {
+    const root = await tempRoot();
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+    // A stand-in for the setuid helper: it records what it was asked to run,
+    // then runs it, exactly as the real one does once it has changed user.
+    const helper = join(root, "sandbox-exec");
+    const calls = join(root, "calls.txt");
+    await writeFile(helper, `#!/bin/sh\nprintf '%s\\n' "$@" >> '${calls}'\nexec "$@"\n`);
+    await chmod(helper, 0o755);
+    const previous = { sandbox: process.env.OPENCROWD_SHELL_SANDBOX, tmp: process.env.TMPDIR };
+    process.env.OPENCROWD_SHELL_SANDBOX = helper;
+    process.env.TMPDIR = "/scratch/tmp";
+    try {
+      const result = await runShell(session, "echo \"[$OPENCROWD_SHELL_SANDBOX][$TMPDIR]\" && pwd && exit 3", ".", 5_000);
+      expect(result.exit_code).toBe(3);
+      // The environment arrives intact, TMPDIR included (a setuid loader
+      // would have dropped it from the helper's own environment), and the
+      // sandbox's own path is not part of it.
+      expect(result.stdout).toContain("[][/scratch/tmp]");
+      expect(result.stdout).toContain(session.sessionDir);
+      const argv = (await readFile(calls, "utf8")).trim().split("\n");
+      expect(argv.slice(0, 2)).toEqual(["/usr/bin/env", "-i"]);
+      expect(argv.slice(-3)).toEqual(["/bin/sh", "-c", "echo \"[$OPENCROWD_SHELL_SANDBOX][$TMPDIR]\" && pwd && exit 3"]);
+      expect(argv).toContain("TMPDIR=/scratch/tmp");
+      expect(argv.some((arg) => arg.startsWith("OPENCROWD_SHELL_SANDBOX"))).toBe(false);
+      // Timeouts still end the command through the helper.
+      const slow = await runShell(session, "sleep 5", ".", 300);
+      expect(slow.timed_out).toBe(true);
+      // Files the runtime writes are shared with the sandbox's group, not private to this user.
+      const saved = await saveArtifact(session, "script.py", "print('hi')\n");
+      expect((await stat(join(session.sessionDir, saved.path))).mode & 0o777).toBe(0o660 & ~process.umask());
+      process.env.OPENCROWD_SHELL_SANDBOX = "relative/helper";
+      await expect(runShell(session, "true")).rejects.toThrow("absolute path");
+    } finally {
+      if (previous.sandbox === undefined) delete process.env.OPENCROWD_SHELL_SANDBOX;
+      else process.env.OPENCROWD_SHELL_SANDBOX = previous.sandbox;
+      if (previous.tmp === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = previous.tmp;
+    }
+    // Without a sandbox, the runtime's files stay private to its user.
+    const privateFile = await saveArtifact(session, "private.txt", "x");
+    expect((await stat(join(session.sessionDir, privateFile.path))).mode & 0o777).toBe(0o600);
   });
 
   it("advertises the machine's real shell ceiling to the model and honours it", async () => {

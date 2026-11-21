@@ -51,11 +51,23 @@ export async function containedPath(root: string, requested: string): Promise<st
   return target;
 }
 
+/**
+ * The mode new runtime files are created with. Private to this user, unless a
+ * shell sandbox is configured: then commands run as another user who shares a
+ * group with this one, and the session's files (a script the model saved, an
+ * artifact it will convert) have to be readable and writable by that group.
+ * The directories that must stay private (the worker's metadata) are closed
+ * by their own mode, not by their files'.
+ */
+export function runtimeFileMode(env: NodeJS.ProcessEnv = process.env): number {
+  return env.OPENCROWD_SHELL_SANDBOX ? 0o660 : 0o600;
+}
+
 /** Durable replace: sync file before rename and parent directory after rename. */
 export async function atomicWrite(path: string, content: string | Uint8Array): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const temp = `${path}.${randomUUID()}.tmp`;
-  const handle = await open(temp, "wx", 0o600);
+  const handle = await open(temp, "wx", runtimeFileMode());
   try {
     await handle.writeFile(content);
     await handle.sync();

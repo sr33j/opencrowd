@@ -1,6 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { HARNESS_FEEDBACK_CATEGORIES, HARNESS_FEEDBACK_LIMITS, HARNESS_FEEDBACK_SEVERITIES, harnessFeedbackKey, redactHarnessFeedbackText } from "@opencrowd/protocol";
+import { runtimeFileMode } from "./paths.js";
 import type { SessionState } from "./types.js";
 
 export type HarnessFeedbackCategory = typeof HARNESS_FEEDBACK_CATEGORIES[number];
@@ -62,6 +63,6 @@ export async function recordLocalHarnessFeedback(session: SessionState, args: Re
     throw new Error(`Feedback is limited to ${HARNESS_FEEDBACK_LIMITS.perDay} a day and that many are recorded; carry on with the task.`);
   const id = `local-${now.getTime().toString(36)}-${existing.length + 1}`;
   await mkdir(dirname(path), { recursive: true });
-  await appendFile(path, `${JSON.stringify({ id, created_at: now.toISOString(), session_id: session.sessionId, model: session.models?.main, ...feedback })}\n`, { mode: 0o600 });
+  await appendFile(path, `${JSON.stringify({ id, created_at: now.toISOString(), session_id: session.sessionId, model: session.models?.main, ...feedback })}\n`, { mode: runtimeFileMode() });
   return { status: "recorded", id, path, note: "Saved locally; the OpenCrowd CLI never sends it. Carry on with the task." };
 }
