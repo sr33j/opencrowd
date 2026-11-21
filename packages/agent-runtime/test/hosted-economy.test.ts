@@ -9,7 +9,7 @@ import { HostedAgentCashAdapter, createHostedEconomy, hostedDynamicTools, parseP
 import { createHostedProvider, readHostedFinancialState } from "../src/hosted-provider.js";
 import { HOSTED_DECLARED_TOOL_BUDGET, MODEL_MAX_TOOLS } from "@opencrowd/protocol";
 import { unresolvedHoldsNote, withHoldsNote } from "../src/unresolved-holds.js";
-import { BASE_USDC, jobHandle, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
+import { BASE_USDC, collectTiming, jobHandle, listPurchases, MONAD_USDC, SOLANA_NETWORK, SOLANA_USDC, TEMPO_USDC } from "@opencrowd/economy";
 import { MachineWorker } from "../src/worker.js";
 
 const discovery = vi.hoisted(() => ({ check: vi.fn(), discover: vi.fn() }));
@@ -432,6 +432,43 @@ describe("hosted economy: payment over the bridge", () => {
     expect(done.ok).toBe(true);
     expect(done.data).toMatchObject({ outcome: "paid_success", data: { status: "completed" } });
     expect(requests.filter(r => r.name === "economy.pay").at(-1)!.arguments).toMatchObject({ url: collect.url, method: "GET" });
+  });
+
+  it("waits for a job when its collect step is called, polling through the same guarded call (w107 phase 2)", async () => {
+    const { fetcher } = fakeFetch();
+    collectTiming.pollMs = [5];
+    try {
+      let pays = 0;
+      const { socketPath, requests } = await bridge((name) => {
+        if (name !== "economy.pay") return { ok: true, data: {} };
+        pays++;
+        if (pays === 1) return { ok: true, data: { outcome: "unsettled", status: 202, content_type: "application/json", amount_atomic: "0", note: "Not charged.",
+          body: JSON.stringify({ id: "v1_x", status: "queued", poll_url: "/api/v1/videos/generations/v1_x" }) } };
+        if (pays < 4) return { ok: true, data: { outcome: "unsettled", status: 202, content_type: "application/json", amount_atomic: "0", note: "Not charged.",
+          body: JSON.stringify({ id: "v1_x", status: "in_progress", note: "Upstream is still generating. No charge" }) } };
+        return { ok: true, data: { outcome: "paid_success", status: 200, content_type: "application/json", amount_atomic: "252000", transaction: "0xtx", network: "eip155:8453",
+          body: JSON.stringify({ id: "v1_x", status: "completed", data: [{ url: "https://cdn.example/v.mp4" }] }) } };
+      });
+      const { gateway } = await economy(fetcher, socketPath);
+      await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+      const submit = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { prompt: "waves" }, max_cost_cents: 26, purpose: "a 5 s clip" }, "3:call_a");
+      // A submit is not waited on, so several jobs can be started in one turn.
+      expect(submit.data).toMatchObject({ outcome: "free", data: { status: "queued" } });
+      expect((submit.data as any).collect.note).toMatch(/waits for the job by itself.*collect them all in one turn/);
+      const done = await gateway.execute("call_paid_service", { url: (submit.data as any).collect.job, max_cost_cents: 26 }, "4:call_b");
+      expect(done).toMatchObject({ ok: true, data: { outcome: "paid_success", data: { status: "completed" }, waited: { polls: 3 } } });
+      const pays_ = requests.filter(r => r.name === "economy.pay").map(r => r.arguments);
+      expect(pays_).toHaveLength(4);
+      // Every poll is its own purchase request, so none replays an earlier pending answer.
+      expect(new Set(pays_.map(args => args.purchase_request_id)).size).toBe(4);
+      // wait: false polls once.
+      pays = 1;
+      const once = await gateway.execute("call_paid_service", { url: (submit.data as any).collect.job, max_cost_cents: 26, wait: false }, "5:call_c");
+      expect(once.data).toMatchObject({ outcome: "free", data: { status: "in_progress" } });
+      expect((once.data as any).waited).toBeUndefined();
+    } finally {
+      collectTiming.pollMs = [5_000, 8_000, 12_000, 15_000];
+    }
   });
 
   it("states the task's need on each call, carries it to the collect step, and reviews an endpoint at most once per run (SRI-135)", async () => {
