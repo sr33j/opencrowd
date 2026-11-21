@@ -45,7 +45,7 @@ export function endpointKey(url: unknown, method: unknown): string | undefined {
 export function discoveryKey(name: string, args: Record<string, unknown>): string | undefined {
   const words = (value: unknown) => typeof value === "string" ? value.toLowerCase().replace(/\s+/g, " ").trim() : "";
   if (name === "find_paid_service") {
-    const asked = words(args.origin) || words(args.query);
+    const asked = words(args.origin) || words(args.task) || words(args.query);
     return asked ? `find_paid_service ${asked}` : undefined;
   }
   if (name === "browse_services") return words(args.node) ? `browse_services ${words(args.node)}` : undefined;

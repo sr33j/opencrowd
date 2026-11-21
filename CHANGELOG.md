@@ -1,7 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.16.38 — 2026-11-21
 
+- **`find_paid_service` takes a `task` (w107 phase 1, `find_relevant_services`).** The agent passes the owner's need in a sentence, or the request itself. CrowdCode's cheap model turns it into capability searches and pools about 40 candidates from the index. It returns only the endpoints that fit, each with `fit` (why), or `none_fit` when nothing does. The `none_fit` note says not to guess at endpoints and to record the need with `request_service`.
+  - On 29 real tasks this picked a good endpoint in the top three 96% of the time, against 76% for the agent's own short queries.
+  - Results still come back inspected, with their input fields.
+  - `query` and `origin` work as before. A task alone also searches AgentCash's catalog with its first 200 characters.
+  - The system prompt and the discovery loop guard count a task like a query.
 - **A host can run every `run_shell` command as another user.** With `OPENCROWD_SHELL_SANDBOX` set to an absolute path, the shell spawns that program with `/usr/bin/env -i <the shell's environment> /bin/sh -c <command>` instead of `/bin/sh -c` directly, and the runtime writes its files 0660 instead of 0600 so that user's group can use them. Hosted CrowdCode executors set it to a setuid helper that runs the command as an unprivileged `sandbox` user in its own PID namespace, out of reach of the supervisor's tokens and socket. Without the variable nothing changes.
 
 ## 0.16.37 — 2026-11-21

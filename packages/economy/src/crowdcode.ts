@@ -61,6 +61,8 @@ export interface ReviewSubmission {
 /** A cross-chain search for CrowdCode to rank (its `find_service` tool). */
 export interface ServiceSearch {
   query: string;
+  /** The owner's need in a sentence; CrowdCode picks the endpoints that fit it (w107 phase 1). */
+  task?: string;
   /** Networks this payer settles: base, solana, tempo (and monad when preferred). */
   networks: string[];
   /** Available USDC per network, when known. */

@@ -33,10 +33,17 @@ export interface SearchOptions {
   broad?: boolean;
   /** Rank across chains with CrowdCode; without it AgentCash's order stands. */
   rank?: ServiceRanker;
+  /**
+   * The owner's need in a sentence (w107 phase 1): CrowdCode rewrites it into
+   * capability queries and picks the endpoints that fit, or says none does.
+   */
+  task?: string;
 }
 
 /** Where a search result keeps the probe it was verified with (see EconomyGateway.adoptProbed). */
 export const PROBE = Symbol.for("opencrowd.discovery.probe");
+
+export const NONE_FIT_NOTE = "CrowdCode read the task and found no paid service that does it. Don't guess at endpoints: do what you can with free tools, tell the owner what is missing, and record the need with request_service.";
 
 export const RANKED_NOTE = "Ranked by CrowdCode across Base, Solana and Tempo (AgentCash, Coinbase's x402 catalog, MPP catalog and CrowdCode reviews): quality, then effective price on best_network (about $0.03 more when USDC must move there first), then your balance. `networks` are where each can be paid; between equal fits, prefer one you already hold USDC on. transfer_needed: move USDC between your own networks first if you can, else say which network needs funds. Each result was probed just now: call it directly with the fields in `input`; inspect_paid_service only for an exact quote (sample_body) or the full schema.";
 
@@ -202,7 +209,7 @@ export class BaseServiceDiscovery {
    */
   async search(query: string, options: SearchOptions = {}): Promise<McpCallResult> {
     const limit = Math.min(20, Math.max(1, options.limit ?? 8));
-    const { rank, ...searchOptions } = options;
+    const { rank, task, ...searchOptions } = options;
     // Each leg is bounded on its own: a catalog that stops answering must cost
     // this search one wait, not the whole tool call.
     const [result, balances] = await Promise.all([
@@ -213,10 +220,14 @@ export class BaseServiceDiscovery {
     ]);
     const candidates = result.ok ? searchResults(result.data) : [];
     if (rank) {
-      const ranking = await bounded(() => rank({ query, networks: this.networks(), ...(balances ? { balances } : {}),
+      const ranking = await bounded(() => rank({ query, ...(task ? { task } : {}), networks: this.networks(), ...(balances ? { balances } : {}),
         candidates: candidates.map(agentCashCandidate).filter((candidate): candidate is Record<string, unknown> => candidate !== undefined),
         limit: Math.min(25, limit * 2) }), CATALOG_DEADLINE_MS, "CrowdCode ranking");
-      const services = (ranking.data as { services?: unknown } | undefined)?.services;
+      const ranked = ranking.data as { services?: unknown; none_fit?: unknown; queries?: unknown } | undefined;
+      const services = ranked?.services;
+      // CrowdCode's model read the task and found nothing that does it: say so instead of offering near misses.
+      if (ranking.ok && ranked?.none_fit === true && Array.isArray(services) && !services.length)
+        return { ok: true, data: { services: [], none_fit: true, ...(Array.isArray(ranked.queries) ? { searched: ranked.queries } : {}), note: NONE_FIT_NOTE } };
       if (ranking.ok && Array.isArray(services)) {
         const ordered = services.filter((service: any) => typeof service?.endpoint === "string")
           .map((service: any) => ({ endpoint: service.endpoint, method: service.method ?? undefined, name: service.name, ranking: service }));
@@ -301,6 +312,8 @@ function ranked(ranking: any, schema: any): Record<string, unknown> {
     // Search over CrowdCode's index (C13): the tier and why, the model and capability, and whether the draw is exploring.
     ...(typeof ranking.tier === "string" ? { tier: ranking.tier } : {}),
     ...(typeof ranking.why === "string" ? { why: ranking.why } : {}),
+    // Why CrowdCode's model picked it for this task (w107 phase 1).
+    ...(typeof ranking.fit === "string" && ranking.fit ? { fit: ranking.fit } : {}),
     ...(ranking.explore === true ? { explore: true } : {}),
     ...(typeof ranking.model === "string" ? { model: ranking.model } : {}),
     ...(typeof ranking.capability === "string" ? { capability: ranking.capability } : {})
