@@ -1,9 +1,9 @@
 import type { EconomyGateway } from "@opencrowd/economy";
-import type { CompletionSignals, DynamicToolsOption } from "./index.js";
+import type { CompletionGateResult, CompletionSignals, DynamicToolsOption } from "./index.js";
 import { countShortfall } from "./service-strategy.js";
 
 export interface EconomyTools extends DynamicToolsOption {
-  completionGate(alreadyNudged?: boolean, run?: CompletionSignals): Promise<string | undefined>;
+  completionGate(alreadyNudged?: boolean, run?: CompletionSignals): Promise<CompletionGateResult>;
 }
 
 /** A run at least this long earned a reflection on what would have helped. */
@@ -55,6 +55,30 @@ export function reflectionTrigger(run: CompletionSignals | undefined): string | 
  * request_service.
  */
 const ROUTE_GAP = "First decide what was missing. If it was CrowdCode's own data or tools (an internal API or report, an action a CrowdCode tool lacks, a notice that left something out, a limit or a confusing error), call submit_harness_feedback once with what was missing and the change you would make, and do not file it with request_service. request_service is only for a paid external service that someone outside could build and sell to any agent.";
+/**
+ * An answer that says a capability is unavailable: no access, no browser, "I
+ * can't open / fill in / call / order". Paired with a run that never searched
+ * the directory, it is the refusal SRI-159 caught on production: a real owner
+ * asked why the agent couldn't use a browser, and it said it had no
+ * browser-control access without looking; Browser Use, Browserbase and
+ * StableBrowser were all listed. A false positive costs one search turn.
+ */
+const UNAVAILABLE = new RegExp([
+  String.raw`\b(?:I|we|this (?:chat )?agent|the agent)\b(?:['’]m| am| are| is)?\s+(?:[\w’'-]+\s+){0,3}?(?:do(?:es)?(?: not|n['’]?t) have|lacks?|has no|have no)\s+(?:[\w’'-]+\s+){0,3}?(?:access|tools?|abilit(?:y|ies)|capabilit(?:y|ies)|means|way|browser|integration)\b`,
+  String.raw`\b(?:I|we)\b(?:\s+[\w’'-]+){0,2}?\s+(?:can['’]?t|cannot|can not|am unable to|are unable to|am not able to|are not able to)\s+(?:[\w’'-]+\s+){0,2}?(?:browse|use (?:a |the )?(?:browser|website|computer)|open|click|fill|control|operate|access|log ?in|sign ?in|navigate|interact|call|phone|text|send|post|book|place|order|buy|purchase|pay|check ?out)\b`,
+  String.raw`\b(?:not|isn['’]?t|aren['’]?t) (?:available|supported|possible) (?:to me|for me|here|in this (?:chat|environment|run|conversation))\b`,
+  String.raw`\b(?:beyond|outside(?: of)?) (?:my|this agent['’]s) (?:capabilities|abilities|tools)\b`,
+  String.raw`\bno (?:browser|tool|way|means|ability|access) to\b`,
+].join("|"), "i");
+
+/** The answer says something can't be done for lack of a capability (SRI-159). */
+export function claimsUnavailable(finalMessage: string | undefined): boolean {
+  return !!finalMessage && UNAVAILABLE.test(finalMessage);
+}
+
+/** Asked, once, of a run that says a capability is unavailable without having searched for it. */
+export const CAPABILITY_CHECK_NUDGE = "Before you tell the owner this can't be done: your answer says a capability is unavailable, but this run has not searched CrowdCode's directory for it. Paid services cover much of what you lack, for example a remote browser that opens pages, clicks and fills in forms (browser automation, computer use), phone calls and SMS, email, posting and booking. Call find_paid_service (or browse_services) for the capability now. If a fitting service exists, offer it to the owner with its price and whether it is verified; an unverified one can still be used, and the spending guard asks the owner before paying. Say plainly only the limits that remain: you pay in USDC, not by card, so a browser service can fill in a retailer's checkout but you can't pay a normal retailer. Then call complete_session again.";
+
 export const REFLECTION_NUDGE = `Before this run ends, reflect once. ${ROUTE_GAP} For each worthwhile external service that would have fixed an observed failure, a poor result or excessive cost in this task, call request_service with input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If nothing qualifies, submit nothing. Then call complete_session again to finish.`;
 
 /**
@@ -81,6 +105,7 @@ export const SHORT_RUN_NUDGE = `This run is ending short of its task: it could n
 export function economyTools(economy: Pick<EconomyGateway, "definitions" | "execute">, options: { hidden?: ReadonlySet<string>; resuming?: boolean } = {}): EconomyTools {
   let reflected = false;
   const supportsReflection = economy.definitions().some(tool => tool.name === "request_service");
+  const supportsDiscovery = economy.definitions().some(tool => tool.name === "find_paid_service");
   return {
     definitions: economy.definitions().filter(tool => !options.hidden?.has(tool.name)),
     execute: async (name, args, operationId) => {
@@ -90,6 +115,8 @@ export function economyTools(economy: Pick<EconomyGateway, "definitions" | "exec
       return result;
     },
     completionGate: async (alreadyNudged = false, run?: CompletionSignals) => {
+      // Searching comes before saying no, and before any reflection (SRI-159).
+      if (!alreadyNudged && supportsDiscovery && run && !run.discoveryCalls && claimsUnavailable(run.finalMessage)) return { nudge: CAPABILITY_CHECK_NUDGE, revise: true };
       if (reflected || alreadyNudged || !supportsReflection) return undefined;
       const trigger = reflectionTrigger(run);
       if (!trigger) return undefined;

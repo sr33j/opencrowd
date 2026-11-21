@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.37 — 2026-11-21
+
+- **An agent searches before it says a capability is unavailable (SRI-159).** A real owner asked "why can't you use browser use and fill in that information for me?". The agent answered that it had no browser-control access without searching, then filed harness feedback for a missing browser tool. Browser Use, Browserbase, StableBrowser and MrScraper were all listed.
+  - The system prompt now says: never tell the owner something can't be done before searching for it with `find_paid_service` or `browse_services`. An unverified service is still offered with its price, and the spending guard asks the owner. Real limits are stated precisely: you pay in USDC, not by card, so a browser service can fill in a retailer's checkout but you can't pay a normal retailer.
+  - The completion gate backs this with `CAPABILITY_CHECK_NUDGE`. It fires when the answer says a capability is unavailable (`claimsUnavailable`) and the run made no directory search (`CompletionSignals.discoveryCalls`). It comes before any reflection and is asked once.
+  - The answer is not held, so the next answer replaces the refusal. A completion gate may now return `{ nudge, revise: true }` for that (`CompletionGateResult`); a plain string still holds the answer as before.
+  - `submit_harness_feedback` says a missing capability is not a harness problem until `find_paid_service` has found nothing.
+
 ## 0.16.36 — 2026-11-21
 
 - **Search results come back inspected, with their input fields (w107 phase 0, `design-docs/CODE_MODE.md` in CrowdCode).** Over Nov 7–21, owner runs made 3.2 searches and 2.2 inspects per paid call, and find → inspect → call took three model turns. `find_paid_service` already probed every result exactly as `inspect_paid_service` does. Each probed result now carries `inspected: true`, `input` (its fields: type, required, choices, a short description, about 480 characters at most) and `returns` (its answer's top-level shape) when the seller describes them. The probe is recorded as the endpoint's inspection, so `call_paid_service` takes it directly. The reputation floor is still checked when it pays. `inspect_paid_service` remains for URLs a search did not return and for exact quotes with `sample_body`.
