@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.35 — 2026-11-21
+
+- **A gap in CrowdCode's own tools goes to harness feedback, not to a service request (SRI-159).** A chief of staff asked "where did we receive overnight revenue from?" couldn't break the total down by service and said so. The short-run nudge then told it to call `request_service`, and it filed "a per-service revenue breakdown" as a marketplace request. It never called `submit_harness_feedback`, which it had. `SHORT_RUN_NUDGE` and `REFLECTION_NUDGE` now start by deciding what was missing. CrowdCode's own data or tools (an internal API or report, an action a tool lacks, a notice that left something out, a limit or a confusing error) go to `submit_harness_feedback`. `request_service` is only for a paid external service that someone outside could build and sell. `request_service`'s description and the system prompt say the same.
+
 ## 0.16.34 — 2026-11-20
 
 - **`purpose` leads with the whole task's need (SRI-135).** On production the first agent to state one wrote "a real 5-second opening cartoon clip…" for a 30-second cartoon, so the judge learned the clip came back a second short but not that the task needed six of them. The `call_paid_service` description and the system prompt now ask for the whole task's need first, then the call's part, with the numbers ("the task needs a 30 s cartoon; this call makes the 5 s opening clip").

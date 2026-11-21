@@ -46,7 +46,16 @@ export function reflectionTrigger(run: CompletionSignals | undefined): string | 
   return undefined;
 }
 
-export const REFLECTION_NUDGE = "Before this run ends, reflect once: what concrete paid service would have fixed an observed failure, a poor result or excessive cost in this task? For each worthwhile one, call request_service with input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If nothing qualifies, submit nothing. Then call complete_session again to finish.";
+/**
+ * What was missing decides where it goes (SRI-159): a gap in CrowdCode's own
+ * tools, data or notices is harness feedback; only a service an outside
+ * provider could build and sell is a service request. A chief of staff that
+ * could not break revenue down by service filed "a per-service revenue
+ * breakdown" as a marketplace request (#245) because this said only
+ * request_service.
+ */
+const ROUTE_GAP = "First decide what was missing. If it was CrowdCode's own data or tools (an internal API or report, an action a CrowdCode tool lacks, a notice that left something out, a limit or a confusing error), call submit_harness_feedback once with what was missing and the change you would make, and do not file it with request_service. request_service is only for a paid external service that someone outside could build and sell to any agent.";
+export const REFLECTION_NUDGE = `Before this run ends, reflect once. ${ROUTE_GAP} For each worthwhile external service that would have fixed an observed failure, a poor result or excessive cost in this task, call request_service with input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If nothing qualifies, submit nothing. Then call complete_session again to finish.`;
 
 /**
  * Asked instead when the run ends short of its task (SRI-122): one request for
@@ -56,7 +65,7 @@ export const REFLECTION_NUDGE = "Before this run ends, reflect once: what concre
  * comes after SRI-119's early-stop question, never instead of it, and like it
  * is asked once.
  */
-export const SHORT_RUN_NUDGE = "This run is ending short of its task: it could not finish, delivered a partial result or needed a costly workaround. Call request_service once, for the paid service that would have let you finish this task: input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If a paid call worked but fell short of the task (a cap, partial coverage, a workaround) and you have not reviewed that endpoint in this run, also call review_paid_service once for it, stating the limit against the task; CrowdCode already judges every other paid call you made. Skip the request only if the task did in fact finish without a workaround. Then call complete_session again to finish.";
+export const SHORT_RUN_NUDGE = `This run is ending short of its task: it could not finish, delivered a partial result or needed a costly workaround. ${ROUTE_GAP} If an external service would have let you finish, call request_service once for it: input, output, problem, builds_on (what it could be built from today: an official API, a licensed dataset, existing paid services, a human-ops team), frequency (one_off, per_task_like_this or recurring) and price_per_call (an estimate, not a budget). Describe a reusable service, never this task's answer restated. A prior purchase or spending permission is not required. If a paid call worked but fell short of the task (a cap, partial coverage, a workaround) and you have not reviewed that endpoint in this run, also call review_paid_service once for it, stating the limit against the task; CrowdCode already judges every other paid call you made. Skip both if the task did in fact finish without a workaround. Then call complete_session again to finish.`;
 
 /**
  * The paid tools, and the one thing they ask of a run before it completes:
