@@ -43,7 +43,10 @@ import {
 import { runPersistentAgentTask, runPersistentAgentTaskDetailed, warmStartEconomy } from "./agent-task.js";
 import { renderCommandHelp } from "./registry.js";
 import { walletNetworkRows, walletSummary } from "./wallet.js";
-import { startTui } from "./tui/app.js";
+// The interactive UI is the only thing that needs ink and React, which cost a
+// quarter of a second to load: only `opencrowd` at a terminal pays it, never a
+// hosted worker starting up (FAST_START.md).
+const startTui = async (...args: Parameters<typeof import("./tui/app.js").startTui>) => (await import("./tui/app.js")).startTui(...args);
 
 async function main(argv: string[]): Promise<void> {
   // Global: prefer this x402 settlement network for every command in this process.

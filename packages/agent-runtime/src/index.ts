@@ -104,7 +104,11 @@ export interface LlmResponse {
 }
 
 export interface LlmProvider {
-  complete(messages: LlmMessage[], context?: { signal?: AbortSignal; operationId?: string }): Promise<LlmResponse>;
+  complete(messages: LlmMessage[], context?: {
+    signal?: AbortSignal; operationId?: string;
+    /** The reply's text as it arrives, for a host that shows it live. Never set for a housekeeping turn. */
+    onTextDelta?: (delta: string) => void;
+  }): Promise<LlmResponse>;
 }
 
 export type ToolExecutor = (
@@ -716,6 +720,12 @@ export interface AgentRunOptions {
   llm?: TypedLlmRuntime;
   history?: LlmMessage[];
   onMessage?: (message: LlmMessage) => Promise<void> | void;
+  /**
+   * The reply's text as the model writes it, turn by turn, so a host can show
+   * it before the call is over (FAST_START.md). Not called for a housekeeping
+   * turn: what the model says after the answer is held is never shown.
+   */
+  onTurnTextDelta?: (delta: string, info: { turn: number }) => void;
   onProgress?: (event: ProgressEvent) => void;
   toolExecutor?: ToolExecutor;
   compactOutput?: boolean;
@@ -1156,6 +1166,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
           provider: provider instanceof MockLlmProvider ? { complete: (input) => completeMockLlmCall(session, provider, input, turn + 1) } : provider, tools: wireToolDefinitions(enabledTools, dynamicDefinitions), state: contextState,
           contextWindowTokens: limits.contextWindow, maxOutputTokens: limits.outputTokens, prices: options.prices,
           hosted: options.hosted, signal: options.signal, operationId: `${options.runId ?? session.sessionId}:llm:${turn}`,
+          ...(options.onTurnTextDelta && !finalAnswerHeld ? { onTextDelta: (delta: string) => options.onTurnTextDelta!(delta, { turn }) } : {}),
           checkpoint: () => checkpoint(turn),
           onCompaction: async (result) => {
             await atomicWrite(conversationPath(session), messages.filter(m => m.role !== "system")

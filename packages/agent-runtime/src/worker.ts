@@ -95,6 +95,9 @@ interface DurableRun {
   knowledge?: RunKnowledge;
   tools: Record<string, { digest: string; result?: ToolResult; approvalPending?: boolean }>;
 }
+/** How often streamed text is sent on: often enough to read as live, rarely enough to stay a handful of events. */
+const DELTA_FLUSH_MS = 300;
+
 export interface WorkerState {
   version: 1;
   seq: number;
@@ -293,6 +296,7 @@ export class MachineWorker {
   }
 
   private async execute(runId: string, run: DurableRun, signal: AbortSignal): Promise<void> {
+    let closeStreamOf: (() => Promise<{ id: string } | undefined>) | undefined;
     try {
       let session: SessionState;
       try { session = await loadSession(this.paths.workspace, run.sessionId); }
@@ -376,13 +380,43 @@ export class MachineWorker {
         return output;
       };
       const baseProvider = this.options.provider(run.start, session, [...dynamicTools?.definitions ?? [], ...declared]);
+      // The reply's text reaches the owner while the model is still writing it
+      // (FAST_START.md), a few words at a time, under the id the turn's
+      // assistant.message will carry so the conversation replaces the one with
+      // the other. A call that fails part-way closes its text with an empty
+      // message, which the conversation drops, so a retry starts clean.
+      let streamed: { id: string; turn: number; buffer: string; timer?: ReturnType<typeof setTimeout> } | undefined;
+      const flushDeltas = async () => {
+        const open = streamed;
+        if (!open?.buffer) return;
+        const delta = open.buffer;
+        open.buffer = "";
+        clearTimeout(open.timer); open.timer = undefined;
+        await this.emit("assistant.delta", { messageId: open.id, delta, turn: open.turn }, runId, run.commandId);
+      };
+      const onTurnTextDelta = (delta: string, { turn }: { turn: number }) => {
+        if (!delta) return;
+        streamed ??= { id: randomUUID(), turn, buffer: "" };
+        streamed.buffer += delta;
+        streamed.timer ??= setTimeout(() => void flushDeltas().catch(() => undefined), DELTA_FLUSH_MS);
+      };
+      const closeStream = async () => {
+        await flushDeltas();
+        const open = streamed;
+        streamed = undefined;
+        return open;
+      };
+      closeStreamOf = closeStream;
       const provider: LlmProvider = {
         complete: async (messages, context) => {
+          const abandoned = await closeStream();
+          if (abandoned) await this.emit("assistant.message", { messageId: abandoned.id, content: "" }, runId, run.commandId);
           const callId = randomUUID(), started = Date.now(), turn = run.checkpoint?.turn ?? 0;
           await this.emit("model.started", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn,
             details: captureDetail(this.inputs.record({ sessionId: session.sessionId, runId, callId }, messages)) }, runId, run.commandId);
           try {
             const result = await baseProvider.complete(messages, context);
+            await flushDeltas();
             await this.emit("model.finished", { callId, model: run.start.payload.modelPolicy.model ?? "demo", turn, status: "ok",
               durationMs: Date.now() - started, usage: result.usage,
               details: captureDetail({ output: result }) }, runId, run.commandId);
@@ -436,10 +470,14 @@ export class MachineWorker {
           // Bookkeeping after the answer is not part of the owner's reply
           // (SRI-66); model.finished keeps it for whoever is debugging.
           const content = message.role === "assistant" && !message.housekeeping ? stripReasoning(message.content) : "";
-          if (content.trim()) await this.emit("assistant.message", {
-            messageId: randomUUID(), content
+          const open = await closeStream();
+          // A streamed reply is always closed by its message, even an empty
+          // one (all reasoning, or a bare tool call), so no half-shown text stays.
+          if (content.trim() || open) await this.emit("assistant.message", {
+            messageId: open?.id ?? randomUUID(), content: content.trim() ? content : ""
           }, runId, run.commandId);
         },
+        onTurnTextDelta,
         toolExecutor: (name, args, context) => record(name, args, () =>
           // Harness feedback goes to CrowdCode, which attaches the run, model and image (SRI-113).
           hosted && (HOSTED_ONLY_TOOL_NAMES.includes(name) || name === "submit_harness_feedback") ? hosted(name, args, context) : local(name, args, context))
@@ -447,6 +485,10 @@ export class MachineWorker {
       await this.finish(runId, run, result.outcome === "stopped" ? "user_stopped" : result.outcome,
         String(result.summary.final_message ?? ""));
     } catch (error) {
+      // Text a failed, paused or cancelled call had already shown is closed, so
+      // the conversation does not keep a reply that was never finished.
+      const unfinished = await closeStreamOf?.().catch(() => undefined);
+      if (unfinished) await this.emit("assistant.message", { messageId: unfinished.id, content: "" }, runId, run.commandId).catch(() => undefined);
       if (!(error instanceof RuntimePause) && !signal.aborted) await this.emit("runtime.error", {
         code: "run_exception", message: scrubText(error instanceof Error ? error.message : String(error)), fatal: false,
         details: captureDetail({ error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) })
