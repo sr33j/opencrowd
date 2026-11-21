@@ -36,7 +36,12 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
     async complete(messages, context) {
       const operationId = context?.operationId;
       if (!operationId?.startsWith(`${options.runId}:llm:`)) throw new Error("Hosted model operation scope is missing");
-      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: (options.chatOnly ? chatOnlyMessages(messages) : messages).map(({ contextArchive: _archive, ...message }) => message), tools });
+      // `stream` asks the supervisor for the reply's text as it arrives, as
+      // NDJSON lines before the usual answer (FAST_START.md). An older
+      // supervisor ignores it and answers with one JSON body, read below as before.
+      const streaming = typeof context?.onTextDelta === "function";
+      const body = JSON.stringify({ runId: options.runId, sessionId: options.sessionId, operationId, messages: (options.chatOnly ? chatOnlyMessages(messages) : messages).map(({ contextArchive: _archive, ...message }) => message), tools,
+        ...(streaming ? { stream: true } : {}) });
       // Too big for the seller is a conversation to compact, not a run to end:
       // the shared loop trims and asks again rather than failing here.
       if (Buffer.byteLength(body) > MODEL_SELLER_REQUEST_MAX_BYTES)
@@ -45,14 +50,43 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
         const req = request({ socketPath: options.socketPath, path: "/model", method: "POST", signal: context?.signal,
           headers: { "content-type": "application/json", "content-length": Buffer.byteLength(body) } }, res => {
           const chunks: Buffer[] = []; let bytes = 0;
+          const lines = streaming && res.statusCode === 200 && String(res.headers["content-type"] ?? "").startsWith("application/x-ndjson");
+          let pending = "", final: unknown;
+          // One line is one event: `{"type":"delta","text":…}` while the model
+          // writes, then `{"type":"final",…}` carrying exactly the body a
+          // non-streaming answer would have had.
+          const line = (raw: string) => {
+            if (!raw.trim()) return;
+            const event = JSON.parse(raw);
+            if (event?.type === "delta" && typeof event.text === "string") { try { context!.onTextDelta!(event.text); } catch { /* a viewer's fault never ends a paid call */ } }
+            else if (event?.type === "final") { const { type: _type, ...rest } = event; final = rest; }
+          };
           res.on("data", (chunk: Buffer) => {
             bytes += chunk.length;
-            if (bytes > 1024 * 1024) res.destroy(new Error("Hosted response exceeds 1 MiB"));
-            else chunks.push(chunk);
+            // The deltas repeat the reply's text once more before the final body.
+            if (bytes > (lines ? 2 : 1) * 1024 * 1024) { res.destroy(new Error("Hosted response exceeds 1 MiB")); return; }
+            if (!lines) { chunks.push(chunk); return; }
+            pending += chunk.toString("utf8");
+            let at: number;
+            while ((at = pending.indexOf("\n")) >= 0) {
+              const raw = pending.slice(0, at); pending = pending.slice(at + 1);
+              try { line(raw); } catch (error) { res.destroy(error as Error); return; }
+            }
           });
           res.on("error", reject);
           res.on("end", () => {
             try {
+              if (lines) {
+                line(pending);
+                if (final === undefined) throw new Error("Hosted stream ended without an answer");
+                // An answer that came after the text had started streaming
+                // carries the status it would have had as a plain response.
+                const { httpStatus, ...answer } = final as { httpStatus?: number } & Record<string, unknown>;
+                if (httpStatus !== undefined && httpStatus !== 200)
+                  throw rejectedRequest(httpStatus, JSON.stringify(answer)) ?? new Error("Hosted bridge request failed");
+                resolve(answer);
+                return;
+              }
               const text = Buffer.concat(chunks).toString("utf8");
               if (res.statusCode !== 200) throw rejectedRequest(res.statusCode ?? 0, text) ?? new Error("Hosted bridge request failed");
               resolve(JSON.parse(text));

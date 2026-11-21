@@ -74,6 +74,7 @@ export async function completeWithContext(session: SessionState, messages: LlmMe
   contextWindowTokens?: number; maxOutputTokens?: number; hosted?: boolean;
   prices?: ModelPrices;
   operationId?: string; signal?: AbortSignal;
+  onTextDelta?: (delta: string) => void;
   checkpoint?: () => Promise<void>;
   onCompaction?: (result: CompactionResult & { archivePath: string }) => Promise<void>;
 }): Promise<LlmResponse> {
@@ -89,7 +90,8 @@ export async function completeWithContext(session: SessionState, messages: LlmMe
       const retry = options.state.retry ?? 0;
       const request = requestMessages(messages, options.state);
       const response = await options.provider.complete(request, { signal: options.signal,
-        operationId: options.operationId && `${options.operationId}${retry ? `:context:${retry}` : ""}` });
+        operationId: options.operationId && `${options.operationId}${retry ? `:context:${retry}` : ""}`,
+        ...(options.onTextDelta ? { onTextDelta: options.onTextDelta } : {}) });
       const used = response.usage?.inputTokens;
       if (used && Number.isFinite(used) && used > 0) {
         options.state.scale = Math.max(options.state.scale ?? 1, used / estimateModelInput(request, options.tools) * 1.1);

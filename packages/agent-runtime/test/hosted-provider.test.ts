@@ -98,3 +98,58 @@ it('waits thirteen minutes only on calls that can already have moved money', () 
   expect(HOSTED_CONTROL_TOOL_TIMEOUT_MS).toBeGreaterThan(170_000); // Control's own cap on a deploy.
   expect(HOSTED_CONTROL_TOOL_TIMEOUT_MS).toBeLessThan(SERVICE_BRIDGE_TIMEOUT_MS);
 });
+
+it('streams the reply text from an NDJSON bridge and returns the final answer (FAST_START)', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'oc-stream-')), socketPath = join(home, 'bridge.sock');
+  let asked: Record<string, unknown> = {};
+  const server = createServer(async (req, res) => {
+    const chunks: Buffer[] = []; for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    asked = JSON.parse(Buffer.concat(chunks).toString());
+    res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+    // Split mid-line, as a socket does.
+    res.write('{"type":"delta","text":"Bitcoin "}\n{"type":"del');
+    res.write('ta","text":"is $97,000."}\n');
+    res.end(JSON.stringify({ type: 'final', httpStatus: 200, status: 'complete', response: { content: 'Bitcoin is $97,000.', toolCalls: [] } }) + '\n');
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    const seen: string[] = [];
+    const response = await createHostedProvider({ socketPath, runId: 'run-1', sessionId: 'session-1' })
+      .complete([{ role: 'user', content: 'price?' }], { operationId: 'run-1:llm:0', onTextDelta: text => seen.push(text) });
+    expect(asked.stream).toBe(true);
+    expect(seen).toEqual(['Bitcoin ', 'is $97,000.']);
+    expect(response.content).toBe('Bitcoin is $97,000.');
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(home, { recursive: true, force: true }); }
+});
+
+it('reads a refusal that arrives after the text started streaming as the refusal it is', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'oc-stream-')), socketPath = join(home, 'bridge.sock');
+  const server = createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+    res.write('{"type":"delta","text":"Bit"}\n');
+    res.end(JSON.stringify({ type: 'final', httpStatus: 502, error: 'model_failed', paid: true, message: 'The paid model returned an error; its receipt is saved' }) + '\n');
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    await expect(createHostedProvider({ socketPath, runId: 'run-1', sessionId: 'session-1' })
+      .complete([{ role: 'user', content: 'price?' }], { operationId: 'run-1:llm:0', onTextDelta: () => undefined }))
+      .rejects.toMatchObject({ name: 'HostedRequestError', code: 'model_failed' });
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(home, { recursive: true, force: true }); }
+});
+
+it('takes a plain JSON answer from a bridge that does not stream', async () => {
+  const home = await mkdtemp(join(tmpdir(), 'oc-stream-')), socketPath = join(home, 'bridge.sock');
+  const server = createServer(async (req, res) => {
+    for await (const _chunk of req) { /* drain */ }
+    res.end(JSON.stringify({ status: 'complete', response: { content: 'hi', toolCalls: [] } }));
+  });
+  await new Promise<void>(resolve => server.listen(socketPath, resolve));
+  try {
+    const seen: string[] = [];
+    const response = await createHostedProvider({ socketPath, runId: 'run-1', sessionId: 'session-1' })
+      .complete([{ role: 'user', content: 'hi' }], { operationId: 'run-1:llm:0', onTextDelta: text => seen.push(text) });
+    expect(response.content).toBe('hi');
+    expect(seen).toEqual([]);
+  } finally { server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await rm(home, { recursive: true, force: true }); }
+});
