@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.39 — 2026-11-21
+
+- **A hosted reply streams while the model writes it (FAST_START phase 1D, `design-docs/FAST_START.md` in CrowdCode).** The worker asks its bridge for the reply's text as it arrives (`stream: true`). The text goes out as `assistant.delta` events every 300 ms, under the id the turn's `assistant.message` then carries with the whole text, so a conversation can replace one with the other. Housekeeping turns never stream. A call that fails, pauses or is cancelled part-way closes its text with an empty message. The hosted provider reads the bridge's NDJSON (`delta` lines, then a `final` line with the body and status a plain answer has), and a bridge that does not stream still answers with one JSON body.
+- **The CLI starts in about 210 ms instead of 735 ms (FAST_START phase 2).** A single-file ESM bundle imports every external package at its top, so every process (each hosted worker's boot included) loaded ink and React for an interactive UI it never showed, the MCP SDK, and venice-x402-client's wallet SDKs. The bundle is now split, with chunks beside `bundle/opencrowd.js` so assets resolve as before. The interactive UI loads when it opens, the MCP SDK when a server is connected, and the Venice client when `venice-direct` is used. A `VeniceError` is recognised by name.
+
 ## 0.16.38 — 2026-11-21
 
 - **`find_paid_service` takes a `task` (w107 phase 1, `find_relevant_services`).** The agent passes the owner's need in a sentence, or the request itself. CrowdCode's cheap model turns it into capability searches and pools about 40 candidates from the index. It returns only the endpoints that fit, each with `fit` (why), or `none_fit` when nothing does. The `none_fit` note says not to guess at endpoints and to record the need with `request_service`.
