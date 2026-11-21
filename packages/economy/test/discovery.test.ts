@@ -119,3 +119,19 @@ it("gives up on a catalog that stops answering and still returns the other one's
     expect(((result.data as any).services)).toHaveLength(1);
   } finally { vi.useRealTimers(); }
 });
+
+it("passes a task to CrowdCode, keeps why each pick fits, and says none fits instead of offering near misses (w107 phase 1)", async () => {
+  check.mockImplementation(async () => ({ found: true, advisories: [{ method: "POST", authMode: "paid", paymentOptions: [{ protocol: "x402", network: "eip155:8453", asset: BASE_USDC, amount: "250000", payTo: "0xbase" }] }] }));
+  const task = "a 5 second video of ocean waves at sunset";
+  const rank = vi.fn(async () => ({ ok: true, data: { reranked: true, queries: ["text to video generation"], services: [
+    { rank: 1, endpoint: "https://video.example/gen", method: "POST", tier: "popular", fit: "generates video from a text prompt", best: { network: "base" } }] } }));
+  const discovery = new BaseServiceDiscovery(async () => ({ ok: true, data: { results: [] } }));
+  const found = await discovery.search(task, { rank, task });
+  expect(rank).toHaveBeenCalledWith(expect.objectContaining({ query: task, task }));
+  expect(found.data).toMatchObject({ services: [{ endpoint: "https://video.example/gen", fit: "generates video from a text prompt" }] });
+
+  const none = vi.fn(async () => ({ ok: true, data: { reranked: true, none_fit: true, queries: ["pangram ai detection"], services: [] } }));
+  const nothing = await discovery.search("run the Pangram detector on my essay", { rank: none, task: "run the Pangram detector on my essay" });
+  expect(nothing.data).toMatchObject({ services: [], none_fit: true, searched: ["pangram ai detection"] });
+  expect((nothing.data as { note: string }).note).toMatch(/request_service/);
+});

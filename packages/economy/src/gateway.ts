@@ -258,7 +258,9 @@ export class EconomyGateway {
 
   private async findPaidService(args: Record<string, unknown>): Promise<ToolResult> {
     const origin = stringArg(args.origin);
-    const query = stringArg(args.query);
+    const task = stringArg(args.task)?.replace(/\s+/g, " ").slice(0, TASK_MAX_CHARS);
+    // A task alone still needs a query for AgentCash's catalog (and for a CrowdCode that predates tasks).
+    const query = stringArg(args.query) ?? (task ? task.slice(0, 200) : undefined);
     if (origin) {
       const result = await this.options.agentcash.discoverEndpoints(origin);
       return result.ok ? { ok: true, data: result.data } : { ok: false, error: result.error };
@@ -268,13 +270,13 @@ export class EconomyGateway {
       const findServices = this.options.crowdcode.findServices?.bind(this.options.crowdcode);
       const rank = findServices && await this.crowdcodeEnabled().catch(() => false) ? findServices : undefined;
       // Six ranked results carry their reliability within about 800 tokens; the agent can ask for more.
-      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit) ?? (rank && this.options.crowdcodeApi ? SEARCH_LIMIT : undefined), ...(rank ? { rank } : {}) });
+      const result = await this.options.agentcash.search(query, { limit: intArg(args.limit) ?? (rank && this.options.crowdcodeApi ? SEARCH_LIMIT : undefined), ...(rank ? { rank } : {}), ...(task && rank ? { task } : {}) });
       if (!result.ok) return { ok: false, error: result.error };
       // Read the probes before compaction copies the rows (a spread drops them).
       const probes = probesOf(result.data);
       return { ok: true, data: await this.adoptProbed(rank ? await this.withReliability(result.data) : result.data, probes) };
     }
-    return { ok: false, error: "find_paid_service requires `origin` (known origin) or `query` (capability search)" };
+    return { ok: false, error: "find_paid_service requires `task` (the need in a sentence), `query` (capability search) or `origin` (known origin)" };
   }
 
   /**
@@ -1092,6 +1094,8 @@ function numberArg(value: unknown): number | undefined {
 
 /** Ranked results shown by default; each carries its reliability. */
 const SEARCH_LIMIT = 6;
+/** A task is a sentence or a pasted request, not a document. */
+const TASK_MAX_CHARS = 1500;
 /** Said once per search rather than on every result. */
 const RELIABILITY_NOTE = "Reliable first: it pays automatically within the owner's caps. Unverified may need the owner's approval; say so when you pick one. Unreliable is refused, so it is left out.";
 /** Said once per search over CrowdCode's index (C10, C12, C13). */
@@ -1251,11 +1255,12 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   },
   {
     name: "find_paid_service",
-    description: "Discover paid capability across Base, Solana and Tempo. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, best first, each with its CrowdCode tier (proven, popular, new) and why, or its reliability state, ranked by delivery and quality per dollar on your best network (including a transfer between your own networks when its balance is short). Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
+    description: "Discover paid capability across Base, Solana and Tempo. Best: `task`, the owner's need in a sentence (or the request itself); CrowdCode's model turns it into capability searches and returns only the endpoints that fit, each with `fit` (why), or `none_fit` when nothing does. `query` searches every catalog (AgentCash, Coinbase's x402 catalog, MPP) and returns services you can pay, best first, each with its CrowdCode tier (proven, popular, new) and why, or its reliability state, ranked by delivery and quality per dollar on your best network (including a transfer between your own networks when its balance is short). Every result lists `networks`, the networks it can be paid on: when a call fails for funds, come back here and prefer an equivalent service on a network you already hold USDC on over moving funds. `origin` lists a known origin's endpoints.",
     parameters: {
       type: "object",
       properties: {
         origin: { type: "string", description: "Known API origin, e.g. https://stableenrich.dev" },
+        task: { type: "string", description: "What the owner needs, in a sentence or the request itself, e.g. \"a 5 second video of ocean waves at sunset\" or \"call the bakery and ask if they have gluten-free bread\". Leave out names, contact details and secrets." },
         query: { type: "string", description: "The capability in a few words, for example \"web search\", \"object storage\" or \"solana token risk\"; not the task's subject" },
         limit: { type: "integer", minimum: 1, description: "Maximum search results" }
       },
