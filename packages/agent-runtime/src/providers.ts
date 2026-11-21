@@ -3,6 +3,8 @@
 type VeniceModule = typeof import("venice-x402-client");
 let venice: VeniceModule | undefined;
 const loadVenice = async () => (venice ??= await import("venice-x402-client"));
+const isVeniceError = (error: unknown): error is import("venice-x402-client").VeniceError =>
+  error instanceof Error && error.name === "VeniceError" && typeof (error as { code?: unknown }).code === "string";
 import { requireAgentCashWallet } from "@opencrowd/core";
 
 /**
@@ -237,8 +239,9 @@ export class VeniceProvider implements TypedLlmProvider {
 }
 
 function veniceRemediationError(error: unknown): Error {
-  // Only a loaded client can have thrown one.
-  if (venice && error instanceof venice.VeniceError) {
+  // Recognised by name: the module is loaded lazily, and a client a test (or
+  // another copy of the package) supplies throws its own class.
+  if (isVeniceError(error)) {
     if (error.code === "INSUFFICIENT_BALANCE") {
       const details = (error.details ?? {}) as Record<string, unknown>;
       const minimum = typeof details.minimumTopUpUsd === "number" ? details.minimumTopUpUsd : undefined;
