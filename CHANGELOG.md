@@ -6,6 +6,7 @@
   - Every poll is an ordinary guarded call with its own operation id, so none replays an earlier pending answer and a resumed run replays the same polls. Polls before completion are not charged, as before.
   - A submit is never waited on. Its `collect.note` now says to submit every job first and collect them all in one turn.
   - `wait: false` makes a single poll.
+- **A deployed service can buy from other paid services per request (w107 phase 3).** `deploy_service` takes `upstream_payments` (x402 USDC on Base, or MPP on Tempo). Its description gives the handshake: return 402 with the upstream's `PAYMENT-REQUIRED` (or `WWW-Authenticate`), and CrowdCode pays within the owner's approval and the buyer's authorization, then runs `fetch` again with `env.CROWDCODE.upstream_credential`. CrowdCode's control plane needs the matching release.
 
 ## 0.16.39 — 2026-11-21
 
