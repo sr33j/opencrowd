@@ -29,6 +29,8 @@ export interface ServiceOffer {
   /** The rail that would settle this offer; `unsupported` for unknown chains, tokens or schemes. */
   rail: PaymentRail;
   price_usd?: number;
+  /** x402's `exact` charges price_usd; `upto` charges by use, up to it (SRI-163). */
+  scheme?: string;
   pay_to?: string;
   /**
    * A zero-amount MPP charge: the seller asks only which wallet is calling.
@@ -101,6 +103,7 @@ export function classifyOffer(option: Record<string, any>): ServiceOffer {
   else if (protocol === "mpp" && name === "tempo" && asset.toLowerCase() === TEMPO_USDC
     && (option.paymentMethod === undefined || option.paymentMethod === "tempo") && (option.intent === undefined || option.intent === "charge")) rail = "mppx";
   return { network, ...(name ? { network_name: name } : {}), protocol, rail, ...(price_usd !== undefined ? { price_usd } : {}),
+    ...(typeof scheme === "string" && scheme ? { scheme } : {}),
     ...(typeof option?.payTo === "string" ? { pay_to: option.payTo } : {}),
     ...(protocol === "mpp" && rail === "mppx" && price_usd === 0 ? { free: true as const } : {}) };
 }
@@ -133,4 +136,19 @@ export function selectOffer(offers: ServiceOffer[], selection: OfferSelection): 
 
 export function payableNetworks(offers: ServiceOffer[], rails: readonly PaymentRail[]): OfferNetwork[] {
   return [...new Set(offers.filter((offer) => offer.rail !== "unsupported" && rails.includes(offer.rail)).map((offer) => offer.network_name!))];
+}
+
+/**
+ * What an owner should be told a service costs (SRI-163): the cheapest offer
+ * this payer can use, and the most any payable offer can charge when that is
+ * more. Browser Use offers $1 and $5 exact and up to $100 by use; an agent
+ * that read only the ceiling told an owner it costs "$100 per session".
+ * The ceiling stays what the gateway may pay; this is only what is said.
+ */
+export function quotedPrices(offers: readonly { price_usd?: number; payable?: boolean; free?: true }[]): { from_usd?: number; max_usd?: number } {
+  const prices = offers.filter((offer) => offer.payable !== false && typeof offer.price_usd === "number" && Number.isFinite(offer.price_usd))
+    .map((offer) => offer.price_usd!);
+  if (!prices.length) return {};
+  const from = Math.min(...prices), max = Math.max(...prices);
+  return { from_usd: from, ...(max > from ? { max_usd: max } : {}) };
 }

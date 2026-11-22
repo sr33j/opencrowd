@@ -4,10 +4,7 @@ import { deadline, DeadlineExceeded, withDeadline } from "@opencrowd/protocol";
 import type { PaymentRail } from "./agentcash.js";
 import type { ServiceSearch } from "./crowdcode.js";
 import type { McpCallResult } from "./mcp.js";
-import {
-  BASE_NETWORK, classifyOffer, describeRails, localRails, NETWORK_CAIP2, networkLabel, payableNetworks, RAIL_NETWORK, selectOffer,
-  type OfferNetwork, type ServiceOffer
-} from "./offers.js";
+import { BASE_NETWORK, classifyOffer, describeRails, localRails, NETWORK_CAIP2, networkLabel, payableNetworks, RAIL_NETWORK, selectOffer, type OfferNetwork, type ServiceOffer, quotedPrices } from "./offers.js";
 
 /**
  * One unauthenticated probe of a stranger's endpoint. The abort signal below
@@ -98,8 +95,11 @@ export class BaseServiceDiscovery {
       // The payee of the selected offer: receipts on some rails (x402 Solana) omit it, and reviews need it.
       ...(offer?.pay_to ? { pay_to: offer.pay_to } : {}),
       price_usd: offer ? ceiling ?? 0 : read ? 0 : undefined,
+      // price_usd is the most the gateway may pay; tell the owner the cheapest offer (SRI-163).
+      ...(offer && payable.length > 1 && quotedPrices(payable).max_usd !== undefined ? { price_from_usd: quotedPrices(payable).from_usd } : {}),
       ...(offers.length ? { offers: offers.map((candidate) => ({ network: candidate.network_name ?? candidate.network, protocol: candidate.protocol,
-        price_usd: candidate.price_usd, payable: payable.includes(candidate), ...(candidate.free ? { free: true } : {}) })) } : {}),
+        price_usd: candidate.price_usd, ...(candidate.scheme ? { scheme: candidate.scheme } : {}), payable: payable.includes(candidate),
+        ...(candidate.free ? { free: true } : {}) })) } : {}),
       ...(offer?.free ? { free: true } : {}),
       input_schema: advisory.inputSchema, output_schema: advisory.outputSchema, description: advisory.summary,
       note: read ? "Read with read_service; wallet authentication is automatic. Never resubmit a pending generation job." : this.note(offers, offer) };

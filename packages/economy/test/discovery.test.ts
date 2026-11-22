@@ -135,3 +135,21 @@ it("passes a task to CrowdCode, keeps why each pick fits, and says none fits ins
   expect(nothing.data).toMatchObject({ services: [], none_fit: true, searched: ["pangram ai detection"] });
   expect((nothing.data as { note: string }).note).toMatch(/request_service/);
 });
+
+it("tells the owner the cheapest offer, and the most a by-use offer can charge, while the gateway's ceiling stays the highest (SRI-163)", async () => {
+  // Browser Use's live 402: $1 and $5 exact, and `upto` $100. An agent read only price_usd ($100, the ceiling) and told an owner "$100 per session".
+  check.mockImplementation(async () => ({ found: true, advisories: [{ method: "POST", authMode: "paid", paymentOptions: [
+    { protocol: "x402", scheme: "exact", network: "eip155:8453", asset: BASE_USDC, amount: "1000000", payTo: "0xbu" },
+    { protocol: "x402", scheme: "exact", network: "eip155:8453", asset: BASE_USDC, amount: "5000000", payTo: "0xbu" },
+    { protocol: "x402", scheme: "upto", network: "eip155:8453", asset: BASE_USDC, amount: "100000000", payTo: "0xbu" }] }] }));
+  const discovery = new BaseServiceDiscovery(async () => ({ ok: true, data: { results: [] } }), { negotiated: true });
+  const inspected = await discovery.inspect({ url: "https://x402.api.browser-use.com/api/v3/sessions", method: "POST" });
+  expect(inspected.data).toMatchObject({ price_usd: 100, price_from_usd: 1 });
+  expect((inspected.data as any).offers.map((o: any) => o.scheme)).toEqual(["exact", "exact", "upto"]);
+  // One offer: no second figure.
+  check.mockImplementation(async () => ({ found: true, advisories: [{ method: "POST", authMode: "paid", paymentOptions: [
+    { protocol: "x402", scheme: "exact", network: "eip155:8453", asset: BASE_USDC, amount: "100000", payTo: "0xsb" }] }] }));
+  const single = await discovery.inspect({ url: "https://www.stablebrowser.dev/api/sessions", method: "POST" });
+  expect(single.data).toMatchObject({ price_usd: 0.1 });
+  expect((single.data as any).price_from_usd).toBeUndefined();
+});
