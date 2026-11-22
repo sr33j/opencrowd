@@ -353,8 +353,24 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     // unpaid: `expected_payment_required` means it answered without a price,
     // `upstream_refused` means it answered with a reason. Either way the
     // useful thing for the model is the endpoint's own body, so fetch it.
+    // The seller moved its endpoint (SRI-162). Within the same site (the apex
+    // and its www) the purchase is made again where the seller sells, once,
+    // and the result says so; anywhere else is the model's choice to make.
+    if (reply.code === "seller_redirect") {
+      const location = stringValue(objectValue(reply.data)?.location);
+      if (location && !request.redirected && sameSite(request.url, location))
+        return this.withNote(await this.fetch({ ...request, url: location, redirected: true,
+          ...(request.operationId ? { operationId: `${request.operationId}:redirect` } : {}) }),
+          `Bought at ${location}: the seller redirects ${request.url} there. Use ${location} for this service from now on.`);
+      return refuse(`${reply.error ?? `the seller redirects this endpoint${location ? ` to ${location}` : ""}`} (seller_redirect)`);
+    }
     if (reply.code === "expected_payment_required" || reply.code === "upstream_refused") {
-      return this.fetchUnpaid(request.url, method, body, request.headers);
+      const unpaid = await this.fetchUnpaid(request.url, method, body, request.headers);
+      // A direct request asks for payment the gateway could not get a price
+      // for: say what the gateway saw, never a bare "HTTP 402" (SRI-162).
+      if (unpaid.status === 402)
+        return { ...unpaid, error: `the service asks for payment (HTTP 402) when called directly, but CrowdCode could not get a payable price from it: ${reply.error ?? reply.code}. Nothing was paid.` };
+      return unpaid;
     }
     if (reply.code === "funding_required") {
       return refuse(`${reply.error ?? "not enough USDC on this service's networks"} (funding_required)${await this.fundingHint(request)}`);
@@ -410,6 +426,10 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
   }
 
   /** The supervisor found no 402: the endpoint is free, so the worker fetches it itself. */
+  private withNote(result: PaidFetchResult, note: string): PaidFetchResult {
+    return { ...result, note: result.note ? `${note} ${result.note}` : note };
+  }
+
   private async fetchUnpaid(url: string, method: string, body: string | undefined, headers?: Record<string, string>): Promise<PaidFetchResult> {
     try {
       const response = await withDeadline(() => this.fetcher(url, {
@@ -888,4 +908,13 @@ function numberValue(value: unknown): number | undefined {
     return Number(value);
   }
   return undefined;
+}
+
+/** The same site: the same host once a leading `www.` is set aside, over https. */
+export function sameSite(from: string, to: string): boolean {
+  try {
+    const a = new URL(from), b = new URL(to);
+    const bare = (host: string) => host.toLowerCase().replace(/^www\./, "");
+    return b.protocol === "https:" && bare(a.hostname) === bare(b.hostname);
+  } catch { return false; }
 }
