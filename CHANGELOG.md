@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.16.42 — 2026-11-22
+
+- **An owner's declined spend is not a runtime error (SRI-139).** When the owner declined a spending approval, the hosted worker ended the run `user_stopped`, which is correct, but it emitted a `runtime.error` (`run_exception`, "SpendingDeclined") first. The owner's own decision then showed in CrowdCode's error list and opened an incident. A `SpendingDeclined` now ends the run the same way with no error event, as a `RuntimePause` already did.
+
 ## 0.16.41 — 2026-11-22
 
 - **A hosted agent can drive a browser session it bought (SRI-163).** StableBrowser sells a session for $0.10, the cheapest browser in the directory. It then navigates, acts, extracts and closes it only for the wallet that bought it, with free SIWX-signed POSTs. Hosted agents could sign only GETs, so a paid session could be neither driven nor closed. `read_service` now takes `method` (GET or POST) and a JSON `body`. CrowdCode's gateway signs the POST only when two things hold. This run has a settled purchase from that exact host. The service's 402 asks for a sign-in, not money. The signature is bound to that host and URL, and nothing on this path ever pays. A GET with a body, or any other method, is refused before anything is sent. The tool's description walks through StableBrowser's create → navigate/act/extract → close flow.

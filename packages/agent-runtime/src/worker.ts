@@ -489,7 +489,10 @@ export class MachineWorker {
       // the conversation does not keep a reply that was never finished.
       const unfinished = await closeStreamOf?.().catch(() => undefined);
       if (unfinished) await this.emit("assistant.message", { messageId: unfinished.id, content: "" }, runId, run.commandId).catch(() => undefined);
-      if (!(error instanceof RuntimePause) && !signal.aborted) await this.emit("runtime.error", {
+      // The owner declining a spend is their decision, recorded as the run
+      // ending `user_stopped` below, not a runtime error: as one it showed in
+      // CrowdCode's error list and opened an incident (SRI-139).
+      if (!(error instanceof RuntimePause) && !(error instanceof SpendingDeclined) && !signal.aborted) await this.emit("runtime.error", {
         code: "run_exception", message: scrubText(error instanceof Error ? error.message : String(error)), fatal: false,
         details: captureDetail({ error: error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : String(error) })
       }, runId, run.commandId);
