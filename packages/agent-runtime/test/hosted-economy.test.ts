@@ -681,6 +681,24 @@ describe("hosted economy: payment over the bridge", () => {
     expect((legacy as any).wallet.networks).toBeUndefined();
   });
 
+  it("drives a paid StableBrowser session with signed POSTs through read_service, and refuses a body on a GET (SRI-163)", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath, requests } = await bridge(() => ({ ok: true, data: { status: 200, body: JSON.stringify({ success: true, title: "httpbin.org" }), content_type: "application/json" } }));
+    const { gateway } = await economy(fetcher, socketPath);
+    const navigate = await gateway.execute("read_service", { url: "https://www.stablebrowser.dev/api/sessions/navigate", method: "post",
+      body: { sessionId: "s-1", url: "https://httpbin.org/forms/post" } });
+    expect(navigate).toMatchObject({ ok: true, data: { success: true } });
+    expect(requests.at(-1)).toMatchObject({ name: "economy.read", arguments: { url: "https://www.stablebrowser.dev/api/sessions/navigate", method: "POST",
+      body: JSON.stringify({ sessionId: "s-1", url: "https://httpbin.org/forms/post" }) } });
+    // A read stays a GET, with no body.
+    await gateway.execute("read_service", { url: "https://example.com/job/1" });
+    expect(requests.at(-1)?.arguments).toEqual({ url: "https://example.com/job/1", method: "GET" });
+    const sent = requests.length;
+    expect(await gateway.execute("read_service", { url: "https://example.com/job/1", body: { a: 1 } })).toMatchObject({ ok: false, error: expect.stringMatching(/only with method POST/) });
+    expect(await gateway.execute("read_service", { url: "https://example.com/job/1", method: "DELETE" })).toMatchObject({ ok: false, error: expect.stringMatching(/GET or POST/) });
+    expect(requests).toHaveLength(sent);
+  });
+
   it("reads the wallet through economy.balance", async () => {
     const { fetcher } = fakeFetch();
     const { socketPath } = await bridge(() => ({ ok: true, data: { address: "0xagent", network: "eip155:8453", balance_atomic: "2500000", balance_usd: 2.5 } }));

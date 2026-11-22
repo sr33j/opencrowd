@@ -87,7 +87,8 @@ export interface WalletStatusResult {
 }
 
 export interface AgentCashAdapter {
-  read?(url: string): Promise<McpCallResult>;
+  /** An unpaid call, wallet-authenticated when the service asks; POST only for what the run has paid (SRI-163). */
+  read?(url: string, request?: { method?: "GET" | "POST"; body?: string }): Promise<McpCallResult>;
   /** Public balances, deposit addresses, and funding links. */
   getBalance(): Promise<WalletStatusResult>;
   /** List endpoints at a known origin. */
@@ -149,10 +150,11 @@ export class McpAgentCashAdapter implements AgentCashAdapter {
       { paymentNetwork: options.paymentNetwork, balances: () => this.networkBalances() });
     this.monad = options.monad ?? new MonadX402Payer();
   }
-  read(url: string): Promise<McpCallResult> {
+  read(url: string, request: { method?: "GET" | "POST"; body?: string } = {}): Promise<McpCallResult> {
     // AgentCash requires a positive ceiling. Below one atomic USDC unit,
     // no positive Base USDC payment can be authorized.
-    return this.connection.call("fetch", { url, method: "GET", maxAmount: 0.000000001, paymentNetwork: "base", paymentProtocol: "x402" });
+    return this.connection.call("fetch", { url, method: request.method ?? "GET", ...(request.body !== undefined ? { body: request.body } : {}),
+      maxAmount: 0.000000001, paymentNetwork: "base", paymentProtocol: "x402" });
   }
 
   async getBalance(): Promise<WalletStatusResult> {

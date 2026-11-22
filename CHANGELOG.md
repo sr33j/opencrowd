@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.16.41 — 2026-11-22
+
+- **A hosted agent can drive a browser session it bought (SRI-163).** StableBrowser sells a session for $0.10, the cheapest browser in the directory. It then navigates, acts, extracts and closes it only for the wallet that bought it, with free SIWX-signed POSTs. Hosted agents could sign only GETs, so a paid session could be neither driven nor closed. `read_service` now takes `method` (GET or POST) and a JSON `body`. CrowdCode's gateway signs the POST only when two things hold. This run has a settled purchase from that exact host. The service's 402 asks for a sign-in, not money. The signature is bound to that host and URL, and nothing on this path ever pays. A GET with a body, or any other method, is refused before anything is sent. The tool's description walks through StableBrowser's create → navigate/act/extract → close flow.
+- **An offered service is named, with the price its result gives (SRI-163).** An agent told an owner about "an unverified browser-automation service for $0.001 per call" and named neither the service nor where the price came from. The system prompt and the capability-check nudge now say: name the service and its host, quote the price exactly as `find_paid_service` or `inspect_paid_service` gave it, and never a price it did not read.
+
 ## 0.16.40 — 2026-11-21
 
 - **A job's collect step waits for the job (w107 phase 2).** On 2026-11-20 an org's chief of staff (Opus) spent 11 of its 32 turns collecting five video clips: an inspect and a call each, plus polls of clips still rendering. Calling a job's collect step (`call_paid_service` with `url: "job:…"`, or its registered collect URL) now polls the job until it completes, fails or 4 minutes pass, then answers once with `waited: { polls, seconds }`. After 4 minutes it also says `still` and how to collect again.
