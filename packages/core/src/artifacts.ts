@@ -30,6 +30,11 @@ export async function readArtifact(state: SessionState, path: string): Promise<s
   return readFile(await safeArtifactPath(state, path), "utf8");
 }
 
+/** Whether a path names a folder in this chat's artifacts (read_file lists one). */
+export async function isArtifactDirectory(state: SessionState, path: string): Promise<boolean> {
+  try { return (await stat(await safeArtifactPath(state, path))).isDirectory(); } catch { return false; }
+}
+
 export async function listArtifacts(state: SessionState, prefix = ""): Promise<string[]> {
   const start = await safeArtifactPath(state, prefix || ".");
   const files: string[] = [];

@@ -18,7 +18,7 @@ const secretArgs = { name: "FAKE_KEY", allowed_hosts: ["api.example.com"], reaso
 
 describe("hosted-only tools", () => {
   it("is defined once and never advertised or executable in local runs", async () => {
-    expect(HOSTED_ONLY_TOOL_NAMES).toEqual(["deploy_service", "request_secret", "vault_request", "automations"]);
+    expect(HOSTED_ONLY_TOOL_NAMES).toEqual(["deploy_service", "publish_site", "request_secret", "vault_request", "automations"]);
     expect(TOOL_NAMES).toContain("deploy_service"); expect(TOOL_NAMES).toContain("request_secret");
     expect(OPEN_CROWD_TOOLS.find(t => t.name === "deploy_service")?.parameters.required).toContain("entry");
     expect(OPEN_CROWD_TOOLS.find(t => t.name === "request_secret")?.parameters).toMatchObject({ required: [],
@@ -26,6 +26,10 @@ describe("hosted-only tools", () => {
     const session = await createSession({ workspaceRoot: await root(), budgetCents: 100, approvalMode: "off" });
     const local = await executeTool("deploy_service", deployArgs, { session });
     expect(local.ok).toBe(false); expect(local.error).toMatch(/hosted/);
+    expect((await executeTool("publish_site", { path: "site/index.html" }, { session })).error).toMatch(/publish_site is only available to hosted/);
+    // SRI-166: a web page for people goes to publish_site, a paid API to deploy_service; each says so.
+    expect(OPEN_CROWD_TOOLS.find(t => t.name === "publish_site")?.description).toMatch(/free to visitors and never paywalled.*unlisted.*deploy_service/s);
+    expect(OPEN_CROWD_TOOLS.find(t => t.name === "deploy_service")?.description).toMatch(/Not for web pages: .*publish_site/);
     const secret = await executeTool("request_secret", secretArgs, { session });
     expect(secret.ok).toBe(false); expect(secret.error).toMatch(/hosted/);
     // A local run that asks for deploy_service by name is refused by the local executor, and the

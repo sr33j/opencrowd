@@ -30,7 +30,8 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
   /** A chat-only model is sent no tools, and a history without tool calls (`chat-only.ts`). */
   chatOnly?: boolean }): LlmProvider {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
-  const tools = options.chatOnly ? [] : [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
+  // list_files is read_file on a folder: its slot is publish_site's, within MODEL_MAX_TOOLS (SRI-166).
+  const tools = options.chatOnly ? [] : [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents", "list_files"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
     ? { ...tool, description: "Read authoritative hosted finances in full: live USDC wallet balance per network, settled inference and service spending for this run, pending holds, and the runway (what a model call costs and how many are left)." } : tool), ...(options.extraTools ?? [])];
   return {
     async complete(messages, context) {

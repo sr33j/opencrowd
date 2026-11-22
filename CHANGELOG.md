@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.16.47 — 2026-11-22
+
+- **`publish_site`: host a website, dashboard or page for people to view (SRI-166 item 7).** An owner asked a chief to "host it on a website" and got a paid x402 service, so every browser got HTTP 402.
+  - The new hosted tool publishes one `.html` file, or a folder with an `index.html` and its assets, from `artifacts/`. It returns a public address that is free to visitors and never paywalled, unlisted (random and unguessable) by default.
+  - `site` updates a site in place; `delete` and `list` do what they say.
+  - The tool and the system prompt tell the agent to warn the owner when a page looks personal, and to keep it unlisted.
+  - `deploy_service` now says it is for paid, machine-callable APIs only.
+  - CrowdCode's control plane and sites Worker serve the files; see `design-docs/SITES.md` in CrowdCode.
+- **`read_file` lists a folder.** A folder path, or `""`, returns its files, and it takes `scope: "all"` like `list_files`. Hosted runs no longer advertise `list_files`, though it still executes, so `publish_site` fits within the 32 tools a hosted chief of staff may carry.
+
 ## 0.16.46 — 2026-11-22
 
 - **A step another model answered is said in one line (SRI-166).** The hosted gateway now retries a model call its seller could not serve and took nothing for (a 5xx, Venice's "503 Payment required" when its credit ran out, a quote timeout, a throttle after its own retries), then asks GPT-5.6 on another seller once (Sol for an Opus-class request, Luna otherwise). Its answer carries `fallback: { from, to, reason }`.
