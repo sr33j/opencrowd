@@ -11,6 +11,7 @@ import type { CompletionSignals } from "../src/index.js";
 import { isNonAnswer, runAgentTaskDetailed, type LlmMessage, type LlmProvider, type LlmResponse, type ToolExecutor } from "../src/index.js";
 import { MachineWorker, RuntimePause } from "../src/worker.js";
 import { heldStopNudge } from "../src/unresolved-holds.js";
+import { modelLabel } from "../src/model-fallback.js";
 
 /**
  * A finished answer has to reach the owner. These are the four ways the
@@ -375,5 +376,26 @@ describe("stopping for money that is only held (SRI-96 follow-up)", () => {
     expect(String(result.summary.final_message)).toContain("all six clips are stitched");
     expect(requests[1].at(-1)!.content).toContain("only held by payments still resolving");
     expect(turn).toBe(2);
+  });
+});
+
+describe("a step another model answered is said once (SRI-166)", () => {
+  it("names the models the way an owner does", () => {
+    expect(modelLabel("venice/claude-opus-5-5")).toBe("Claude Opus 5.5");
+    expect(modelLabel("openai/gpt-5.6-sol")).toBe("GPT-5.6 Sol");
+    expect(modelLabel("venice/openai-gpt-56-luna")).toBe("GPT-5.6 Luna");
+    expect(modelLabel("qwen/qwen3.7-flash")).toBe("qwen/qwen3.7-flash");
+  });
+  it("ends the answer with one line when the gateway fell back, and with nothing when it did not", async () => {
+    let turn = 0;
+    const result = await runAgentTaskDetailed(await session(), "Summarize the plan.", {
+      hosted: true, runId, knowledge: false, financialState: async () => financial(),
+      provider: { complete: async () => { turn += 1;
+        return { ...complete("Here is the plan."), fallback: { from: "venice/claude-opus-5-5", to: "openai/gpt-5.6-sol", reason: "the seller answered HTTP 503: Payment required" } }; } },
+    });
+    expect(String(result.summary.final_message)).toBe("Here is the plan.\n\nClaude Opus 5.5 was unavailable, so one step used GPT-5.6 Sol instead.");
+    const plain = await runAgentTaskDetailed(await session(), "Summarize the plan.", {
+      hosted: true, runId, knowledge: false, financialState: async () => financial(), provider: { complete: async () => complete("Here is the plan.") } });
+    expect(plain.summary.final_message).toBe("Here is the plan.");
   });
 });

@@ -123,7 +123,11 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
         // is answered with a tool error rather than failing the paid response.
         if (call.invalidArguments !== undefined && typeof call.invalidArguments !== "string") delete call.invalidArguments;
       }
-      return result.response as LlmResponse;
+      // The gateway asked another model because this one could not serve (SRI-166).
+      const fallback = result.fallback && typeof result.fallback === "object" && typeof result.fallback.from === "string" && typeof result.fallback.to === "string"
+        ? { from: String(result.fallback.from), to: String(result.fallback.to), ...(typeof result.fallback.reason === "string" ? { reason: result.fallback.reason.slice(0, 300) } : {}) }
+        : undefined;
+      return (fallback ? { ...result.response, fallback } : result.response) as LlmResponse;
     }
   };
 }

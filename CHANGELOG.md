@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.16.46 — 2026-11-22
+
+- **A step another model answered is said in one line (SRI-166).** The hosted gateway now retries a model call its seller could not serve and took nothing for (a 5xx, Venice's "503 Payment required" when its credit ran out, a quote timeout, a throttle after its own retries), then asks GPT-5.6 on another seller once (Sol for an Opus-class request, Luna otherwise). Its answer carries `fallback: { from, to, reason }`.
+  - The hosted provider keeps that on the response (`LlmResponse.fallback`); the agent loop reports it through `onModelFallback` and a progress line.
+  - The final answer of a run with such steps ends with one harness-written line, such as `Claude Opus 5.5 was unavailable, so one step used GPT-5.6 Sol instead.` (`fallbackNote`, `modelLabel`). It comes before any held-payment note.
+
 ## 0.16.45 — 2026-11-22
 
 - **The owner's standing "take no action" rules are enforced by the runtime, not only stated in the prompt (SRI-166).** A real owner told their job-search org "never submit applications or take action on job sites. Information gathering only." A scheduled run of its chief of staff then called `call_paid_service` on three jobs.ashbyhq.com application URLs. No method was given, so the tool's default POST was used. Only the inspect-first rule stopped them, though the rule was in the run's instructions.
