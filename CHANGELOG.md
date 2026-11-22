@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.44 — 2026-11-22
+
+- **A service's price is quoted as its cheapest offer, not its ceiling (SRI-163).** Asked which browser service it would use, an agent said Browser Use costs "$100 per session". Browser Use offers $1 and $5 exact and up to $100 by use (x402 `upto`). Inspection's `price_usd` is the most the gateway may pay, on purpose, so the agent read the ceiling as the price.
+  - Inspection now adds `price_from_usd` (the cheapest payable offer) when offers differ, and each offer carries its `scheme`.
+  - Search results that were probed show `price_usd` as the cheapest offer, plus `max_usd` when an offer can charge more (`quotedPrices`).
+  - The system prompt says how to read both, and to say "from $X, up to $Y".
+  - The payment ceiling is unchanged.
+
 ## 0.16.43 — 2026-11-22
 
 - **A seller that redirects, or prices above the cap, is explained instead of a bare "HTTP 402" (SRI-162).** On 2026-11-21 a beta agent asked to fill in a form with a browser-automation service got "HTTP 402" three times and stopped. StableBrowser's apex answers 307 to `www.`; Locus's Browser Use refused the gateway's probe, which sent no User-Agent (fixed in the hosted gateway).

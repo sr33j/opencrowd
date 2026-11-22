@@ -16,7 +16,7 @@ import {
 } from "@opencrowd/core";
 import type { AgentCashAdapter, PaidFetchResult, PaymentRail } from "./agentcash.js";
 import type { CrowdCodeAdapter, ServiceEvidence } from "./crowdcode.js";
-import { describeRails } from "./offers.js";
+import { describeRails, quotedPrices } from "./offers.js";
 import { PROBE } from "./discovery.js";
 import { routeTemplate } from "./route.js";
 import { reliabilityNote, type CrowdCodeApi, type Reliability } from "./tree.js";
@@ -315,7 +315,11 @@ export class EconomyGateway {
       }]);
       const input = describeInput(probe.input_schema);
       const output = describeOutput(probe.output_schema);
-      return { ...row, ...(input ? { input } : {}), ...(output ? { returns: output } : {}), ...(free ? { free: true } : {}), inspected: true };
+      // The listing's price can be a ceiling (an `upto` cap) or a probe without
+      // the real body; the probed offers say what it costs (SRI-163).
+      const quoted = Array.isArray(probe.offers) ? quotedPrices(probe.offers as never) : {};
+      const prices = quoted.from_usd !== undefined ? { price_usd: quoted.from_usd, ...(quoted.max_usd !== undefined ? { max_usd: quoted.max_usd } : {}) } : {};
+      return { ...row, ...prices, ...(input ? { input } : {}), ...(output ? { returns: output } : {}), ...(free ? { free: true } : {}), inspected: true };
     });
     if (recorded.length) await this.rememberInspections(recorded);
     return { ...(data as Record<string, unknown>), services: shown };
