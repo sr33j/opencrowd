@@ -75,7 +75,7 @@ export class MockAgentCashAdapter implements AgentCashAdapter {
     };
   }
 
-  async read(url: string): Promise<McpCallResult> {
+  async read(url: string, _request?: { method?: "GET" | "POST"; body?: string }): Promise<McpCallResult> {
     return url in (this.options.readResults ?? {})
       ? { ok: true, data: this.options.readResults![url] }
       : { ok: false, error: `no scripted read for ${url}` };

@@ -172,8 +172,9 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
     }, { rails: HOSTED_RAILS, negotiated: true, balances: () => this.networkBalances() });
   }
   private readonly discovery: BaseServiceDiscovery;
-  async read(url: string): Promise<McpCallResult> {
-    const reply = await postHostedTool(this.socket, "economy.read", { url, method: "GET" });
+  async read(url: string, request: { method?: "GET" | "POST"; body?: string } = {}): Promise<McpCallResult> {
+    // CrowdCode's gateway signs a POST only for a host this run has paid (SRI-163).
+    const reply = await postHostedTool(this.socket, "economy.read", { url, method: request.method ?? "GET", ...(request.body !== undefined ? { body: request.body } : {}) });
     const result = reply.data as any;
     if (!reply.ok) return reply;
     return { ok: result.status < 400, data: decodeBody(result.body, result.content_type),

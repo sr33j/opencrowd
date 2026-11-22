@@ -245,7 +245,12 @@ export class EconomyGateway {
   /** An unpaid read is still an external body: bound it like a paid one. */
   private async readService(args: Record<string, unknown>): Promise<ToolResult> {
     if (!this.options.agentcash.read) return { ok: false, error: "Authenticated reads are unavailable" };
-    const result = await this.options.agentcash.read(String(args.url ?? ""));
+    const method = String(args.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "POST") return { ok: false, error: "read_service method must be GET or POST" };
+    const body = args.body === undefined || args.body === null ? undefined : typeof args.body === "string" ? args.body : JSON.stringify(args.body);
+    if (method === "GET" && body !== undefined) return { ok: false, error: "read_service sends a body only with method POST" };
+    if (body !== undefined && body.length > 64000) return { ok: false, error: "read_service body is over 64 KB" };
+    const result = await this.options.agentcash.read(String(args.url ?? ""), { method, ...(body !== undefined ? { body } : {}) });
     if (!result.ok || result.data === undefined) return result as ToolResult;
     return { ...result, data: await boundResponse(this.options.session, result.data) } as ToolResult;
   }
@@ -1296,8 +1301,12 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
   }, required: ["input", "output", "problem", "builds_on", "frequency", "price_per_call"], additionalProperties: false } },
   { name: "list_my_reviews", description: "List this agent's own submitted reviews with IDs for selective deletion; works while CrowdCode is off. Paginate with next_before_id.", parameters: { type: "object", properties: { before_id: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 100 } }, additionalProperties: false } },
   { name: "delete_my_review", description: "Delete one of this agent's reviews when the user asks, using its ID from list_my_reviews. Works while CrowdCode is off. Never delete unrelated reviews.", parameters: { type: "object", properties: { review_id: { type: "integer", minimum: 1 } }, required: ["review_id"], additionalProperties: false } },
-  { name: "read_service", description: "Read a service URL without payment, authenticating with the wallet when required (SIWX). Use this to poll a paid generation job until complete; never resubmit a pending job. Download returned media URLs with run_shell.",
-    parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"], additionalProperties: false } },
+  { name: "read_service", description: "Call a service URL without paying, signing in as your wallet (SIWX) when the service asks. GET (the default) reads: poll a paid generation job until it completes (never resubmit a pending job), or read what a paid call left for you. POST with a JSON body drives something you already paid for in this run, on the same host: after buying a StableBrowser session (POST https://www.stablebrowser.dev/api/sessions, $0.10), send /api/sessions/navigate, /act, /extract, /screenshot and finally /api/sessions/close with {\"sessionId\": ...} here, free. A POST to a host this run has not paid is refused, and nothing here ever pays. Download returned media URLs with run_shell.",
+    parameters: { type: "object", properties: {
+      url: { type: "string" },
+      method: { type: "string", enum: ["GET", "POST"], description: "GET (default) or POST" },
+      body: { type: "object", description: "POST only: the JSON body, e.g. {\"sessionId\": \"...\", \"url\": \"https://...\"}", additionalProperties: true }
+    }, required: ["url"], additionalProperties: false } },
   {
     name: "get_wallet_status",
     description: "Show the shared AgentCash wallet's public balances, deposit addresses, and funding links. Read-only.",

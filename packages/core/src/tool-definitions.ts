@@ -245,6 +245,8 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ summary: text(args.final_message ?? args.summary ?? args.message) });
     case "browse_services":
       return pick({ node: text(args.node, 80) });
+    case "read_service":
+      return pick({ url: text(args.url), method: text(args.method ?? "GET", 10) });
     case "find_paid_service":
       return pick({ query: text(args.query), origin: text(args.origin) });
     case "inspect_paid_service":
