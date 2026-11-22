@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, type FinancialState } from "@opencrowd/protocol";
+import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, type ActionPolicy, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState, type ModelPrices } from "./context.js";
 import { inferenceSpent, moneyLine, newMoneyTrack, trackModelCall } from "./money-line.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
+import { checkAction, isStandingRuleRefusal, newPolicyState } from "./action-policy.js";
 import { earlyStopNudge, emptyServiceLog, endpointKey, recordServiceResult, repeatedDiscovery, type ServiceLog } from "./service-strategy.js";
 import {
   atomicWrite,
@@ -747,6 +748,8 @@ export interface AgentRunOptions {
    * prefix. Built-in and dynamic tool names win; callers drop collisions.
    */
   declaredTools?: DynamicToolsOption;
+  /** The owner's standing no-action rules from run.start (SRI-166); every tool call is checked against them. */
+  actionPolicy?: ActionPolicy;
   /**
    * Control's prompt sections (`run.start` `instructions`), each its own
    * paragraph after every hosted section. Ignored for a chat-only model.
@@ -1056,6 +1059,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
   const serviceLog: ServiceLog = structuredClone(options.resume?.serviceLog ?? emptyServiceLog());
   let earlyStopNudges = options.resume?.earlyStopNudges ?? 0;
+  // Which page each browser session is on, for the standing-rule check (SRI-166).
+  const policyState = newPolicyState();
   let heldStopNudges = options.resume?.heldStopNudges ?? 0;
   const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
@@ -1329,6 +1334,9 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
           result = completedTools[call.id];
         } else if (call.invalidArguments !== undefined && salvaged === undefined) {
           result = { ok: false, error: invalidArgumentsError(call.name, call.invalidArguments) };
+        } else if (options.actionPolicy && checkAction(options.actionPolicy, policyState, call.name, callArguments)) {
+          // The owner's standing no-action rule, enforced before any tool runs (SRI-166).
+          result = { ok: false, error: checkAction(options.actionPolicy, policyState, call.name, callArguments)! };
         } else if (call.name === "spawn_subagent") {
           try {
             result = options.subagent
@@ -1407,7 +1415,9 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       // A successful purchase proves paid services work in this run; only a streak of failures should stop it.
       if (call.name === "call_paid_service" && result.ok) serviceCallFailures = 0;
       if (!result.ok) {
-        const failedEndpoint = call.name === "call_paid_service" ? endpointKey(callArguments.url, callArguments.method) ?? "" : undefined;
+        // A refusal under the owner's standing rule is not a failing service (SRI-166).
+        const failedEndpoint = call.name === "call_paid_service" && !isStandingRuleRefusal(result.error)
+          ? endpointKey(callArguments.url, callArguments.method) ?? "" : undefined;
         if (failedEndpoint !== undefined && !failedEndpoints.has(failedEndpoint)) {
           failedEndpoints.add(failedEndpoint);
           serviceCallFailures += 1;
@@ -1577,6 +1587,7 @@ async function runSubagentTask(
   };
   const provider = subagentProvider(session, subagent, subagentId, parentOptions);
   const toolExecutor = parentOptions.toolExecutor ?? executeTool;
+  const subagentPolicy = newPolicyState();
   const maxTurns = subagent.maxTurns ?? 24;
   const forwardProgress = (event: ProgressEvent) => {
     parentOptions.onProgress?.({ ...event, message: `[subagent ${index}] ${event.message}` });
@@ -1699,7 +1710,10 @@ async function runSubagentTask(
           callArguments = { ...call.arguments, path };
           artifactsWritten.push(path);
         }
-        const result = SUBAGENT_TOOL_NAMES.includes(call.name as ToolName)
+        // A subagent's shell is held to the owner's standing rules too (SRI-166).
+        const refused = checkAction(parentOptions.actionPolicy, subagentPolicy, call.name, callArguments);
+        const result = refused ? { ok: false, error: refused }
+          : SUBAGENT_TOOL_NAMES.includes(call.name as ToolName)
           ? await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: forwardProgress, signal: parentOptions.signal })
           : { ok: false, error: `${call.name} is not available to subagents; local tools only` };
         forwardProgress({

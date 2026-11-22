@@ -1,3 +1,4 @@
+import { checkAction, newPolicyState } from "./action-policy.js";
 import { capStrings, captureDetail, DeadlineExceeded, InputTrail, MAX_EXTERNAL_STRING_CHARS, scrubText, stripReasoning, withDeadline } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
 import { readFile, mkdir } from "node:fs/promises";
@@ -327,6 +328,11 @@ export class MachineWorker {
       } : undefined;
       // Every tool call, built-in or economy, is recorded once per checkpoint turn and replayed from its stored result.
       // `wireName` is what the trace and the backstop know a declared tool by (`control.<name>`).
+      // The owner's standing no-action rules (SRI-166), from run.start, which the
+      // checkpoint keeps: a resumed run is held to them too. Checked here, where
+      // every hosted tool passes (subagents' included), so a refusal is traced.
+      const actionPolicy = run.start.payload.actionPolicy;
+      const policyState = newPolicyState();
       const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>, wireName = name): Promise<ToolResult> => {
         const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
         // Providers may reuse tool IDs on later turns. Results are scoped to
@@ -354,7 +360,8 @@ export class MachineWorker {
         try {
           if (saved?.approvalPending && name === "call_paid_service" && economy)
             await economy.execute("inspect_paid_service", { url: args.url, method: args.method, sample_body: args.body });
-          output = capToolResult(await this.withinDeadline(wireName, invoke));
+          const refused = checkAction(actionPolicy, policyState, name, args);
+          output = refused ? { ok: false, error: refused } : capToolResult(await this.withinDeadline(wireName, invoke));
           // Keep durable tool diagnostics consistent with what the model sees.
           if (financialState && name === "get_budget_status") output = { ok: true, data: latestFinancialState };
           if (financialState && name === "complete_session" && output.ok && output.data && typeof output.data === "object")

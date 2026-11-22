@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.16.45 — 2026-11-22
+
+- **The owner's standing "take no action" rules are enforced by the runtime, not only stated in the prompt (SRI-166).** A real owner told their job-search org "never submit applications or take action on job sites. Information gathering only." A scheduled run of its chief of staff then called `call_paid_service` on three jobs.ashbyhq.com application URLs. No method was given, so the tool's default POST was used. Only the inspect-first rule stopped them, though the rule was in the run's instructions.
+  - `run.start` may carry `actionPolicy`: `noActionHosts` (host suffixes), `readOnlyWeb` (no state-changing request to any ordinary website), and the owner's words.
+  - The worker checks every hosted tool call against it before the call runs, subagents included, and the refusal shows in the trace.
+  - What is refused: `call_paid_service` and `inspect_paid_service` that are not GET to a protected host, or that send an autonomous browser task to one; a browser session's `act` on a protected page (navigate, extract, observe, screenshot and close stay allowed); `vault_request` that is not GET; `run_shell` commands that send data with curl, wget, httpie, python requests or node.
+  - Reading stays allowed, and so does buying extraction from a paid service.
+  - A refusal quotes the rule and says to leave that step to the owner. It does not count toward the three-failed-service-calls stop.
+- **`call_paid_service` sends no POST to an ordinary website.** An endpoint whose inspection saw no x402 or MPP offer at all is refused for anything but GET, before anything is sent. An offer this agent can't pay is still an offer.
+- **A call with no method uses the method the endpoint was inspected with**, instead of defaulting to POST. With nothing inspected, the error says it assumed POST and how to read instead.
+
 ## 0.16.44 — 2026-11-22
 
 - **A service's price is quoted as its cheapest offer, not its ceiling (SRI-163).** Asked which browser service it would use, an agent said Browser Use costs "$100 per session". Browser Use offers $1 and $5 exact and up to $100 by use (x402 `upto`). Inspection's `price_usd` is the most the gateway may pay, on purpose, so the agent read the ceiling as the price.

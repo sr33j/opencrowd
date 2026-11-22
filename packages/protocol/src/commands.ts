@@ -41,6 +41,23 @@ export const DeclaredToolSchema = z.looseObject({
 });
 export type DeclaredTool = z.infer<typeof DeclaredToolSchema>;
 
+/**
+ * The owner's standing "take no action" rules, as control read them from the
+ * org's rules.md and mission.md (SRI-166). The runtime refuses, from every
+ * tool, requests that would change something on these sites: POST, PUT,
+ * PATCH and DELETE, form submissions, and browser actions. Reading stays
+ * allowed. A run without it is unrestricted, as before.
+ */
+export const ActionPolicySchema = z.object({
+  /** Host suffixes (jobs.ashbyhq.com matches ashbyhq.com) where nothing may be changed. */
+  noActionHosts: z.array(z.string().min(1).max(253)).max(300),
+  /** "Information gathering only": no state-changing request to any ordinary website. Paid x402/MPP services stay usable. */
+  readOnlyWeb: z.boolean(),
+  /** The owner's words, quoted back in every refusal. */
+  rule: z.string().min(1).max(600)
+});
+export type ActionPolicy = z.infer<typeof ActionPolicySchema>;
+
 export const RunStartCommandSchema = z.looseObject({
   ...commandBase,
   type: z.literal("run.start"),
@@ -62,6 +79,8 @@ export const RunStartCommandSchema = z.looseObject({
       .refine(sections => sections.reduce((total, section) => total + utf8.encode(section).length, 0) <= MAX_RUN_INSTRUCTIONS_BYTES,
         { error: `instructions exceed ${MAX_RUN_INSTRUCTIONS_BYTES} bytes in total` })
       .optional(),
+    /** The owner's standing no-action rules, enforced by the runtime (SRI-166). */
+    actionPolicy: ActionPolicySchema.optional(),
     /** Control-declared tools for this run (C2). */
     tools: z.array(DeclaredToolSchema).max(MAX_DECLARED_TOOLS)
       .refine(tools => new Set(tools.map(tool => tool.name)).size === tools.length, { error: "declared tool names must be unique" })

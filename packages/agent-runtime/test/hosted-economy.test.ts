@@ -328,26 +328,42 @@ describe("hosted economy: payment over the bridge", () => {
     expect(broken).toMatchObject({ ok: false, error: "your service answered HTTP 500", data: { outcome: "free", status: 500, charged_cost_cents: 0 } });
   });
 
-  it("fetches the endpoint itself when the supervisor reports expected_payment_required", async () => {
+  it("uses the method an endpoint was inspected with when the call names none, never a silent POST (SRI-166)", async () => {
+    const { fetcher } = fakeFetch();
+    const { socketPath, requests } = await bridge(() => ({ ok: true, data: { outcome: "paid_success", status: 200, body: JSON.stringify({ forecast: "sun" }), content_type: "application/json",
+      amount_atomic: "1000", transaction: "0xtx", network: "eip155:8453", payer: "0xagent", pay_to: "0xpayee" } }));
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: WEATHER, method: "GET" });
+    await gateway.execute("call_paid_service", { url: WEATHER, max_cost_cents: 5 });
+    expect(requests.find((r) => r.name === "economy.pay")?.arguments).toMatchObject({ method: "GET" });
+    // Nothing inspected for this URL: the error says it assumed POST, and how to read instead.
+    expect(await gateway.execute("call_paid_service", { url: "https://jobs.ashbyhq.com/ramp/fe280d10-4258-420a-b0bb-0dc9021bd803" }))
+      .toMatchObject({ ok: false, error: expect.stringContaining("no method was given, so this assumed POST; pass method GET to read a page") });
+  });
+
+  it("refuses a POST to an endpoint that made no payment offer: an ordinary website is not a paid service (SRI-166)", async () => {
+    // Was "fetches the endpoint itself": a POST with any body went to any site that answered without a 402.
     const { fetcher, calls } = fakeFetch({ endpointStatus: 200 });
-    const { socketPath } = await bridge(() => ({ ok: false, error: "the endpoint did not require payment", code: "expected_payment_required" }));
+    const { socketPath, requests } = await bridge(() => ({ ok: false, error: "the endpoint did not require payment", code: "expected_payment_required" }));
     const { gateway } = await economy(fetcher, socketPath);
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "free" }, max_cost_cents: 1 });
-    expect(call.ok).toBe(true);
-    expect(call.data).toMatchObject({ outcome: "free", status: 200, charged_cost_cents: 0, data: { results: ["free result"] } });
-    expect(call.data).not.toHaveProperty("review");
-    expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ query: "free" }))).toHaveLength(1);
+    expect(call).toMatchObject({ ok: false, error: expect.stringContaining("made no x402 or MPP payment offer: it is an ordinary website") });
+    expect(calls.filter(c => c.url === SEARCH && c.body === JSON.stringify({ query: "free" }))).toHaveLength(0);
+    expect(requests.filter(r => r.name === "economy.pay")).toHaveLength(0);
   });
 
   it("fetches the endpoint itself when the gateway relays the seller's own refusal", async () => {
     // The gateway's probe was this exact request, unpaid, so the endpoint's
     // own body is what the model should see — the same answer as a seller that
     // simply did not ask for payment.
-    const { fetcher, calls } = fakeFetch({ endpointStatus: 200 });
+    // A paid service (its inspection saw a 402) whose seller then answered with a reason.
+    const seller = { endpointStatus: 402 };
+    const { fetcher, calls } = fakeFetch(seller);
     const { socketPath } = await bridge(() => ({ ok: false, error: "invalid_request: query is required", code: "upstream_refused" }));
     const { gateway } = await economy(fetcher, socketPath);
     await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    seller.endpointStatus = 200;
     const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { query: "free" }, max_cost_cents: 1 });
     expect(call.ok).toBe(true);
     expect(call.data).toMatchObject({ outcome: "free", status: 200 });
