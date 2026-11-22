@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { KEEP_FINISHED_RUNS, MachineWorker, RuntimePause, compactWorkerState, createWorkerDemoProvider, type WorkerState } from "../src/worker.js";
 import { type Command, type Event } from "@opencrowd/protocol";
-import { createSession, readArtifact } from "@opencrowd/core";
+import { createSession, readArtifact, SpendingDeclined } from "@opencrowd/core";
 import { runAgentTaskDetailed, type LoopCheckpoint } from "../src/index.js";
 import { toolDeadlineError, toolDeadlineMs } from "../src/tool-deadlines.js";
 
@@ -147,6 +147,18 @@ describe("durable JSONL worker", () => {
     // durable record of the conversation, and it holds the prompt once.
     const messages = await readFile(join(home,'workspace/sessions/session-1/messages.jsonl'),'utf8');
     expect(messages.split('\n').filter(Boolean).map(l=>JSON.parse(l).message).filter(m=>m.role==='user')).toHaveLength(1);
+  });
+
+  // SRI-139: the owner declining a spend stops the run as theirs to stop. It
+  // used to be emitted as a runtime.error first, which put the owner's own
+  // decision in CrowdCode's error list and opened an incident.
+  it("ends a declined spend as user_stopped without reporting a runtime error", async () => {
+    const home = await root(); const events: Event[] = [];
+    const provider = {complete: vi.fn(async () => { throw new SpendingDeclined(); })};
+    const worker = new MachineWorker({agentHome:home, provider:()=>provider, output:(line:string)=>{events.push(JSON.parse(line));}});
+    await worker.initialize(); await worker.handleLine(JSON.stringify(start())); await worker.drain();
+    expect(events.filter(e=>e.type==='run.finished').at(-1)?.payload.outcome).toBe('user_stopped');
+    expect(events.filter(e=>e.type==='runtime.error')).toEqual([]);
   });
 
   it("reads cancellation while a model request is active and emits one terminal outcome", async () => {
