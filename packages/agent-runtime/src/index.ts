@@ -58,6 +58,7 @@ export * from "./tool-deadlines.js";
 export * from "./non-answer.js";
 import { isNonAnswer } from "./non-answer.js";
 import { heldStopNudge, unresolvedHoldsNote, withHoldsNote } from "./unresolved-holds.js";
+import { fallbackNote } from "./model-fallback.js";
 
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */
@@ -102,7 +103,11 @@ export interface LlmResponse {
   toolCalls: LlmToolCall[];
   /** OpenAI-compatible reason the provider stopped generating. */
   finishReason?: string;
+  /** Hosted: the model asked for could not serve this call, so another answered it (SRI-166). */
+  fallback?: ModelFallback;
 }
+/** A model call answered by another model because the one asked for was unavailable, before any payment. */
+export interface ModelFallback { from: string; to: string; reason?: string }
 
 export interface LlmProvider {
   complete(messages: LlmMessage[], context?: {
@@ -706,6 +711,8 @@ export const DEFAULT_CAPABILITY_INDEX =
   "Paid capability index — fast paths the wallet can buy in one call, typically under a cent: web search and news (Exa-grade) plus page scraping via https://stableenrich.dev; social media data via https://stablesocial.dev; more via find_paid_service.";
 
 export interface AgentRunOptions {
+  /** Hosted: a model call another model answered because the one asked for was unavailable (SRI-166). */
+  onModelFallback?: (fallback: ModelFallback) => void;
   inbox?: SteeringInbox;
   signal?: AbortSignal;
   runId?: string;
@@ -899,11 +906,21 @@ export async function runAgentTask(session: SessionState, task: string, options:
 
 export async function runAgentTaskDetailed(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const started = new Date().toISOString();
-  const result = await runAgentTaskLoop(session, task, options);
+  const fallbacks: ModelFallback[] = [];
+  const result = await runAgentTaskLoop(session, task, { ...options, onModelFallback: (fallback) => {
+    fallbacks.push(fallback);
+    options.onModelFallback?.(fallback);
+    options.onProgress?.({ type: "complete", message: fallbackNote([fallback]), data: { modelFallback: { ...fallback } } });
+  } });
+  if (typeof result.summary.final_message !== "string") return result;
   // Whatever path the run ended by, a paid call still resolving is part of
-  // what it spent, and the owner reads it in the answer (SRI-96).
-  const note = typeof result.summary.final_message === "string" ? await unresolvedHoldsNote(session, started) : undefined;
-  return note ? { ...result, summary: { ...result.summary, final_message: withHoldsNote(String(result.summary.final_message), note) } } : result;
+  // what it spent, and a step another model answered is part of how it was
+  // answered: the owner reads both in the answer (SRI-96, SRI-166).
+  let message = String(result.summary.final_message);
+  const holds = await unresolvedHoldsNote(session, started);
+  if (fallbacks.length) message = withHoldsNote(message, fallbackNote(fallbacks));
+  if (holds) message = withHoldsNote(message, holds);
+  return message === result.summary.final_message ? result : { ...result, summary: { ...result.summary, final_message: message } };
 }
 
 async function runAgentTaskLoop(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
@@ -1183,6 +1200,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
             options.onProgress?.({ type: "complete", message: `Compacted context: ~${result.tokensBefore} → ~${result.tokensAfter} tokens${what ? ` (${what})` : ""}. Archive: ${result.archivePath}`, data: result });
           }
         });
+      // Said once to the owner at the end of the run (runAgentTaskDetailed).
+      if (!restored && response.fallback) options.onModelFallback?.(response.fallback);
       options.signal?.throwIfAborted();
       const spentBefore = inferenceSpent(financial);
       await refreshFinancialState(); // includes the model payment, including a replayed receipt
