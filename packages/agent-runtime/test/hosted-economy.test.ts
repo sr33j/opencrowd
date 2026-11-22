@@ -523,6 +523,39 @@ describe("hosted economy: payment over the bridge", () => {
     expect(call.error).toContain("payment_unresolved");
   });
 
+  it("buys at the seller's www when its apex redirects there, once, and says so (SRI-162)", async () => {
+    const { fetcher } = fakeFetch();
+    const www = SEARCH.replace("://", "://www.");
+    const { socketPath, requests } = await bridge((name, args) => name !== "economy.pay" ? { ok: true, data: {} }
+      : String(args.url).includes("://www.") ? SETTLED
+      : { ok: false, code: "seller_redirect", error: `the seller redirects ${SEARCH} (HTTP 307) to ${www}.`, data: { location: www } });
+    const { gateway } = await economy(fetcher, socketPath);
+    await gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const call = await gateway.execute("call_paid_service", { url: SEARCH, method: "POST", body: { q: 1 }, max_cost_cents: 10 });
+    expect(call.ok).toBe(true);
+    expect((call.data as any).note).toContain(`Bought at ${www}`);
+    const pays = requests.filter(r => r.name === "economy.pay");
+    expect(pays.map(r => r.arguments.url)).toEqual([SEARCH, www]);
+    expect(pays[0].arguments.purchase_request_id).not.toBe(pays[1].arguments.purchase_request_id);
+  });
+
+  it("leaves a redirect to another site, and a price the gateway could not get, to the model in words (SRI-162)", async () => {
+    const away = await bridge(() => ({ ok: false, code: "seller_redirect", error: "the seller redirects it to https://elsewhere.example/x.", data: { location: "https://elsewhere.example/x" } }));
+    const one = await economy(fakeFetch().fetcher, away.socketPath);
+    await one.gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const moved = await one.gateway.execute("call_paid_service", { url: SEARCH, method: "POST", max_cost_cents: 10 });
+    expect(moved).toMatchObject({ ok: false, error: expect.stringContaining("https://elsewhere.example/x") });
+    expect(away.requests.filter(r => r.name === "economy.pay")).toHaveLength(1);
+    // The gateway's probe got no price (a WAF's 403); a direct request gets 402: never a bare "HTTP 402".
+    const priced = await bridge(() => ({ ok: false, code: "expected_payment_required", error: "expected payment required: the seller answered HTTP 403 to CrowdCode's request for a price" }));
+    const two = await economy(fakeFetch({ endpointStatus: 402 }).fetcher, priced.socketPath);
+    await two.gateway.execute("inspect_paid_service", { url: SEARCH, method: "POST" });
+    const bare = await two.gateway.execute("call_paid_service", { url: SEARCH, method: "POST", max_cost_cents: 10 });
+    expect(bare.ok).toBe(false);
+    expect(bare.error).toContain("HTTP 403 to CrowdCode's request for a price");
+    expect(bare.error).not.toMatch(/^HTTP 402$/);
+  });
+
   it("recovers a slow paid result by replaying the same purchase after the socket wait expires", async () => {
     const { fetcher } = fakeFetch();
     let pays = 0;

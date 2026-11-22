@@ -13,6 +13,8 @@ import { networkName, type OfferNetwork } from "./offers.js";
 export type PaymentRail = "x402-base" | "x402-solana" | "x402-monad" | "mppx" | "unsupported";
 
 export interface PaidFetchRequest {
+  /** Set on the one repeat at a seller's redirect target, so a redirect is followed once (SRI-162). */
+  redirected?: boolean;
   operationId?: string;
   url: string;
   method: string;

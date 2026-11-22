@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.43 — 2026-11-22
+
+- **A seller that redirects, or prices above the cap, is explained instead of a bare "HTTP 402" (SRI-162).** On 2026-11-21 a beta agent asked to fill in a form with a browser-automation service got "HTTP 402" three times and stopped. StableBrowser's apex answers 307 to `www.`; Locus's Browser Use refused the gateway's probe, which sent no User-Agent (fixed in the hosted gateway).
+  - The hosted gateway's new `seller_redirect` refusal carries the `location`. Within the same site (the apex and its `www.`), `call_paid_service` buys again at that URL, once, and its result's note says to use it from now on. A redirect anywhere else reaches the model in the gateway's words.
+  - The gateway's `price_above_cap` refusal states the seller's price and the caller's cap, so the model can raise `max_cost_cents` or choose another service.
+  - When the gateway could not get a price and a direct request answers 402, the error says what the gateway saw instead of a bare `HTTP 402`.
+  - The web-extraction knowledge lists StableBrowser at `https://www.stablebrowser.dev/api/sessions`, $0.10 a session.
+
 ## 0.16.42 — 2026-11-22
 
 - **An owner's declined spend is not a runtime error (SRI-139).** When the owner declined a spending approval, the hosted worker ended the run `user_stopped`, which is correct, but it emitted a `runtime.error` (`run_exception`, "SpendingDeclined") first. The owner's own decision then showed in CrowdCode's error list and opened an incident. A `SpendingDeclined` now ends the run the same way with no error event, as a `RuntimePause` already did.
