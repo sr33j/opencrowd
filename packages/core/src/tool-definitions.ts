@@ -15,6 +15,7 @@ export type ToolName =
   | "check_subagents"
   | "complete_session"
   | "deploy_service"
+  | "publish_site"
   | "request_secret"
   | "vault_request"
   | "automations"
@@ -30,6 +31,7 @@ export const TOOL_NAMES: ToolName[] = [
   "check_subagents",
   "complete_session",
   "deploy_service",
+  "publish_site",
   "request_secret",
   "vault_request",
   "automations",
@@ -40,7 +42,7 @@ export const TOOL_NAMES: ToolName[] = [
  * Tools that only exist when a supervisor executes them on the agent's behalf.
  * Local runs never advertise them; the hosted worker routes them over the bridge.
  */
-export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "request_secret", "vault_request", "automations"];
+export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "publish_site", "request_secret", "vault_request", "automations"];
 
 /** Tools a spawned subagent may use: local capabilities only, one level deep. */
 export const SUBAGENT_TOOL_NAMES: ToolName[] = [
@@ -90,7 +92,7 @@ function toolDescription(name: ToolName): string {
     case "save_file":
       return "Save content as a session artifact.";
     case "read_file":
-      return "Read a session artifact.";
+      return "Read a session artifact. A folder path (or \"\" for all of artifacts/) lists its files instead; scope=\"all\" also lists every other chat's files. Each chat with the owner has its own artifacts/ directory, but the owner's Files view shows every chat's files together: list with scope=\"all\" before you say a file the owner mentions does not exist.";
     case "list_files":
       return "List this chat's artifacts. Each chat with the owner has its own artifacts/ directory, but the owner's Files view shows every chat's files together: set scope=\"all\" to also list files from your other chats before you say a file the owner mentions does not exist.";
     case "run_shell":
@@ -101,8 +103,10 @@ function toolDescription(name: ToolName): string {
       return "Check on background subagents started with spawn_subagent background=true: returns each one's status and, when finished, its structured result. Set wait=true to block until all outstanding background subagents finish.";
     case "complete_session":
       return "Finish the agent run and present a concise final answer.";
+    case "publish_site":
+      return "Host a website, dashboard, report or page for people to view in a browser: publish an .html file or a folder (index.html plus its assets) from artifacts/ and get a public https address, free to visitors and never paywalled. Updating a site (site plus a new path) keeps its address; delete removes it. Sites are public to anyone with the address: the default address is unlisted (random, unguessable, not indexed). If the content looks personal (names, contact details, a job search, health or money), say so to the owner and keep it unlisted; offer named only for pages meant for anyone. Static files only: no server code, no payments, no forms that store data. For a paid API that other agents call, use deploy_service instead.";
     case "deploy_service":
-      return "Deploy a paid HTTP service you wrote to CrowdCode hosting. The entry file is an ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay per call with x402/MPP and the money goes to this agent's wallet. Fixed price: price_usd. Per-request price: pricing {mode:\"quote\",min_usd,max_usd} and also export quote(request, env), which runs before payment and returns { price_usd } or a 4xx Response to refuse; fetch then runs after payment with env.CROWDCODE.max_charge_atomic and may set response header x-crowdcode-charge-usd to settle less (upto). Optional headers: x-crowdcode-upstream-cost-usd (for margin), x-crowdcode-upstream-balance-usd (triggers top-ups), x-crowdcode-topup: required (refill and retry once). Vault secrets in `secrets` are env.NAME placeholders substituted only on requests to `allowed_hosts`; `raw_secrets` lets code read a value once the owner approves it for this code. `signers` gives env.NAME as a fresh Sign-In-With-X header signed by this agent's wallet for one approved URL. `topup` keeps a prepaid upstream balance refilled from this agent's wallet. `upstream_payments` lets the service buy from another paid x402/MPP service per request: when the upstream answers 402, return status 402 with header x-crowdcode-upstream-payment: required and JSON { url, payment_required: <the upstream's PAYMENT-REQUIRED header> } (x402) or { url, www_authenticate: <its WWW-Authenticate header> } (MPP); CrowdCode pays it, then runs fetch once more with env.CROWDCODE.upstream_credential, which you send as the PAYMENT-SIGNATURE header (x402) or Authorization (MPP). If the purchase fails the buyer is not charged. Signers, topup, raw_secrets and upstream_payments wait for the owner's approval in the services tab. Redeploying a slug updates it in place.";
+      return "Deploy a paid, machine-callable HTTP service (x402/MPP: callers pay per request) to CrowdCode hosting. Not for web pages: a website, dashboard or page people view goes to publish_site, which is free to visitors. The entry file is an ES module saved with save_file that exports default { async fetch(request, env) }. Buyers pay per call with x402/MPP and the money goes to this agent's wallet. Fixed price: price_usd. Per-request price: pricing {mode:\"quote\",min_usd,max_usd} and also export quote(request, env), which runs before payment and returns { price_usd } or a 4xx Response to refuse; fetch then runs after payment with env.CROWDCODE.max_charge_atomic and may set response header x-crowdcode-charge-usd to settle less (upto). Optional headers: x-crowdcode-upstream-cost-usd (for margin), x-crowdcode-upstream-balance-usd (triggers top-ups), x-crowdcode-topup: required (refill and retry once). Vault secrets in `secrets` are env.NAME placeholders substituted only on requests to `allowed_hosts`; `raw_secrets` lets code read a value once the owner approves it for this code. `signers` gives env.NAME as a fresh Sign-In-With-X header signed by this agent's wallet for one approved URL. `topup` keeps a prepaid upstream balance refilled from this agent's wallet. `upstream_payments` lets the service buy from another paid x402/MPP service per request: when the upstream answers 402, return status 402 with header x-crowdcode-upstream-payment: required and JSON { url, payment_required: <the upstream's PAYMENT-REQUIRED header> } (x402) or { url, www_authenticate: <its WWW-Authenticate header> } (MPP); CrowdCode pays it, then runs fetch once more with env.CROWDCODE.upstream_credential, which you send as the PAYMENT-SIGNATURE header (x402) or Authorization (MPP). If the purchase fails the buyer is not charged. Signers, topup, raw_secrets and upstream_payments wait for the owner's approval in the services tab. Redeploying a slug updates it in place.";
     case "request_secret":
       return "Use action=list first when you need to see this agent's vault secret titles and statuses (values are never exposed). Use action=create to ask the user to add a named API key or token to the encrypted vault. The user enters the value in their own UI; never ask them to paste a secret into chat. Use action=store to save a credential you obtained yourself (for example an API key from a sign-up) with name, value, allowed_hosts and reason: it is write-only, you can never read it back, and it cannot replace a secret the user added. Prefer vault_request capture when the key arrives in an API response, so you never see it. Reference an active secret by name in deploy_service `secrets` and read it in service code as env.NAME, or as {{NAME}} in vault_request; the real value is substituted only on requests to allowed_hosts. Values are substituted exactly as stored, never encoded: for HTTP Basic auth, store the base64 of user:password (compute it with run_shell) and send the header Authorization: Basic {{NAME}}.";
     case "vault_request":
@@ -130,7 +134,18 @@ function toolParameters(name: ToolName): JsonSchema {
         metadata: { type: "object", additionalProperties: true }
       }, ["path", "content"]);
     case "read_file":
-      return objectSchema({ path: stringSchema("Relative artifact path.") }, ["path"]);
+      return objectSchema({
+        path: stringSchema("Relative artifact path; a folder (ending in /) or \"\" lists files."),
+        scope: { type: "string", enum: ["chat", "all"], description: "When listing: chat (default) or all, which adds every other chat's files, each with the shell_dir to reach it from run_shell." }
+      }, ["path"]);
+    case "publish_site":
+      return objectSchema({
+        action: { type: "string", enum: ["publish", "delete", "list"], description: "publish (default) creates or updates a site; delete removes one; list shows this owner's sites." },
+        path: stringSchema("What to publish, under artifacts/: one .html file (served as the site's front page), or a folder with an index.html and its css/js/images/data."),
+        name: stringSchema("A short title for the site, e.g. \"Job shortlist dashboard\"."),
+        visibility: { type: "string", enum: ["unlisted", "named"], description: "unlisted (default): a random, unguessable address. named: a readable address from name, only for a page meant for anyone and with nothing personal in it." },
+        site: stringSchema("To update or delete: the site's id or URL from an earlier publish or list. Updating keeps its address.")
+      });
     case "run_shell":
       return objectSchema({
         command: stringSchema("Shell command."),
@@ -232,6 +247,8 @@ export function summarizeToolInput(name: string, args: Record<string, unknown>):
       return pick({ path: text(args.path ?? args.prefix) });
     case "deploy_service":
       return pick({ slug: text(args.slug), name: text(args.name), price_usd: text(args.price_usd) });
+    case "publish_site":
+      return pick({ action: text(args.action), path: text(args.path), name: text(args.name), visibility: text(args.visibility), site: text(args.site) });
     case "request_secret":
       return pick({ action: text(args.action), name: text(args.name), allowed_hosts: hosts(args.allowed_hosts) });
     case "vault_request":

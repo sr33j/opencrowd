@@ -1,5 +1,5 @@
 import { budgetStatus, createSession } from "./session.js";
-import { listArtifacts, listOtherChatArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
+import { isArtifactDirectory, listArtifacts, listOtherChatArtifacts, readArtifact, saveArtifact } from "./artifacts.js";
 import { readLedger, appendLedgerEntry } from "./ledger.js";
 import { maxShellTimeoutMs, runShell } from "./shell.js";
 import { recordLocalHarnessFeedback } from "./harness-feedback.js";
@@ -16,16 +16,9 @@ export interface ToolContext {
 export async function executeTool(name: ToolName, args: Record<string, unknown>, context: ToolContext): Promise<ToolResult> {
   try {
     context.signal?.throwIfAborted();
-    switch (name) {
-      case "get_budget_status":
-        return ok(budgetStatus(context.session));
-      case "save_file":
-        return ok(await saveArtifact(context.session, requiredString(args.path, "path"), requiredString(args.content, "content"), objectValue(args.metadata)));
-      case "read_file":
-        return ok({ content: await readArtifact(context.session, requiredString(args.path, "path")) });
-      case "list_files": {
-        const files = await listArtifacts(context.session, optionalString(args.prefix, "prefix") ?? "");
-        const scope = optionalString(args.scope, "scope") ?? "chat";
+    async function listing(prefix: string, rawScope: unknown): Promise<ToolResult> {
+        const files = await listArtifacts(context.session, prefix.replace(/^artifacts\/?/, ""));
+        const scope = optionalString(rawScope, "scope") ?? "chat";
         if (scope !== "chat" && scope !== "all") throw new Error("scope must be chat or all");
         if (scope === "chat") return ok(files);
         const other = await listOtherChatArtifacts(context.session);
@@ -37,7 +30,22 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
             ? "Files from other chats are already the owner's and already in their Files view. Read one with run_shell at <shell_dir>/<file> (run_shell starts in this chat's session directory). To attach or upload one from this chat, copy it into artifacts/ first; never re-buy or regenerate a file you already hold."
             : "No other chat of this agent has files."
         });
+    }
+    switch (name) {
+      case "get_budget_status":
+        return ok(budgetStatus(context.session));
+      case "save_file":
+        return ok(await saveArtifact(context.session, requiredString(args.path, "path"), requiredString(args.content, "content"), objectValue(args.metadata)));
+      case "read_file": {
+        // A folder (or "") lists its files: list_files folded in, so a hosted run
+        // keeps within its 32 tools with publish_site added (SRI-166).
+        const path = optionalString(args.path, "path") ?? "";
+        if (!path || path.endsWith("/") || args.scope !== undefined || await isArtifactDirectory(context.session, path))
+          return await listing(path, args.scope);
+        return ok({ content: await readArtifact(context.session, path) });
       }
+      case "list_files":
+        return await listing(optionalString(args.prefix, "prefix") ?? "", args.scope);
       case "run_shell": {
         context.onProgress?.({ type: "running_shell", message: "Running gated shell command" });
         const result = await runShell(
@@ -65,7 +73,8 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
       case "complete_session":
         return ok(await completeSession(context.session, requiredString(args.final_message, "final_message")));
       case "deploy_service":
-        return { ok: false, error: "deploy_service is only available to hosted OpenCrowd agents; this run has no hosting supervisor" };
+      case "publish_site":
+        return { ok: false, error: `${name} is only available to hosted OpenCrowd agents; this run has no hosting supervisor` };
       case "request_secret":
       case "vault_request":
         return { ok: false, error: `${name} is only available to hosted OpenCrowd agents` };

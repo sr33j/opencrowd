@@ -228,6 +228,8 @@ export function createMockToolExecutor(): ToolExecutor {
           return ok(await completeSession(context.session, stringValue(args.final_message) ?? "Mock test mode session completed."));
         case "deploy_service":
           return { ok: false, error: "deploy_service is unavailable in mock mode" };
+        case "publish_site":
+          return { ok: false, error: "publish_site is unavailable in mock mode" };
         case "request_secret":
         case "vault_request":
           return { ok: false, error: `${name} is unavailable in mock mode` };
@@ -268,6 +270,8 @@ function mockToolArguments(
       return { task: `Mock subtask for: ${task.slice(0, 80)}` };
     case "complete_session":
       return { final_message: `Mock test mode completed task: ${task.slice(0, 120)}` };
+    case "publish_site":
+      return { path: "site/index.html", name: "Mock site" };
     case "deploy_service":
       return { slug: "mock-service", name: "Mock service", description: task.slice(0, 120), price_usd: "0.001", entry: "service/index.js", routes: [] };
     case "request_secret":
@@ -925,7 +929,8 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
 
 async function runAgentTaskLoop(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools: ToolName[] = options.chatOnly ? [] : options.tools
-    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status"].includes(name))
+    // list_files is read_file on a folder now: its slot went to publish_site (SRI-166), still within 32 tools.
+    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status", "list_files"].includes(name))
       : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));
   const dynamicDefinitions = options.chatOnly ? [] : [...options.dynamicTools?.definitions ?? [], ...options.declaredTools?.definitions ?? []];
   const declaredToolNames = new Set(options.chatOnly ? [] : options.declaredTools?.definitions.map((tool) => tool.name) ?? []);
@@ -975,7 +980,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   if (options.hosted) systemPromptParts.push(
     "Files the owner sends you: an attached file is saved in this session under uploads/ before its message reaches you, and the message names each one with its path, size and type. Read a text file with read_file at uploads/<name>, and any file with run_shell at artifacts/uploads/<name> from the session directory. Those files are already the owner's and already in their file list: work from them, and never copy or re-save one under artifacts/ to hand it back. Write your own outputs elsewhere under artifacts/; uploads/ is the owner's directory and nothing you write there is delivered. If a file the message names is missing, say so and ask the owner to send it again rather than guessing at its contents.",
     "Files you produce: only the artifacts/ directory of this session reaches the owner. save_file writes there; anything you write elsewhere is scratch they never see. The owner sees each file at its path without that prefix, so artifacts/generated/report.pdf is generated/report.pdf to them. Name a produced file in your final message by exactly that path as plain text and nothing else — the owner's interface turns it into a working download and preview link. Never invent a download URL, a sandbox: link, a /mnt/data path, or any other path the owner cannot open, and never claim a file exists before you have verified it.",
-    "Files from your other chats: each chat with the owner is its own session with its own artifacts/, so list_files and read_file see only this one, while the owner's Files view shows every chat's files together. When the owner mentions a file, PDF or report you do not see here, call list_files with scope=\"all\" before you say it does not exist; it lists each other chat's files with the shell_dir that run_shell reaches them at."
+    "Files from your other chats: each chat with the owner is its own session with its own artifacts/, so read_file (which lists a folder, or all of artifacts/ for path \"\") sees only this one, while the owner's Files view shows every chat's files together. When the owner mentions a file, PDF or report you do not see here, call read_file with path \"\" and scope=\"all\" before you say it does not exist; it lists each other chat's files with the shell_dir that run_shell reaches them at."
   );
   if (options.dynamicTools) {
     systemPromptParts.push(
@@ -1002,9 +1007,16 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     );
   }
   const hostedTools = options.hosted ? (options.tools ?? TOOL_NAMES) : [];
+  if (hostedTools.includes("publish_site")) {
+    // SRI-166: an owner asked a chief to "host it on a website" and got a paid
+    // service that answered every browser with HTTP 402.
+    systemPromptParts.push(
+      "Websites: when the owner wants a page, dashboard, report or small website hosted for people to view (\"put it on a website\", \"host this\", \"share a link\"), save it as an .html file (or a folder with an index.html and its assets) under artifacts/ and call publish_site. It is free to visitors and returns the address; never use deploy_service for a web page. Pages are static: inline the data the page shows, or ship it as a .json file beside it. Before publishing something personal (names, contact details, a job search, health, money), tell the owner the page will be public to anyone with its unguessable address, and keep the default unlisted visibility. Report the address, and update a site in place with site plus the new path."
+    );
+  }
   if (hostedTools.includes("deploy_service")) {
     systemPromptParts.push(
-      "Hosting: you can publish paid HTTP services with deploy_service. Write the entry module with save_file (for example service/index.js) as an ES module with `export default { async fetch(request, env) { ... } }`, with no imports and no npm packages; the Workers runtime provides fetch, Request, Response, URL and crypto.",
+      "Hosting: you can publish paid, machine-callable HTTP services with deploy_service (web pages for people go to publish_site). Write the entry module with save_file (for example service/index.js) as an ES module with `export default { async fetch(request, env) { ... } }`, with no imports and no npm packages; the Workers runtime provides fetch, Request, Response, URL and crypto.",
       "The platform enforces payment before your handler runs, so your code only implements the route logic. Vault secrets you list in `secrets` arrive as env.NAME placeholders that are swapped for the real value only on outbound requests to `allowed_hosts`; never log, hash locally, or return a secret, and never build URLs to hosts you did not declare.",
       "When a call's cost depends on the request (tokens, minutes, rows), use pricing {mode: \"quote\"} with a quote(request, env) export that refuses impossible requests before payment, and report what was used with x-crowdcode-charge-usd. When the service resells an upstream that needs a wallet signature or a prepaid balance, declare signers and topup instead of asking for keys; the owner approves them in the services tab.",
       "After deploy_service succeeds, report the public URL, the price, how to call each route, and anything still waiting for the owner's approval."

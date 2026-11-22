@@ -227,6 +227,12 @@ describe("artifacts", () => {
     const shell = await runShell(current, "cat ../chat-earlier/artifacts/drip/report.pdf");
     expect(shell.stdout).toBe("%PDF-1.4");
     await expect(executeTool("list_files", { scope: "everything" }, { session: current })).resolves.toMatchObject({ ok: false, error: "scope must be chat or all" });
+    // SRI-166: read_file lists a folder (and takes scope), so hosted runs drop list_files for publish_site.
+    await expect(executeTool("read_file", { path: "" }, { session: current })).resolves.toMatchObject({ ok: true, data: ["notes.txt"] });
+    await expect(executeTool("read_file", { path: "", scope: "all" }, { session: current })).resolves.toMatchObject({ ok: true, data: { other_chats: [{ session_id: "chat-earlier" }] } });
+    await saveArtifact(current, "site/index.html", "<h1>hi</h1>");
+    await expect(executeTool("read_file", { path: "site" }, { session: current })).resolves.toMatchObject({ ok: true, data: ["site/index.html"] });
+    await expect(executeTool("read_file", { path: "site/index.html" }, { session: current })).resolves.toMatchObject({ ok: true, data: { content: "<h1>hi</h1>" } });
   });
 });
 
