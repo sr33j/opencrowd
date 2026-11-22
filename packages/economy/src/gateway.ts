@@ -82,6 +82,12 @@ interface Inspection {
   purpose?: string;
   /** This is an async job's collect step: calling it waits for the job (w107 phase 2). */
   collect?: boolean;
+  /**
+   * The endpoint answered with an x402 or MPP offer (or a free signed proof):
+   * it is a paid service. False for an ordinary website (SRI-166); absent on
+   * inspections recorded before this was kept.
+   */
+  offered?: boolean;
   evidence: ServiceEvidence;
   inspectedAt: string;
 }
@@ -309,6 +315,7 @@ export class EconomyGateway {
       recorded.push([inspectionKey(row.endpoint, method), {
         endpoint: row.endpoint, method, rail: railFromSchema(probe),
         priceCeilingCents: free ? 0 : priceCeilingFromSchema(probe),
+        ...(paymentOffered(probe, free) !== undefined ? { offered: paymentOffered(probe, free) } : {}),
         ...(typeof probe.pay_to === "string" ? { payTo: probe.pay_to } : {}),
         evidence: { ok: true, unproven: true, summary: "probed by find_paid_service; reputation is checked when it is paid" },
         inspectedAt
@@ -392,11 +399,13 @@ export class EconomyGateway {
     const priceCeilingCents = free ? 0 : priceCeilingFromSchema(schema.data);
     const payTo = schema.data && typeof schema.data === "object" && typeof (schema.data as { pay_to?: unknown }).pay_to === "string"
       ? (schema.data as { pay_to: string }).pay_to : undefined;
+    const offered = paymentOffered(schema.data, free);
     await this.rememberInspection(inspectionKey(endpoint, method), {
       endpoint,
       method,
       rail,
       priceCeilingCents,
+      ...(offered !== undefined ? { offered } : {}),
       ...(payTo ? { payTo } : {}),
       evidence,
       inspectedAt: new Date().toISOString()
@@ -488,13 +497,22 @@ export class EconomyGateway {
     // an endpoint, and "inspect it first" would be the wrong advice (SRI-119).
     const malformed = endpointProblem(endpoint);
     if (malformed) return { ok: false, error: `${malformed} Nothing was paid.` };
-    const method = (stringArg(args.method) ?? (asked !== endpoint ? "GET" : "POST")).toUpperCase();
+    // No method given: the one this endpoint was inspected with, never a
+    // silent POST. A run that meant to read three job pages sent them as POSTs
+    // because POST was the default (SRI-166).
+    const inspections = await this.loadInspections();
+    const inspectedMethods = [...new Set([...inspections.values()].filter((i) => i.endpoint === endpoint).map((i) => i.method))];
+    const method = (stringArg(args.method) ?? (asked !== endpoint ? "GET" : inspectedMethods.length === 1 ? inspectedMethods[0] : "POST")).toUpperCase();
     // GET carries its inputs in the query string: a body on GET fails before payment.
     const { url: target, body } = requestFor(endpoint, method, args.body);
-    const inspection = (await this.loadInspections()).get(inspectionKey(endpoint, method));
+    const inspection = inspections.get(inspectionKey(endpoint, method));
     if (!inspection) {
-      return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service` };
+      return { ok: false, error: `inspect_paid_service must run for ${method} ${endpoint} before call_paid_service${stringArg(args.method) ? "" : " (no method was given, so this assumed POST; pass method GET to read a page)"}` };
     }
+    // A plain website is not a paid service (SRI-166): call_paid_service never
+    // sends it a request that could change something there.
+    if (inspection.offered === false && method !== "GET")
+      return { ok: false, error: `${endpoint} made no x402 or MPP payment offer: it is an ordinary website, not a paid service, so call_paid_service will not send it a ${method}. To read it, call it with method GET, or use read_service or run_shell; submitting forms or taking actions on a website is not something call_paid_service does. Nothing was sent or paid.` };
     const purpose = statedPurpose ?? inspection.purpose;
     // Only rails CrowdCode verifies end-to-end, and this payer can settle, may pay automatically.
     const rails = this.options.paymentRails ?? VERIFIED_RAILS;
@@ -1347,7 +1365,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
       type: "object",
       properties: {
         url: { type: "string", description: "Exact endpoint URL" },
-        method: { type: "string", description: "HTTP method (default POST)" },
+        method: { type: "string", description: "HTTP method. Default: the method this endpoint was inspected with. Only paid x402/MPP services: an ordinary website is never sent a POST from here." },
         sample_body: { description: "Optional sample body to probe exact pricing without paying" }
       },
       required: ["url"],
@@ -1361,7 +1379,7 @@ const GATEWAY_TOOL_DEFINITIONS: GatewayToolDefinition[] = [
       type: "object",
       properties: {
         url: { type: "string", description: "Exact endpoint URL from inspect_paid_service" },
-        method: { type: "string", description: "HTTP method (default POST)" },
+        method: { type: "string", description: "HTTP method. Default: the method this endpoint was inspected with. Only paid x402/MPP services: an ordinary website is never sent a POST from here." },
         body: { description: "Request inputs matching the inspected schema; for GET they are sent as query parameters" },
         max_cost_cents: { type: "integer", minimum: 1, description: "Price ceiling in cents; defaults to the inspected price" },
         wait: { type: "boolean", description: "For a job's collect step (url job:…): false polls once instead of waiting for the job to finish (default true)." },
@@ -1419,4 +1437,15 @@ export function endpointProblem(url: string): string | undefined {
   if (!host || !(host.includes(".") || host === "localhost" || host.startsWith("[")))
     return `\`url\` ${shown} has no valid host; pass the endpoint exactly as find_paid_service or inspect_paid_service returned it.`;
   return undefined;
+}
+
+/**
+ * Whether an inspection saw a payment offer of any kind (x402 or MPP, payable
+ * here or not, or a free signed proof). Only an inspection that saw none at
+ * all, and said so, makes the target an ordinary website (SRI-166).
+ */
+export function paymentOffered(schema: unknown, free = false): boolean | undefined {
+  const data = schema && typeof schema === "object" ? schema as { payable?: unknown; offers?: unknown } : {};
+  if (free || data.payable === true || (Array.isArray(data.offers) && data.offers.length > 0)) return true;
+  return data.payable === false ? false : undefined;
 }
