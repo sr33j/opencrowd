@@ -233,8 +233,22 @@ function minimalEnv(): NodeJS.ProcessEnv {
     TMPDIR: process.env.TMPDIR,
     ...(process.env.OPENCROWD_SCRATCH_DIR
       ? { OPENCROWD_SCRATCH_DIR: process.env.OPENCROWD_SCRATCH_DIR }
-      : {})
+      : {}),
+    ...packageManagerEnv()
   };
+}
+
+/**
+ * Where package managers install and cache, when the host says. These are
+ * paths, never credentials. A hosted agent's volume is 1 GB: on 2026-11-23 an
+ * agent's `npm install -g` of a 600 MB package, with npm's cache on the same
+ * volume beside the copy it was replacing, filled it, and the run hung for ten
+ * hours. The host now puts the global prefix where its `bin` is on PATH and
+ * the caches off the volume.
+ */
+export const PACKAGE_MANAGER_ENV = ["NPM_CONFIG_PREFIX", "NPM_CONFIG_CACHE", "PIP_CACHE_DIR"] as const;
+function packageManagerEnv(): NodeJS.ProcessEnv {
+  return Object.fromEntries(PACKAGE_MANAGER_ENV.flatMap((key) => process.env[key] ? [[key, process.env[key]]] : []));
 }
 
 function capOutput(output: string, maxBytes: number): string {
