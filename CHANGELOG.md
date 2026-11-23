@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.49 — 2026-11-23
+
+- **A run the host stops at its budget ends there, gracefully.** The "taskmarket" mission's hourly sweep had a $0.05 run budget and spent $0.36 and $0.29. CrowdCode's gateway now refuses a scheduled run's next payment at its budget, with code `run_budget_reached`.
+  - The hosted provider reads that code as `RunBudgetReached`, a `BudgetExhaustedError`. Before, it was a rejected request that failed the run, or an uncertain payment that paused it.
+  - The run ends `budget_exhausted` with what it has so far. Its final message is the gateway's own account, e.g. "This scheduled run reached its $0.05 budget ($0.06 spent), so it stops here."
+  - A refused service call is an ordinary tool error, telling the model to finish.
+- **`publish_site` is offered only where the host serves sites** (`OPENCROWD_SITES=1`, read by `hostOffers`). Offered anywhere else, every call would fail. A CrowdCode supervisor sets the variable once site hosting is live.
+
 ## 0.16.48 — 2026-11-23
 
 - **A worker whose disk fills ends at once and says so, instead of hanging.** An org's hourly sweep (run 71ef514b) ran `npm install -g` of a 600 MB package. That filled the agent's 1 GB volume, and the run stayed "running" for ten hours. The owner's Stop at 13:24 was never answered.
