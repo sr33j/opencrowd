@@ -25,6 +25,7 @@ import {
   saveArtifact,
   updateConfig,
   runShell,
+  PACKAGE_MANAGER_ENV,
   maxShellTimeoutMs,
   DEFAULT_MAX_SHELL_TIMEOUT_MS,
   SHELL_TIMEOUT_CEILING_MS
@@ -290,6 +291,20 @@ describe("shell policy", () => {
       delete process.env.AWS_SECRET_ACCESS_KEY;
       if (secret === undefined) delete process.env.OPENCROWD_SCRATCH_DIR;
       else process.env.OPENCROWD_SCRATCH_DIR = secret;
+    }
+  });
+
+  it("passes the host's package-manager prefix and caches to a command, so npm install -g works off the volume", async () => {
+    const session = await createSession({ workspaceRoot: await tempRoot(), shellEnabled: true });
+    const saved = Object.fromEntries(PACKAGE_MANAGER_ENV.map((key) => [key, process.env[key]]));
+    process.env.NPM_CONFIG_PREFIX = "/data/tools/.npm-global";
+    process.env.NPM_CONFIG_CACHE = "/tmp/npm-cache";
+    process.env.PIP_CACHE_DIR = "/tmp/pip-cache";
+    try {
+      const result = await executeTool("run_shell", { command: "echo \"[$NPM_CONFIG_PREFIX][$NPM_CONFIG_CACHE][$PIP_CACHE_DIR]\"" }, { session });
+      expect(String((result.data as { stdout: string }).stdout)).toContain("[/data/tools/.npm-global][/tmp/npm-cache][/tmp/pip-cache]");
+    } finally {
+      for (const key of PACKAGE_MANAGER_ENV) if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
     }
   });
 

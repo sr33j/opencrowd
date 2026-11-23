@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.16.48 — 2026-11-23
+
+- **A worker whose disk fills ends at once and says so, instead of hanging.** An org's hourly sweep (run 71ef514b) ran `npm install -g` of a 600 MB package. That filled the agent's 1 GB volume, and the run stayed "running" for ten hours. The owner's Stop at 13:24 was never answered.
+  - **The write chain.** One failed state write made every later write fail, because each was chained on the last. The worker could emit nothing after it, not even after the disk had room again. Now one write's failure stays with that write.
+  - **When the run's own error handling fails** (it could not record the error either), the worker tells its host through `onFatal`. Before, that rejection was swallowed and the worker went on reading commands as if the run were alive.
+  - **`opencrowd worker` exits** on such a failure with one line on stderr: `storage_full` when the disk is full (ENOSPC or EDQUOT), otherwise `worker_failure`. It used to log `worker_failure` and stay up with stdin open, so its supervisor never noticed. CrowdCode now reports the run as stopped because the disk filled up.
+- **`run_shell` passes the host's `NPM_CONFIG_PREFIX`, `NPM_CONFIG_CACHE` and `PIP_CACHE_DIR` to commands** (`PACKAGE_MANAGER_ENV`). These are paths only. CrowdCode sets them so that `npm install -g` works without root, installs where PATH looks, and keeps the caches off the volume.
+
 ## 0.16.47 — 2026-11-22
 
 - **`publish_site`: host a website, dashboard or page for people to view (SRI-166 item 7).** An owner asked a chief to "host it on a website" and got a paid x402 service, so every browser got HTTP 402.

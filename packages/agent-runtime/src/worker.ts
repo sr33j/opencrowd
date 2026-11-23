@@ -126,6 +126,13 @@ export interface WorkerOptions {
   toolDeadlineMs?: (name: string) => number;
   /** CrowdCode's live capability tree (default: read it); false keeps the bundled snapshot. */
   liveTree?: false | LiveTreeOptions;
+  /**
+   * The worker can no longer record what it does: a run's own error handling
+   * failed, which only happens when its state or an event could not be
+   * written (a full disk). The host should end the process, so its supervisor
+   * reports the run instead of leaving it "running" with nothing behind it.
+   */
+  onFatal?: (error: unknown) => void;
 }
 
 /** Durable single-agent process boundary. stdout is exclusively validated protocol. */
@@ -179,7 +186,11 @@ export class MachineWorker {
 
   private mutate(fn: () => void): Promise<void> {
     const write = this.writes.then(async () => { fn(); await atomicWrite(this.statePath, JSON.stringify(this.state)); });
-    this.writes = write;
+    // The caller sees this write's failure; the next write must not. Chaining
+    // on a rejected write rejected every later one too, so one ENOSPC left the
+    // worker unable to emit anything, a cancel included, even after the disk
+    // had room again (run 71ef514b, 2026-11-23: ten hours "running").
+    this.writes = write.catch(() => undefined);
     return write;
   }
 
@@ -292,8 +303,11 @@ export class MachineWorker {
     this.running = this.execute(command.runId, current, this.controller.signal).finally(() => {
       this.running = undefined; this.controller = undefined;
     });
-    // Keep the rejection observed while controls continue to be read; drain rethrows it.
-    void this.running.catch(() => undefined);
+    // `execute` handles its own failures and ends the run. It rejects only
+    // when that handling failed too, so nothing was recorded: say so to the
+    // host rather than keep reading commands as if the run were alive.
+    // drain() still rethrows it.
+    void this.running.catch((error) => this.options.onFatal?.(error));
   }
 
   private async execute(runId: string, run: DurableRun, signal: AbortSignal): Promise<void> {
