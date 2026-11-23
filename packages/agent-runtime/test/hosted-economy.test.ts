@@ -774,8 +774,12 @@ describe("hosted economy: the tools one model request carries", () => {
     const { fetcher } = fakeFetch();
     const { gateway } = await economy(fetcher, socketPath);
     const declared = Array.from({ length: HOSTED_DECLARED_TOOL_BUDGET }, (_, i) => ({ name: `org_tool_${i}`, description: "x", parameters: { type: "object" } }));
-    await createHostedProvider({ socketPath, runId: "run-1", sessionId: "session-1", extraTools: [...hostedDynamicTools(gateway).definitions, ...declared] })
-      .complete([{ role: "user", content: "hello" }], { operationId: "run-1:llm:0" });
+    // The most a request carries: a host that serves sites offers publish_site too.
+    process.env.OPENCROWD_SITES = "1";
+    try {
+      await createHostedProvider({ socketPath, runId: "run-1", sessionId: "session-1", extraTools: [...hostedDynamicTools(gateway).definitions, ...declared] })
+        .complete([{ role: "user", content: "hello" }], { operationId: "run-1:llm:0" });
+    } finally { delete process.env.OPENCROWD_SITES; }
     const names = sent.map((tool) => tool.name);
     expect(names).toContain("submit_harness_feedback");
     expect(names).toContain("set_crowdcode_enabled");

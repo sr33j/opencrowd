@@ -42,6 +42,14 @@ export const TOOL_NAMES: ToolName[] = [
  * Tools that only exist when a supervisor executes them on the agent's behalf.
  * Local runs never advertise them; the hosted worker routes them over the bridge.
  */
+/**
+ * `publish_site` needs the host to serve the pages, which a CrowdCode
+ * supervisor says by setting OPENCROWD_SITES=1 for the worker. Offered
+ * without it, every call would fail.
+ */
+export function hostOffers(name: ToolName, env: NodeJS.ProcessEnv = process.env): boolean {
+  return name !== "publish_site" || env.OPENCROWD_SITES === "1";
+}
 export const HOSTED_ONLY_TOOL_NAMES: ToolName[] = ["deploy_service", "publish_site", "request_secret", "vault_request", "automations"];
 
 /** Tools a spawned subagent may use: local capabilities only, one level deep. */

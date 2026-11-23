@@ -12,7 +12,7 @@ import {
   conversationPath,
   appendLedgerEntry,
   budgetStatus,
-  BudgetExhaustedError, SpendingApprovalRequired, SpendingDeclined, type Reservation,
+  BudgetExhaustedError, RunBudgetReached, hostOffers, SpendingApprovalRequired, SpendingDeclined, type Reservation,
   completeSession,
   executeTool,
   finalizeReservation,
@@ -930,7 +930,7 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
 async function runAgentTaskLoop(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools: ToolName[] = options.chatOnly ? [] : options.tools
     // list_files is read_file on a folder now: its slot went to publish_site (SRI-166), still within 32 tools.
-    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status", "list_files"].includes(name))
+    ?? (options.hosted ? TOOL_NAMES.filter(name => !["spawn_subagent", "check_subagents", "get_budget_status", "list_files"].includes(name) && hostOffers(name))
       : TOOL_NAMES.filter((name) => !HOSTED_ONLY_TOOL_NAMES.includes(name) && (options.subagent || name !== "spawn_subagent")));
   const dynamicDefinitions = options.chatOnly ? [] : [...options.dynamicTools?.definitions ?? [], ...options.declaredTools?.definitions ?? []];
   const declaredToolNames = new Set(options.chatOnly ? [] : options.declaredTools?.definitions.map((tool) => tool.name) ?? []);
@@ -1006,7 +1006,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       "Paid external services are unavailable in this run; work with local tools only and say so if the task truly requires external capability."
     );
   }
-  const hostedTools = options.hosted ? (options.tools ?? TOOL_NAMES) : [];
+  const hostedTools = options.hosted ? (options.tools ?? TOOL_NAMES).filter((name) => hostOffers(name)) : [];
   if (hostedTools.includes("publish_site")) {
     // SRI-166: an owner asked a chief to "host it on a website" and got a paid
     // service that answered every browser with HTTP 402.
@@ -1223,7 +1223,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       if (error instanceof BudgetExhaustedError) {
         // Budget exhaustion is a deterministic stop, not a fault: finish
         // with what the session accomplished so far.
-        const summary = await completeSession(session, `Stopped: the session budget is exhausted (${error.message}).`);
+        const summary = await completeSession(session, error instanceof RunBudgetReached ? error.message
+          : `Stopped: the session budget is exhausted (${error.message}).`);
         return { outcome: options.hosted ? "budget_exhausted" : "stopped", summary, turns: turn + 1 };
       }
       throw error;

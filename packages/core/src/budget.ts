@@ -57,6 +57,21 @@ export class BudgetExhaustedError extends Error {
   }
 }
 
+/**
+ * The host refused a payment because this run reached the budget it was given:
+ * a scheduled run's own run budget, enforced by the CrowdCode gateway
+ * (code `run_budget_reached`). Like a session budget, it is a deterministic
+ * stop, not a fault: the run ends `budget_exhausted` with what it has, and the
+ * message is the host's own account of it.
+ */
+export class RunBudgetReached extends BudgetExhaustedError {
+  constructor(message: string) {
+    super(0, 0);
+    this.message = message;
+    this.name = "RunBudgetReached";
+  }
+}
+
 // Serialize budget mutations per session so concurrent callers (parallel
 // subagents and the main loop) can't interleave check/mutate/save cycles.
 const sessionLocks = new Map<string, Promise<unknown>>();

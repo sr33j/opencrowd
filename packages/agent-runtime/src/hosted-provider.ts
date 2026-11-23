@@ -1,7 +1,7 @@
 import { FinancialStateSchema, parseNetworkBalances, type FinancialState, ContextWindowExceeded, isContextWindowError, isRequestTooLargeError, upstreamRefusalSummary, MODEL_SELLER_REQUEST_MAX_BYTES, MODEL_BRIDGE_TIMEOUT_MS, HOSTED_TOOL_BRIDGE_TIMEOUT_MS, HOSTED_CONTROL_TOOL_TIMEOUT_MS, SERVICE_RESPONSE_MAX_BYTES } from "@opencrowd/protocol";
 import { request } from "node:http";
 import { isAbsolute } from "node:path";
-import { OPEN_CROWD_TOOLS, readArtifact, type ToolResult } from "@opencrowd/core";
+import { OPEN_CROWD_TOOLS, RunBudgetReached, hostOffers, readArtifact, type ToolResult } from "@opencrowd/core";
 import { boundResponse } from "@opencrowd/economy";
 import type { DynamicToolDefinition, LlmProvider, LlmResponse } from "./index.js";
 import { RuntimePause, type HostedToolExecutor } from "./worker.js";
@@ -31,7 +31,7 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
   chatOnly?: boolean }): LlmProvider {
   if (!isAbsolute(options.socketPath)) throw new Error("Hosted bridge socket must be absolute");
   // list_files is read_file on a folder: its slot is publish_site's, within MODEL_MAX_TOOLS (SRI-166).
-  const tools = options.chatOnly ? [] : [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents", "list_files"].includes(tool.name)).map(tool => tool.name === "get_budget_status"
+  const tools = options.chatOnly ? [] : [...OPEN_CROWD_TOOLS.filter(tool => !["spawn_subagent", "check_subagents", "list_files"].includes(tool.name) && hostOffers(tool.name)).map(tool => tool.name === "get_budget_status"
     ? { ...tool, description: "Read authoritative hosted finances in full: live USDC wallet balance per network, settled inference and service spending for this run, pending holds, and the runway (what a model call costs and how many are left)." } : tool), ...(options.extraTools ?? [])];
   return {
     async complete(messages, context) {
@@ -103,7 +103,7 @@ export function createHostedProvider(options: { socketPath: string; runId: strin
         req.once("close", () => clearTimeout(total));
         req.on("error", reject); req.end(body);
       }).catch(error => {
-        if (context?.signal?.aborted || error instanceof HostedRequestError || error instanceof ContextWindowExceeded) throw error;
+        if (context?.signal?.aborted || error instanceof HostedRequestError || error instanceof ContextWindowExceeded || error instanceof RunBudgetReached) throw error;
         // An interrupted bridge may have submitted payment. Pause this exact
         // operation; never switch providers or create a fresh purchase.
         throw new RuntimePause("payment_unknown", operationId, "Model request interrupted; payment status needs reconciliation.");
@@ -141,6 +141,9 @@ function rejectedRequest(status: number, text: string): Error | undefined {
     if (body.paid === true && body.error === "model_failed")
       return new HostedRequestError("model_failed", status, String(body.message ?? "The model response failed after payment settled. Its receipt is saved."));
     if (body.paid !== false) return undefined;
+    // A scheduled run at its own budget: nothing was bought, and the run ends here.
+    if (body.error === "run_budget_reached")
+      return new RunBudgetReached(typeof body.message === "string" && body.message ? body.message : "This run reached its budget.");
     // What the seller itself refused, when the gateway relayed its verdict
     // rather than inventing one of its own.
     const upstream = body.upstream && typeof body.upstream === "object" && typeof body.upstream.code === "string"
