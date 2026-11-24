@@ -18,7 +18,7 @@ Useful loops:
 
 ```sh
 npm run typecheck        # tsc project-wide (noUnusedLocals/Parameters on)
-npm test                 # vitest, including architecture invariants
+npm test                 # vitest, including the architecture invariants in test/lint/
 npm run deadcode         # knip: unused files, exports, dependencies
 npm run smoke            # build + bundle + demo + headless smoke tests
 node apps/cli/dist/index.js --demo   # run the TUI against mocks

@@ -41,7 +41,7 @@
     },
     ".": {
       "entry": [
-        "test/architecture.test.ts",
+        "test/lint/architecture.test.ts",
         "scripts/*.mjs"
       ],
       "project": [

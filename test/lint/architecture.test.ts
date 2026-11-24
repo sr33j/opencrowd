@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
  * git history, never in source.
  */
 
-const ROOT = join(__dirname, "..");
+const ROOT = join(__dirname, "..", "..");
 const SOURCE_DIRS = [
   "packages/protocol/src",
   "packages/core/src",
