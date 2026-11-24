@@ -39,7 +39,7 @@ function repo(version = "0.16.49") {
   };
   const train = (...args: string[]) => {
     try {
-      return { ok: true, out: execFileSync("node", [SCRIPT, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: "" } }) };
+      return { ok: true, out: execFileSync("node", [SCRIPT, ...args], { cwd: dir, encoding: "utf8", env: { ...process.env, GITHUB_OUTPUT: join(dir, ".out"), GITHUB_STEP_SUMMARY: join(dir, ".summary") } }) };
     } catch (error: any) {
       return { ok: false, out: `${error.stdout}${error.stderr}` };
     }
@@ -48,10 +48,15 @@ function repo(version = "0.16.49") {
 }
 
 describe("the daily release train", () => {
-  it("releases nothing when only docs, tests or fragments changed", () => {
+  it("releases nothing when only docs, tests or fragments changed, and the run says so and succeeds", () => {
     const r = repo();
     r.commit("Docs", { "docs/x.md": "words\n", "packages/core/test/a.test.ts": "test\n", "changes/w1.md": "- pending\n" });
     expect(JSON.parse(r.train("plan").out)).toMatchObject({ release: false, version: "0.16.49" });
+    // As the workflow runs it: a quiet day is a green step with a reason.
+    const applied = r.train("apply");
+    expect(applied.ok).toBe(true);
+    expect(r.read(".out")).toContain("release=false\n");
+    expect(r.read(".summary")).toBe("### Release train\n\nNothing to release: nothing shipped changed since v0.16.49 (3 files of docs, tests or fragments).\n");
   });
 
   it("cuts the next patch from the day's fragments, oldest first, and deletes them", () => {
@@ -68,6 +73,8 @@ describe("the daily release train", () => {
     expect(existsSync(join(r.dir, "changes/w-fix.md"))).toBe(false);
     expect(existsSync(join(r.dir, "changes/README.md"))).toBe(true);
     expect(r.read(".release-notes.md")).toBe("- **A fix.** It works now.\n- **A feature.**\n  - with detail\n");
+    expect(r.read(".out")).toContain("release=true\nversion=0.16.50\n");
+    expect(r.read(".summary")).toContain("Releasing 0.16.50 from ");
   });
 
   it("writes the commit subjects when nobody wrote a fragment", () => {
