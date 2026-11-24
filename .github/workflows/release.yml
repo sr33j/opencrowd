@@ -60,13 +60,9 @@ jobs:
       - name: Cut today's release
         id: train
         if: env.TRAIN == 'true'
-        run: |
-          node scripts/release-train.mjs apply
-          {
-            echo "### Release train"
-            node -e 'const p=require("./apps/cli/package.json");console.log("Version: "+p.version)'
-            [ -f .release-notes.md ] && cat .release-notes.md
-          } >> "$GITHUB_STEP_SUMMARY"
+        # Writes the step summary too: what it releases, or why nothing.
+        run: node scripts/release-train.mjs apply
+
       - name: Verify release tag matches package version
         if: env.TRAIN != 'true'
         env:

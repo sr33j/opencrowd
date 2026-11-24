@@ -143,6 +143,11 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()
     console.log(JSON.stringify(result, null, 2));
     if (process.env.GITHUB_OUTPUT)
       writeFileSync(process.env.GITHUB_OUTPUT, `release=${result.release}\nversion=${result.version}\nhead=${result.head}\nreason=${result.reason}\n`, { flag: "a" });
+    // A day with nothing to release is a green run that says why.
+    if (process.env.GITHUB_STEP_SUMMARY)
+      writeFileSync(process.env.GITHUB_STEP_SUMMARY, result.release
+        ? `### Release train\n\nReleasing ${result.version} from ${result.head}.\n\n${readFileSync(join(root, ".release-notes.md"), "utf8")}`
+        : `### Release train\n\nNothing to release: ${result.reason}.\n`, { flag: "a" });
   } else if (command === "check-pr") {
     if (!arg) throw new Error("check-pr needs the base commit");
     const problems = checkPr(arg);
