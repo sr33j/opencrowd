@@ -27,6 +27,20 @@ export function upstreamRefusalSummary(error: unknown): string | undefined {
   return `The model provider refused this request before any payment, so nothing was charged${detail ? `: ${detail}` : "."} You can retry or send another message.`;
 }
 
+/**
+ * How a run CrowdCode ended says so, after the answer it delivered: "<answer>
+ * \n\nStopped by CrowdCode: <reason>". Run adf318ab's owner read "User
+ * stopped" for a run a failure breaker ended (2026-11-24).
+ */
+export const CROWDCODE_STOP = "Stopped by CrowdCode: ";
+
+/** A summary split into the answer the run delivered and CrowdCode's reason for ending it. */
+export function splitCrowdcodeStop(summary: string): { answer: string; reason?: string } {
+  const at = summary.lastIndexOf(CROWDCODE_STOP);
+  if (at === -1 || (at > 0 && !/\n\s*$/.test(summary.slice(0, at)))) return { answer: summary };
+  return { answer: summary.slice(0, at).trim(), reason: summary.slice(at + CROWDCODE_STOP.length).trim() };
+}
+
 /** Typed run outcomes (plan section 7.3). */
 export const RUN_OUTCOMES = [
   "completed",
@@ -36,6 +50,8 @@ export const RUN_OUTCOMES = [
   "waiting_for_delegation",
   "budget_exhausted",
   "user_stopped",
+  /** CrowdCode ended the run (no progress, a gate, the output limit) after it delivered what it could. Never the owner's doing. */
+  "stopped",
   "payment_unknown",
   "max_turns",
   "failed",

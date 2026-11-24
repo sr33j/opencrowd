@@ -123,9 +123,15 @@ it("replaces a held answer once the user sends a new instruction", async () => {
   expect(result.summary.final_message).toBe(revised);
 });
 
-it("fails explicitly on an empty response without an answer", async () => {
-  await expect(runAgentTaskDetailed(await session(), "Find a role", { provider: { complete: async () => empty } }))
-    .rejects.toThrow("ended without an answer");
+it("asks once for the answer after an empty response, then ends as stopped by CrowdCode, never failed", async () => {
+  const provider = { complete: vi.fn(async () => empty) };
+  const result = await runAgentTaskDetailed(await session(), "Find a role", { provider });
+  expect(provider.complete).toHaveBeenCalledTimes(2);
+  expect(result.outcome).toBe("stopped");
+  expect(result.summary.final_message).toBe("Stopped by CrowdCode: the model returned no answer twice in a row.");
+  const answered = { complete: vi.fn().mockResolvedValueOnce(empty).mockResolvedValue(complete("Target neural decoding roles.")) };
+  expect(await runAgentTaskDetailed(await session(), "Find a role", { provider: answered }))
+    .toMatchObject({ outcome: "completed", summary: { final_message: "Target neural decoding roles." } });
 });
 
 it("preserves the whole continued answer, not just its output-limit prefix", async () => {
@@ -143,14 +149,17 @@ it("does not reuse a saved answer after the user changes the task", async () => 
   const inbox = new FileSteeringInbox(join(current.sessionDir, "inbox.json"));
   let calls = 0;
   const tools = reflection();
-  await expect(runAgentTaskDetailed(current, "Find a role", { inbox, completionGate: tools.completionGate,
+  const result = await runAgentTaskDetailed(current, "Find a role", { inbox, completionGate: tools.completionGate,
     provider: { complete: async () => {
       if (++calls === 1) return complete();
       if (calls === 2) await inbox.push({ id: "new", prompt: "Instead, explain the company history." });
       return empty;
     } }
-  })).rejects.toThrow("ended without an answer");
-  expect(calls).toBe(3);
+  });
+  // The old answer is not delivered for the new task; the run is asked once, then ends saying why.
+  expect(result.outcome).toBe("stopped");
+  expect(String(result.summary.final_message)).not.toContain("role");
+  expect(calls).toBe(4);
 });
 
 it("asks only for the one-time reflection, never for a review (SRI-115)", async () => {

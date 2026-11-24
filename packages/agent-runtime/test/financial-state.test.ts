@@ -84,7 +84,7 @@ it("does not change a frozen paid request on resume, even if financial state cha
   expect(result.summary.budget).toMatchObject({ current_run: { inference_spent_usdc: "0.000123" } });
 });
 
-it("stops after three consecutive paid-service failures but a success resets the streak", async () => {
+it("keeps going after paid-service failures: three in a row no longer end the run (persistence)", async () => {
   const run = async (script: boolean[]) => {
     let calls = 0;
     return runAgentTaskDetailed(await session(), "buy things", {
@@ -94,14 +94,13 @@ it("stops after three consecutive paid-service failures but a success resets the
       provider: { complete: async () => {
         const n = calls++;
         return n < script.length
-          ? { content: "", toolCalls: [{ id: `call-${n}`, name: "call_paid_service", arguments: { n } }] }
+          ? { content: "", toolCalls: [{ id: `call-${n}`, name: "call_paid_service", arguments: { n, url: `https://seller-${n}.example/api` } }] }
           : { content: "", toolCalls: [{ id: "done", name: "complete_session", arguments: { final_message: "Done" } }] };
       } },
     });
   };
-  const recovered = await run([false, false, true, false, false]);
-  expect(recovered.outcome).toBe("completed");
-  const stopped = await run([false, false, false]);
-  expect(stopped.outcome).toBe("stopped");
-  expect(stopped.summary.final_message).toContain("Stopped after 3 service call failures");
+  expect((await run([false, false, true, false, false])).outcome).toBe("completed");
+  const persisted = await run([false, false, false, false]);
+  expect(persisted.outcome).toBe("completed");
+  expect(persisted.summary.final_message).toBe("Done");
 });
