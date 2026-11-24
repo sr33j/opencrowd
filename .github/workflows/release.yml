@@ -40,6 +40,8 @@ jobs:
     permissions:
       contents: write
       id-token: write
+      # The CrowdCode release gate's verdict is a commit status (below).
+      statuses: read
     env:
       TRAIN: ${{ github.event_name != 'release' }}
       # A run dispatched on any branch but main can only ever be a dry run.
@@ -74,8 +76,33 @@ jobs:
             if (process.env.RELEASE_TAG !== `v${version}`) throw new Error("Release tag must match package version");
           '
 
-      - name: Release checks
+      # Every release first runs CrowdCode's owner-style tasks next to the
+      # current release, and ships only if it is no worse on accuracy and cost
+      # (docs/releases.md). The train looks at `head`, the main commit it cut
+      # from; by hand, the tagged commit (or the commit its version bump sits
+      # on). A train day whose head is not gated releases nothing and says so;
+      # a release by hand fails. A dry run reports the gate and carries on.
+      - name: Require the CrowdCode release gate
+        id: gate
         if: env.TRAIN != 'true' || steps.train.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ env.TRAIN == 'true' && steps.train.outputs.head || github.sha }}
+        run: |
+          if bash scripts/require-release-gate.sh "$COMMIT"; then
+            echo "gated=true" >> "$GITHUB_OUTPUT"
+          elif [ "$DRY_RUN" = "true" ]; then
+            echo "gated=true" >> "$GITHUB_OUTPUT"
+            echo "Dry run: the CrowdCode release gate has not passed ${COMMIT:0:12}; a real run would stop here." >> "$GITHUB_STEP_SUMMARY"
+          elif [ "$TRAIN" = "true" ]; then
+            echo "gated=false" >> "$GITHUB_OUTPUT"
+            echo "Not released today: the CrowdCode release gate has not passed ${COMMIT:0:12} (docs/releases.md)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            exit 1
+          fi
+
+      - name: Release checks
+        if: (env.TRAIN != 'true' || steps.train.outputs.release == 'true') && steps.gate.outputs.gated == 'true'
         run: |
           npm ci
           npm run typecheck
@@ -89,7 +116,7 @@ jobs:
       # moved while they ran, the push is refused and nothing is tagged or
       # published; the next run (or a re-run) cuts again from the new main.
       - name: Commit, tag and create the GitHub Release
-        if: env.TRAIN == 'true' && steps.train.outputs.release == 'true' && env.DRY_RUN != 'true'
+        if: env.TRAIN == 'true' && steps.train.outputs.release == 'true' && steps.gate.outputs.gated == 'true' && env.DRY_RUN != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.train.outputs.version }}
@@ -107,5 +134,5 @@ jobs:
       # Only the CLI is published; internal workspace packages carry no
       # semver-stability promise and are inlined into the CLI bundle.
       - name: Publish to npm
-        if: (env.TRAIN != 'true' || steps.train.outputs.release == 'true') && env.DRY_RUN != 'true'
+        if: (env.TRAIN != 'true' || steps.train.outputs.release == 'true') && steps.gate.outputs.gated == 'true' && env.DRY_RUN != 'true'
         run: npm publish --workspace opencrowd --provenance --access public
