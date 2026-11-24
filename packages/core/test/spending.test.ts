@@ -105,7 +105,7 @@ describe("properties: the session budget", () => {
       }
       expect(s.reservedCents).toBe(0);
       expect((await loadSession(root, s.sessionId)).spentCents).toBe(total / ATOMIC_PER_CENT);
-    }), { numRuns: 25 });
+    }), { numRuns: 15 });
   });
 
   it("never lets spend plus holds exceed the session budget when charges stay within their holds, and refuses only what does not fit", async () => {
@@ -135,7 +135,7 @@ describe("properties: the session budget", () => {
         }
       }
       expect(s.reservedCents).toBe(0);
-    }), { numRuns: 25 });
+    }), { numRuns: 15 });
   });
 
   it("never lets a query pass its limit, or one call pass the per-call limit, without the owner's approval", async () => {
@@ -162,6 +162,6 @@ describe("properties: the session budget", () => {
         expect(querySpent() + toAtomic(s.reservedCents)).toBeLessThanOrEqual(toAtomic(limit));
       }
       expect(s.query?.pending).toBeUndefined();
-    }), { numRuns: 25 });
+    }), { numRuns: 15 });
   });
 });

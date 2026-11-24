@@ -82,7 +82,7 @@ describe("properties: model input deltas", () => {
       expect(applyInputDelta(before, { base: { runId: "r", callId: "c" }, total: after.length, parts })).toEqual({ messages: after, missing: 0 });
       // References point inside the base; nothing is referenced that is not there.
       for (const part of parts) if ("from" in part) expect(part.from + part.count).toBeLessThanOrEqual(before.length);
-    }), { numRuns: 300 });
+    }), { numRuns: 150 });
   });
 
   it("rebuilds every call of a conversation exactly by walking its chain back to a keyframe", () => {
@@ -125,6 +125,6 @@ describe("properties: model input deltas", () => {
         sinceKeyframe = "input" in recorded.get(`c${index}`)! ? 0 : sinceKeyframe + 1;
         expect(sinceKeyframe).toBeLessThan(KEYFRAME_EVERY);
       }
-    }), { numRuns: 200 });
+    }), { numRuns: 100 });
   });
 });

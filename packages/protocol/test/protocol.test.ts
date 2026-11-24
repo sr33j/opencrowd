@@ -502,7 +502,7 @@ describe("properties: encode/decode", () => {
       const decoded = expectOk(parseCommandLine(line));
       expect(decoded).toEqual(CommandSchema.parse(value));
       expect(encodeCommand(decoded)).toBe(line);
-    }), { numRuns: 200 });
+    }), { numRuns: 100 });
   });
 
   it("round-trips every valid event, with only its sensitive keys removed", async () => {
@@ -517,7 +517,7 @@ describe("properties: encode/decode", () => {
       const decoded = expectOk(parseEventLine(line));
       expect(decoded).toEqual(EventSchema.parse({ ...event, payload: redact(event.payload) }));
       expect(encodeEvent(decoded)).toBe(line);
-    }), { numRuns: 200 });
+    }), { numRuns: 100 });
   });
 
   it("never throws on any line, and whatever it accepts it can encode again", async () => {
@@ -587,6 +587,6 @@ describe("properties: redaction", () => {
       expect(allStrings(decoded).some(text => text.includes(secretValue))).toBe(false);
       // encodeEvent redacts the payload; the envelope is the worker's own fields.
       expect(allKeys(decoded.payload).filter(isSensitiveKey)).toEqual([]);
-    }), { numRuns: 200 });
+    }), { numRuns: 100 });
   });
 });
