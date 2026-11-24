@@ -40,8 +40,6 @@ jobs:
     permissions:
       contents: write
       id-token: write
-      # The CrowdCode release gate's verdict is a commit status (below).
-      statuses: read
     env:
       TRAIN: ${{ github.event_name != 'release' }}
       # A run dispatched on any branch but main can only ever be a dry run.
@@ -86,7 +84,6 @@ jobs:
         id: gate
         if: env.TRAIN != 'true' || steps.train.outputs.release == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           COMMIT: ${{ env.TRAIN == 'true' && steps.train.outputs.head || github.sha }}
         run: |
           if bash scripts/require-release-gate.sh "$COMMIT"; then

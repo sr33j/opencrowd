@@ -20,8 +20,8 @@ Every day at 15:00 UTC the `Release` workflow runs `scripts/release-train.mjs`:
    writes one CHANGELOG section from the fragments (oldest first; the commit
    subjects when there are none) and deletes them.
 3. **It requires the CrowdCode release gate** on the main commit it cut from
-   (below). Without a `success`, it releases nothing that day and says so in
-   the run's summary.
+   (below). Without a `passed` verdict, it releases nothing that day and says
+   so in the run's summary.
 4. It runs the release checks: `npm ci`, `typecheck`, `deadcode`, `test`,
    `smoke`, the command-docs check and `smoke:pack`.
 5. It commits `Release opencrowd <version>` to `main`, tags `v<version>`,
@@ -47,10 +47,11 @@ cost. From the CrowdCode repository, on the commit the train will cut from
 cd app && npx tsx scripts/release-gate.ts --rc <commit>
 ```
 
-It takes about 40 minutes and about $0.20 (at most $0.80), and posts the
-`crowdcode/release-gate` status on the commit.
-`scripts/require-release-gate.sh <commit>` is what the workflow checks: a
-`success` on the commit, or on one it differs from only in version and
+It takes about 40 minutes and about $0.20 (at most $0.80), and records the
+verdict as an annotated tag on the commit, `release-gate/<full sha>`, whose
+subject is `passed` or `held`. Only someone who can push here can write one.
+`scripts/require-release-gate.sh <commit>` is what the workflow checks:
+`passed` on the commit, or on one it differs from only in version and
 changelog files. If the gate cannot run, an operator records an override
 (`--override <commit> --reason "…"`). CrowdCode's
 `design-docs/TREE_GATE.md` has the rule and what each task checks.
