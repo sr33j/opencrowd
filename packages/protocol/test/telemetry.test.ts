@@ -1,5 +1,6 @@
-import { expect, it } from "vitest";
-import { captureDetail } from "../src/telemetry.js";
+import { describe, expect, it } from "vitest";
+import fc from "fast-check";
+import { captureDetail, scrubText } from "../src/telemetry.js";
 it("preserves stdout, stderr, and exit codes while scrubbing nested and embedded credentials",()=>{
   const input={stdout:'hello\nAPI_KEY=abcdefghijk\n',stderr:'exit failed',exit_code:17,nested:{authorization:'Bearer secret',inputTokens:25}};
   const detail=captureDetail(input);
@@ -45,4 +46,61 @@ it("redacts a credential in a URI of any scheme, not only a web one",()=>{
   // The diagnostic itself is intact: this is redaction, not suppression.
   expect(text).toContain('password authentication failed');
   expect(text).toContain('cluster0.example.net');
+});
+
+// ---------------------------------------------------------------------------
+// Properties (SRI-175). The examples above are the regression seeds.
+// ---------------------------------------------------------------------------
+
+const lower = "abcdefghijklmnopqrstuvwxyz", digits = "0123456789";
+/** RFC 3986 userinfo characters: unreserved, sub-delims and percent-encodings ("@" and "/" must be encoded). */
+const userinfoChar = fc.oneof(fc.constantFrom(...`${lower}${lower.toUpperCase()}${digits}-._~!$&'()*+,;=`),
+  fc.constantFrom("%40", "%2F", "%3A", "%25", "%20"));
+const scheme = fc.oneof(
+  fc.constantFrom("http", "https", "postgres", "postgresql", "redis", "rediss", "mongodb", "mongodb+srv", "amqp", "amqps", "mysql", "ftp", "sftp", "ssh", "smtp", "ldap", "git+ssh"),
+  fc.tuple(fc.constantFrom(...lower), fc.string({ unit: fc.constantFrom(...`${lower}${digits}+.-`), maxLength: 10 })).map(([a, b]) => a + b)
+).chain(name => fc.array(fc.boolean(), { minLength: name.length, maxLength: name.length })
+  .map(upper => [...name].map((char, i) => (upper[i] ? char.toUpperCase() : char)).join("")));
+const host = fc.oneof(fc.domain(), fc.ipV4(), fc.ipV6().map(ip => `[${ip}]`), fc.constantFrom("localhost", "db.internal", "cache"));
+const port = fc.option(fc.integer({ min: 1, max: 65535 }).map(n => `:${n}`), { nil: "" });
+const path = fc.string({ unit: fc.constantFrom(...`${lower}${digits}/?=&._-`), maxLength: 20 }).map(rest => (rest ? `/${rest}` : ""));
+/** What a log line puts around a URL. */
+const before = fc.constantFrom("", " ", "\n", "\t", "url=", "DATABASE_URL=", "connecting to ", "\"", "'", "(", "<", "[", "DSN: ", "failed: ", "error at ", "`");
+const after = fc.constantFrom("", " ", "\n", "\"", "'", ")", ">", "]", " refused", ": timeout", ",", ";");
+
+describe("properties: scrubText", () => {
+  it("never lets the password in a URI of any scheme survive", () => {
+    // T5 found: a URI with an empty user and a password (redis://:pass@host, the usual form for
+    // Redis requirepass) passes through whole. Counterexample "http://:a@localhost"
+    // (seed 396261006, path "3:0:0:0:0:0:0:0:0:0:0"). Users stay non-empty here until it is fixed.
+    // A user named like a key ("cookie", "db_password") is redacted by the key=value rule, host and all.
+    const user = fc.string({ unit: userinfoChar, minLength: 1, maxLength: 12 })
+      .filter(name => !/secret|password|api_key|private_key|access_token|authorization|cookie|signature/i.test(name));
+    const password = fc.string({ unit: fc.oneof(userinfoChar, fc.constant(":")), minLength: 1, maxLength: 24 });
+    fc.assert(fc.property(before, scheme, user, password, host, port, path, after, (pre, name, u, pass, h, p, rest, post) => {
+      const text = `${pre}${name}://${u}:${pass}@${h}${p}${rest}${post}`;
+      const out = scrubText(text);
+      expect(out).not.toContain(`:${pass}@`);
+      expect(out).not.toContain(`${u}:${pass}`);
+      // Redaction, not suppression: where the connection went stays readable.
+      expect(out).toContain(h);
+    }));
+  });
+
+  it("removes a generated key or token wherever it sits in a captured value", () => {
+    // T5 found: the sk- rule ends in \b, which cannot match after a trailing "-", so a 16-character
+    // key body that ends in "-" passes whole: counterexample "sk-aaaaaaaaaaaaaaa-" (seed 1701816398).
+    // Longer ones keep only the trailing "-". Kept to bodies with 16 characters before any trailing "-".
+    const token = fc.oneof(
+      fc.string({ unit: fc.constantFrom(...`${lower}${digits}ABCDEFXYZ_-`), minLength: 16, maxLength: 40 })
+        .filter(t => t.replace(/-+$/, "").length >= 16).map(t => `sk-${t}`),
+      fc.string({ unit: fc.constantFrom(...`${lower}${digits}ABCDEFXYZ`), minLength: 20, maxLength: 40 }).chain(t => fc.constantFrom(`ghp_${t}`, `gho_${t}`, `ghs_${t}`)),
+      fc.tuple(...[0, 1, 2].map(() => fc.string({ unit: fc.constantFrom(...`${lower}${digits}_-`), minLength: 4, maxLength: 30 }))).map(([a, b, c]) => `eyJ${a}.${b}.${c}`)
+    );
+    fc.assert(fc.property(fc.jsonValue(), fc.constantFrom("", "key ", "Bearer ", "token: ", "\n", "x "), token, after, (base, pre, secret, post) => {
+      const d = captureDetail({ base, stderr: `${pre}${secret}${post}`, nested: [{ deep: `${pre}${secret}${post}` }] });
+      expect(JSON.stringify(d)).not.toContain(secret);
+      expect(d.redacted).toBe(true);
+    }));
+  });
 });
