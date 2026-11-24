@@ -10,6 +10,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The release train bumps the version and writes CHANGELOG once a day;
+      # a pull request adds changes/<branch>.md instead (docs/releases.md).
+      - name: The version and CHANGELOG are the release train's
+        if: github.event_name == 'pull_request'
+        run: node scripts/release-train.mjs check-pr "${{ github.event.pull_request.base.sha }}"
       - uses: actions/setup-node@v4
         with:
           node-version: 22

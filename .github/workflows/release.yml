@@ -1,24 +1,74 @@
 name: Release
 
+# One workflow publishes opencrowd to npm, because npm's trusted publisher is
+# this file (GitHub OIDC; no NPM_TOKEN exists). It runs three ways:
+#
+# - **The release train**, daily at 15:00 UTC: `scripts/release-train.mjs`
+#   decides whether anything shipped since the last tag. If so it bumps the
+#   patch, writes CHANGELOG from the `changes/*.md` fragments, runs the release
+#   checks, then commits to main, tags, creates the GitHub Release and
+#   publishes. Nothing to release is a green run that says so.
+# - **An urgent release**: the same, now, from the Actions tab or
+#   `gh workflow run release.yml --repo sr33j/opencrowd`. The owner calls it.
+#   `dry_run` cuts and checks without pushing or publishing; so does a run
+#   dispatched on any branch other than main.
+# - **A GitHub Release published by hand**, as before: it checks the tag
+#   matches the version and publishes. A release the train creates does not
+#   trigger this again (GitHub does not start workflows for GITHUB_TOKEN's
+#   events), so nothing is published twice.
 on:
+  schedule:
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Cut and check, but do not push, tag or publish"
+        type: boolean
+        default: false
   release:
     types: [published]
 
+# One release at a time, and never cancelled halfway through a publish.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   publish:
-    if: ${{ !github.event.release.prerelease }}
+    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
+    env:
+      TRAIN: ${{ github.event_name != 'release' }}
+      # A run dispatched on any branch but main can only ever be a dry run.
+      DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && (inputs.dry_run || github.ref != 'refs/heads/main') }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # The train cuts from main (or, dry, from the branch it was dispatched
+          # on) and needs the tags to find the last release.
+          ref: ${{ github.event_name == 'schedule' && 'main' || github.ref }}
+          fetch-depth: 0
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+
+      - name: Cut today's release
+        id: train
+        if: env.TRAIN == 'true'
+        run: |
+          node scripts/release-train.mjs apply
+          {
+            echo "### Release train"
+            node -e 'const p=require("./apps/cli/package.json");console.log("Version: "+p.version)'
+            [ -f .release-notes.md ] && cat .release-notes.md
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Verify release tag matches package version
+        if: env.TRAIN != 'true'
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
@@ -27,13 +77,39 @@ jobs:
             const { version } = JSON.parse(readFileSync("apps/cli/package.json", "utf8"));
             if (process.env.RELEASE_TAG !== `v${version}`) throw new Error("Release tag must match package version");
           '
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run deadcode
-      - run: npm test
-      - run: npm run smoke
-      - run: node scripts/generate-command-docs.mjs --check
-      - run: npm run smoke:pack
+
+      - name: Release checks
+        if: env.TRAIN != 'true' || steps.train.outputs.release == 'true'
+        run: |
+          npm ci
+          npm run typecheck
+          npm run deadcode
+          npm test
+          npm run smoke
+          node scripts/generate-command-docs.mjs --check
+          npm run smoke:pack
+
+      # The train's commit lands on main only after the checks pass. If main
+      # moved while they ran, the push is refused and nothing is tagged or
+      # published; the next run (or a re-run) cuts again from the new main.
+      - name: Commit, tag and create the GitHub Release
+        if: env.TRAIN == 'true' && steps.train.outputs.release == 'true' && env.DRY_RUN != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.train.outputs.version }}
+          HEAD_SHA: ${{ steps.train.outputs.head }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A apps/cli/package.json package-lock.json CHANGELOG.md changes
+          git commit -m "Release opencrowd $VERSION" -m "Cut by the release train from $HEAD_SHA."
+          git push origin "HEAD:refs/heads/main"
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --verify-tag --title "opencrowd $VERSION" --notes-file .release-notes.md
+
       # Only the CLI is published; internal workspace packages carry no
       # semver-stability promise and are inlined into the CLI bundle.
-      - run: npm publish --workspace opencrowd --provenance --access public
+      - name: Publish to npm
+        if: (env.TRAIN != 'true' || steps.train.outputs.release == 'true') && env.DRY_RUN != 'true'
+        run: npm publish --workspace opencrowd --provenance --access public
