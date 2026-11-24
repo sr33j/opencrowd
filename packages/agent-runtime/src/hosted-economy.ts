@@ -24,7 +24,7 @@ import {
   createCrowdCodeApi,
   crowdcodeApiBase
 } from "@opencrowd/economy";
-import { SERVICE_GATEWAY_TIMEOUT_MS, withDeadline } from "@opencrowd/protocol";
+import { SERVICE_GATEWAY_TIMEOUT_MS, redactHarnessFeedbackText, withDeadline } from "@opencrowd/protocol";
 import { HostedToolTimeout, postHostedTool, type HostedBridgeOptions } from "./hosted-provider.js";
 import {
   HOSTING_RESERVE_USD, PLAN_FUNDING_TOOL, PLAN_INFERENCE_ALLOWANCE_USD, describePlan, planTaskFunding,
@@ -307,7 +307,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
           status,
           data: decodeBody(data.body, data.content_type),
           authMode: "free",
-          error: ok ? undefined : `the service answered HTTP ${status ?? "?"}`,
+          error: ok ? undefined : `the service answered HTTP ${status ?? "?"}${sellerSays(data.body, data.content_type)}`,
           note: stringValue(data.note) ?? "Not charged: the seller answered without taking the payment, so nothing is held."
         };
       }
@@ -322,7 +322,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
           status,
           data: decodeBody(data.body, data.content_type),
           authMode: "free",
-          error: ok ? undefined : `the service answered HTTP ${status ?? "?"} to a signed identity proof`,
+          error: ok ? undefined : `the service answered HTTP ${status ?? "?"} to a signed identity proof${sellerSays(data.body, data.content_type)}`,
           note: `Free: the service asked only for proof of which wallet is calling (a zero-amount MPP challenge on ${stringValue(data.network) ?? "tempo"}). CrowdCode signed it; no USDC moved and no balance was needed on any network, so never move funds for a call like this.`
         };
       }
@@ -336,7 +336,7 @@ export class HostedAgentCashAdapter implements AgentCashAdapter {
         status,
         data: decodeBody(data.body, data.content_type),
         authMode: "paid",
-        error: outcome === "paid_success" ? undefined : `the paid call returned HTTP ${status ?? "?"}`,
+        error: outcome === "paid_success" ? undefined : `the paid call returned HTTP ${status ?? "?"}${sellerSays(data.body, data.content_type)}`,
         payment: {
           rail: network ? railForNetwork(network) ?? "unsupported" : "x402-base",
           paidUsd: paidAtomic === undefined ? undefined : paidAtomic / USDC_ATOMIC_PER_USD,
@@ -863,6 +863,38 @@ function parseListedService(raw: unknown): ListedService | undefined {
     unproven: typeof (row.unproven ?? service.unproven) === "boolean" ? Boolean(row.unproven ?? service.unproven) : undefined,
     num_reviews: numberValue(row.num_reviews ?? service.num_reviews)
   };
+}
+
+/**
+ * The seller's own words about a failed call, for the error line: ": <its
+ * message>", truncated and scrubbed, or "" when it said nothing readable.
+ *
+ * Run adf318ab's model read "the service answered HTTP 400" from two image
+ * services. The answers said why ("The model's content check refused this
+ * prompt… Flagged: sexual", "rejected by the safety system"), which tells a
+ * content refusal (switch provider) from a malformed request (fix it). The
+ * whole body is still in the result's data; this puts the reason where a
+ * model reads first, and where a body too long to keep still leaves it.
+ */
+export function sellerSays(body: unknown, contentType?: unknown): string {
+  let decoded = decodeBody(body, contentType);
+  if (typeof decoded === "string" && /^\s*[[{]/.test(decoded)) { try { decoded = JSON.parse(decoded); } catch { /* text it is */ } }
+  const pick = (value: unknown, depth = 0): string | undefined => {
+    if (typeof value === "string") return value.trim() || undefined;
+    if (!value || typeof value !== "object" || Array.isArray(value) || depth > 3) return undefined;
+    const record = value as Record<string, unknown>;
+    for (const key of ["message", "error", "detail", "error_description", "reason", "title", "errors"]) {
+      const found = Array.isArray(record[key]) ? pick((record[key] as unknown[])[0], depth + 1) : pick(record[key], depth + 1);
+      if (found) return found;
+    }
+    return undefined;
+  };
+  const text = pick(decoded) ?? (typeof decoded === "string" ? decoded : undefined);
+  if (!text) return "";
+  // An HTML error page says nothing a model can act on beyond its status.
+  if (/^\s*<(?:!doctype|html)/i.test(text)) return "";
+  const line = redactHarnessFeedbackText(text.replace(/\s+/g, " ").trim());
+  return `: ${line.length > 300 ? `${line.slice(0, 300)}…` : line}`;
 }
 
 function endpointKey(url: string): string {

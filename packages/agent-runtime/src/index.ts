@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
-import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, type ActionPolicy, type FinancialState } from "@opencrowd/protocol";
+import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, CROWDCODE_STOP, type ActionPolicy, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState, type ModelPrices } from "./context.js";
 import { inferenceSpent, moneyLine, newMoneyTrack, trackModelCall } from "./money-line.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
 import { checkAction, isStandingRuleRefusal, newPolicyState } from "./action-policy.js";
-import { earlyStopNudge, emptyServiceLog, endpointKey, recordServiceResult, repeatedDiscovery, type ServiceLog } from "./service-strategy.js";
+import { earlyStopNudge, emptyServiceLog, recordServiceResult, repeatedDiscovery, type ServiceLog } from "./service-strategy.js";
 import {
   atomicWrite,
   conversationPath,
@@ -59,6 +59,7 @@ export * from "./non-answer.js";
 import { isNonAnswer } from "./non-answer.js";
 import { heldStopNudge, unresolvedHoldsNote, withHoldsNote } from "./unresolved-holds.js";
 import { fallbackNote } from "./model-fallback.js";
+import { newPersistenceState, recordResult, recordTurn, refuseRepeat, strategyNudge, wrapUpPrompt, wrapUpReason, type PersistenceState } from "./persistence.js";
 
 export interface LlmMessage {
   /** Internal archive marker; adapters omit it from provider requests. */
@@ -700,8 +701,11 @@ export interface LoopCheckpoint {
   answerNudges?: number;
   outputContinuationNudges: number;
   outputContinuationPrefix: string;
-  serviceCallFailures: number;
-  repeatedFailures: Array<[string, number]>;
+  /** Written by runtimes before 0.16.50, whose loop stopped on failure counts; read by none now. */
+  serviceCallFailures?: number;
+  repeatedFailures?: Array<[string, number]>;
+  /** What failed in this run, and whether CrowdCode has asked it to wrap up (persistence.ts). */
+  persistence?: PersistenceState;
   /** Paid services this run inspected and called, and their empty answers (SRI-119). */
   serviceLog?: ServiceLog;
   /** Times the run was asked about stopping early with most of its budget left. */
@@ -927,6 +931,9 @@ export async function runAgentTaskDetailed(session: SessionState, task: string, 
   return message === result.summary.final_message ? result : { ...result, summary: { ...result.summary, final_message: message } };
 }
 
+/** Continuations of an answer cut off by the model's output limit before it is delivered as it stands. */
+const OUTPUT_CONTINUATIONS = 3;
+
 async function runAgentTaskLoop(session: SessionState, task: string, options: AgentRunOptions = {}): Promise<AgentTaskResult> {
   const enabledTools: ToolName[] = options.chatOnly ? [] : options.tools
     // list_files is read_file on a folder now: its slot went to publish_site (SRI-166), still within 32 tools.
@@ -1074,7 +1081,6 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   if (!options.resume) await options.onMessage?.({ role: "user", content: task });
 
   const maxTurns = options.maxTurns ?? 100;
-  const repeatedFailures = new Map<string, number>(options.resume?.repeatedFailures);
   let completionNudges = options.resume?.completionNudges ?? 0;
   let pendingFinalMessage = options.resume?.pendingFinalMessage;
   // Once a completion gate holds a finished answer, the extra turn it buys is
@@ -1085,7 +1091,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   let supersededFinalMessage: string | undefined;
   let outputContinuationNudges = options.resume?.outputContinuationNudges ?? 0;
   let outputContinuationPrefix = options.resume?.outputContinuationPrefix ?? "";
-  let serviceCallFailures = options.resume?.serviceCallFailures ?? 0;
+  const persistence: PersistenceState = structuredClone(options.resume?.persistence ?? newPersistenceState());
   const serviceLog: ServiceLog = structuredClone(options.resume?.serviceLog ?? emptyServiceLog());
   let earlyStopNudges = options.resume?.earlyStopNudges ?? 0;
   // Which page each browser session is on, for the standing-rule check (SRI-166).
@@ -1094,8 +1100,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   const deliveredMessageIds = new Set(options.resume?.deliveredMessageIds ?? []);
   const checkpoint = async (turn: number, response?: LlmResponse, completedTools: Record<string, ToolResult> = {}) => {
     await options.onCheckpoint?.(structuredClone({ messages, turn, response, completedTools, context: contextState, deliveredMessageIds: [...deliveredMessageIds],
-      completionNudges, pendingFinalMessage, finalAnswerHeld, answerNudges, outputContinuationNudges, outputContinuationPrefix, serviceCallFailures,
-      repeatedFailures: [...repeatedFailures.entries()], serviceLog, earlyStopNudges, heldStopNudges }));
+      completionNudges, pendingFinalMessage, finalAnswerHeld, answerNudges, outputContinuationNudges, outputContinuationPrefix,
+      persistence, serviceLog, earlyStopNudges, heldStopNudges }));
   };
   const injectMessages = async (turn: number) => {
     const pending = await options.inbox?.pending() ?? [];
@@ -1157,6 +1163,35 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     if (backgroundSubagents.size > 0) summary.background_subagents = await drainBackground();
     return { outcome: "completed", summary, turns: turn + 1 };
   };
+  /** CrowdCode ends the run: the next turn may only deliver (persistence.ts). */
+  const beginWrapUp = async (turn: number, reason: string, kind: "max_turns" | "no_progress") => {
+    persistence.wrapUp = { reason, turn, kind };
+    const message = { role: "user", content: wrapUpPrompt(reason) } as LlmMessage;
+    messages.push(message);
+    await options.onMessage?.(message);
+    await checkpoint(turn);
+  };
+  /**
+   * The run's answer, with why CrowdCode ended it. Not "the user stopped it":
+   * run adf318ab ended on a failure breaker and its owner read "User stopped".
+   */
+  const finishWrapUp = async (turn: number, answer: string | undefined): Promise<AgentTaskResult> => {
+    const reason = persistence.wrapUp?.reason ?? "it could not continue.";
+    const text = [answer?.trim(), `${CROWDCODE_STOP}${reason}`].filter(Boolean).join("\n\n");
+    if (backgroundSubagents.size > 0) await drainBackground();
+    const summary = await completeSession(session, text);
+    return { outcome: persistence.wrapUp?.kind === "max_turns" ? "max_turns" : "stopped", summary, turns: turn + 1 };
+  };
+  /** Once per run, an empty ending is answered with a request for the answer. */
+  const askForAnswer = async (turn: number) => {
+    if ((persistence.emptyAnswers ?? 0) >= 1) return false;
+    persistence.emptyAnswers = (persistence.emptyAnswers ?? 0) + 1;
+    const message = { role: "user", content: "CrowdCode: your last reply was empty, and the owner sees only your final answer. Continue the task, or call complete_session with the complete answer: what you found or did, and anything still blocked." } as LlmMessage;
+    messages.push(message);
+    await options.onMessage?.(message);
+    await checkpoint(turn + 1);
+    return true;
+  };
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
   const subagentLimiter = createLimiter(options.subagent?.maxParallel ?? 4);
@@ -1177,6 +1212,12 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     // Never change a checkpointed paid request on resume, or split an
     // assistant tool-call batch from its results with a user message.
     if (!restored) await injectMessages(turn);
+    // A wrap-up that produced no answer in two turns ends with what the run has.
+    if (!restored && persistence.wrapUp && turn > persistence.wrapUp.turn + 1) return finishWrapUp(turn - 1, pendingFinalMessage);
+    // The last turn of a long run delivers what it has, instead of ending on a line about turns.
+    if (!restored && turn === maxTurns - 1 && turn > 0 && !persistence.wrapUp && !holding() && !options.chatOnly) {
+      await beginWrapUp(turn, `it reached its limit of ${maxTurns} turns.`, "max_turns");
+    }
     const completedTools: Record<string, ToolResult> = Object.assign(Object.create(null), restored?.completedTools ?? {});
     options.onProgress?.({ type: "calling_llm", message: `Calling LLM provider (turn ${turn + 1}/${maxTurns})` });
     let response: LlmResponse;
@@ -1248,11 +1289,12 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     await checkpoint(turn, response, completedTools);
     if (isOutputLimitFinishReason(response.finishReason)) {
       outputContinuationPrefix += response.content;
-      if (outputContinuationNudges >= 1) {
-        if (holding()) return deliverHeld(turn, "the housekeeping turn hit the output limit twice");
+      // A long answer is continued, not cut off: three continuations before CrowdCode delivers the partial text.
+      if (outputContinuationNudges >= OUTPUT_CONTINUATIONS) {
+        if (holding()) return deliverHeld(turn, "the housekeeping turn hit the output limit repeatedly");
         const summary = await completeSession(
           session,
-          `Stopped: the LLM hit its output limit twice. Partial response:\n\n${outputContinuationPrefix}`
+          `${outputContinuationPrefix}\n\n${CROWDCODE_STOP}the model hit its output limit ${OUTPUT_CONTINUATIONS + 1} times in a row; the answer above is as far as it got.`
         );
         return { outcome: "stopped", summary, turns: turn + 1 };
       }
@@ -1272,6 +1314,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       const finalMessage = response.content.trim()
         ? outputContinuationPrefix + response.content : pendingFinalMessage ?? outputContinuationPrefix;
       recordFinalMessage(finalMessage);
+      if (persistence.wrapUp && turn >= persistence.wrapUp.turn) return finishWrapUp(turn, stripReasoning(finalMessage));
       const { blocker, revise } = gateParts(options.chatOnly ? undefined : await options.completionGate?.(completionNudges > 0,
         completionSignals(messages, task, turn + 1, pendingFinalMessage)));
       const unanswered = answerNudges < 1 && placeholder();
@@ -1279,7 +1322,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         if (completionNudges >= 1) {
           hold();
           if (holding()) return deliverHeld(turn, `the completion gate still blocks: ${blocker}`);
-          const summary = await completeSession(session, `Stopped: ${blocker}`);
+          const summary = await completeSession(session, [pendingFinalMessage?.trim(), `${CROWDCODE_STOP}${blocker}`].filter(Boolean).join("\n\n"));
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
         completionNudges += 1;
@@ -1294,7 +1337,12 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         await checkpoint(turn + 1);
         continue;
       }
-      if (!pendingFinalMessage?.trim()) throw new Error("The model ended without an answer.");
+      if (!pendingFinalMessage?.trim()) {
+        // An empty reply is asked about, not turned into "Something went wrong" (persistence.ts).
+        if (await askForAnswer(turn)) continue;
+        persistence.wrapUp ??= { reason: "the model returned no answer twice in a row.", turn, kind: "no_progress" };
+        return finishWrapUp(turn, undefined);
+      }
       const summary = withReflection(await completeSession(session, pendingFinalMessage));
       return { outcome: "completed", summary, turns: turn + 1 };
     }
@@ -1336,10 +1384,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         }
       }
     }
-    // One endpoint failing a parallel batch is one failure, not one per call:
-    // three calls to a seller that is down ended a run before it could try
-    // another service (SRI-119).
-    const failedEndpoints = new Set<string>();
+    // What this batch achieved, for the no-progress count (persistence.ts).
+    const batchResults: { name: string; ok: boolean }[] = [];
     for (const call of response.toolCalls) {
       options.signal?.throwIfAborted();
       options.onProgress?.({
@@ -1361,6 +1407,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         }
         : baseArguments;
       let result: ToolResult;
+      let refused = false;
       try {
         if (completedTools[call.id]) {
           result = completedTools[call.id];
@@ -1369,6 +1416,14 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         } else if (options.actionPolicy && checkAction(options.actionPolicy, policyState, call.name, callArguments)) {
           // The owner's standing no-action rule, enforced before any tool runs (SRI-166).
           result = { ok: false, error: checkAction(options.actionPolicy, policyState, call.name, callArguments)! };
+          refused = true;
+        } else if (persistence.wrapUp && turn >= persistence.wrapUp.turn && call.name !== "complete_session") {
+          result = { ok: false, error: "Not run: CrowdCode is ending this run, and only complete_session runs now. Deliver your answer with it." };
+          refused = true;
+        } else if (!completedTools[call.id] && refuseRepeat(persistence, call.name, callArguments, serviceLog.inspected)) {
+          // Never the same failing paid call twice, nor a failed endpoint uninspected (persistence.ts).
+          result = { ok: false, error: refuseRepeat(persistence, call.name, callArguments, serviceLog.inspected)! };
+          refused = true;
         } else if (call.name === "spawn_subagent") {
           try {
             result = options.subagent
@@ -1417,7 +1472,11 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         const hint = recordServiceResult(serviceLog, call.name, callArguments, result);
         if (hint && result.data && typeof result.data === "object" && !Array.isArray(result.data))
           result = { ...result, data: { strategy_hint: hint, ...result.data as Record<string, unknown> } };
+        // A failure changes the run's strategy; it never ends the run (persistence.ts).
+        const strategy = recordResult(persistence, call.name, callArguments, result, refused || isStandingRuleRefusal(result.error));
+        if (strategy) result = { ...result, error: `${result.error ?? "failed"}\n\nWhat to do next: ${strategy}` };
       }
+      batchResults.push({ name: call.name, ok: result.ok });
       await refreshFinancialState(); // includes a settled service payment and changed approvals
       const budgetAfterToolCall = currentBudget();
       if (options.financialState && call.name === "get_budget_status") result = { ok: true, data: financial };
@@ -1444,33 +1503,24 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         await checkpoint(turn, response, completedTools);
         await options.onMessage?.(toolMessage);
       }
-      // A successful purchase proves paid services work in this run; only a streak of failures should stop it.
-      if (call.name === "call_paid_service" && result.ok) serviceCallFailures = 0;
-      if (!result.ok) {
-        // A refusal under the owner's standing rule is not a failing service (SRI-166).
-        const failedEndpoint = call.name === "call_paid_service" && !isStandingRuleRefusal(result.error)
-          ? endpointKey(callArguments.url, callArguments.method) ?? "" : undefined;
-        if (failedEndpoint !== undefined && !failedEndpoints.has(failedEndpoint)) {
-          failedEndpoints.add(failedEndpoint);
-          serviceCallFailures += 1;
-          if (serviceCallFailures >= 3) {
-            if (holding()) return deliverHeld(turn, `paid service calls failed ${serviceCallFailures} times: ${result.error}`);
-            const summary = await completeSession(session, `Stopped after ${serviceCallFailures} service call failures. Last error: ${result.error}`);
-            return { outcome: "stopped", summary, turns: turn + 1 };
-          }
-        }
-        const key = `${call.name}:${JSON.stringify(call.arguments)}:${result.error}`;
-        const count = (repeatedFailures.get(key) ?? 0) + 1;
-        repeatedFailures.set(key, count);
-        if (count >= 2) {
-          if (holding()) return deliverHeld(turn, `${call.name} failed repeatedly: ${result.error}`);
-          const summary = await completeSession(session, `Stopped because ${call.name} failed repeatedly: ${result.error}`);
-          return { outcome: "stopped", summary, turns: turn + 1 };
-        }
-      }
     }
     // Finish the entire tool batch before injecting messages or completing.
     const completionCall = response.toolCalls.find(call => call.name === "complete_session");
+    // Failures change strategy; only a long streak with nothing working ends the run, and then it delivers.
+    if (!restored) recordTurn(persistence, batchResults);
+    if (!completionCall && !persistence.wrapUp && !holding()) {
+      const reason = wrapUpReason(persistence);
+      if (reason) await beginWrapUp(turn + 1, reason, "no_progress");
+      else {
+        const nudge = strategyNudge(persistence);
+        if (nudge) {
+          const nudgeMessage = { role: "user", content: nudge } as LlmMessage;
+          messages.push(nudgeMessage);
+          await options.onMessage?.(nudgeMessage);
+          await checkpoint(turn + 1);
+        }
+      }
+    }
     if (completionCall) {
       const call = completionCall;
       const result = completedTools[call.id];
@@ -1480,6 +1530,8 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       const finalMessage = result.data && typeof result.data === "object"
         ? (result.data as Record<string, unknown>).final_message : undefined;
       if (typeof finalMessage === "string") recordFinalMessage(finalMessage);
+      if (persistence.wrapUp && turn >= persistence.wrapUp.turn)
+        return finishWrapUp(turn, typeof finalMessage === "string" ? stripReasoning(finalMessage) : pendingFinalMessage);
       // Stopping with most of the budget left and short of the task's own
       // target is asked about once (SRI-119). The answer is not held: the
       // next complete_session may improve it, or explain why it stops.
@@ -1515,7 +1567,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         if (completionNudges >= 1) {
           hold();
           if (holding()) return deliverHeld(turn, `the completion gate still blocks: ${blocker}`);
-          const summary = await completeSession(session, `Stopped: ${blocker}`);
+          const summary = await completeSession(session, [pendingFinalMessage?.trim(), `${CROWDCODE_STOP}${blocker}`].filter(Boolean).join("\n\n"));
           return { outcome: "stopped", summary, turns: turn + 1 };
         }
         completionNudges += 1;
@@ -1533,7 +1585,12 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         await checkpoint(turn + 1);
         continue;
       }
-      if (!pendingFinalMessage?.trim()) throw new Error("The model ended without an answer.");
+      if (!pendingFinalMessage?.trim()) {
+        // An empty reply is asked about, not turned into "Something went wrong" (persistence.ts).
+        if (await askForAnswer(turn)) continue;
+        persistence.wrapUp ??= { reason: "the model returned no answer twice in a row.", turn, kind: "no_progress" };
+        return finishWrapUp(turn, undefined);
+      }
       const backgroundResults = backgroundSubagents.size > 0 ? await drainBackground() : undefined;
       if (result.data && typeof result.data === "object") {
         const summary = withReflection({ ...result.data, final_message: pendingFinalMessage }) as Record<string, unknown>;
@@ -1556,7 +1613,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   if (backgroundSubagents.size > 0) {
     await drainBackground();
   }
-  const summary = await completeSession(session, "Stopped after reaching the maximum tool loop turns.");
+  const summary = await completeSession(session, [pendingFinalMessage?.trim(), `${CROWDCODE_STOP}it reached its limit of ${maxTurns} turns.`].filter(Boolean).join("\n\n"));
   return { outcome: "max_turns", summary, turns: maxTurns };
 }
 

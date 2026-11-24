@@ -1321,7 +1321,7 @@ describe("completion gating", () => {
     expect(persisted.some((message) => message.role === "user" && message.content.includes("output limit"))).toBe(true);
   });
 
-  it("stops explicitly after two consecutive output-limit responses", async () => {
+  it("continues a cut-off answer three times, then delivers it as far as it got", async () => {
     const root = await tempRoot();
     const session = await createSession({ workspaceRoot: root, budgetCents: 50, approvalMode: "auto" });
     let calls = 0;
@@ -1334,9 +1334,9 @@ describe("completion gating", () => {
 
     const result = await runAgentTaskDetailed(session, "write a very long answer", { provider });
 
-    expect(calls).toBe(2);
+    expect(calls).toBe(4);
     expect(result.outcome).toBe("stopped");
-    expect(String(result.summary.final_message)).toContain("output limit twice");
+    expect(String(result.summary.final_message)).toMatch(/^partial 1partial 2partial 3partial 4\n\nStopped by CrowdCode: the model hit its output limit 4 times/);
   });
 
   it("nudges once, then delivers the held answer while the completion gate still blocks", async () => {

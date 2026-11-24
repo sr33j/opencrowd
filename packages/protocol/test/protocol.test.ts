@@ -12,6 +12,7 @@ import {
   PROTOCOL_VERSION,
   ProtocolEncodeError,
   RUN_OUTCOMES,
+  splitCrowdcodeStop,
   bigIntToUsdcAmount,
   createSeqTracker,
   encodeCommand,
@@ -260,7 +261,15 @@ describe("redaction", () => {
 });
 
 describe("primitives and helpers", () => {
-  it("lists the eleven typed run outcomes and identifies waiting ones", () => {
+  it("splits a summary CrowdCode ended into the delivered answer and its reason", () => {
+    expect(splitCrowdcodeStop("# Story\n\nText.\n\nStopped by CrowdCode: 12 turns in a row made no progress."))
+      .toEqual({ answer: "# Story\n\nText.", reason: "12 turns in a row made no progress." });
+    expect(splitCrowdcodeStop("Stopped by CrowdCode: the model returned no answer twice in a row.")).toEqual({ answer: "", reason: "the model returned no answer twice in a row." });
+    // Words in the middle of an answer are the answer.
+    expect(splitCrowdcodeStop("It said Stopped by CrowdCode: x")).toEqual({ answer: "It said Stopped by CrowdCode: x" });
+  });
+
+  it("lists the twelve typed run outcomes and identifies waiting ones", () => {
     expect(RUN_OUTCOMES).toEqual([
       "completed",
       "idle",
@@ -269,6 +278,7 @@ describe("primitives and helpers", () => {
       "waiting_for_delegation",
       "budget_exhausted",
       "user_stopped",
+      "stopped",
       "payment_unknown",
       "max_turns",
       "failed",
