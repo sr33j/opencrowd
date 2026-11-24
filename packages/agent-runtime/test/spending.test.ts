@@ -1,4 +1,5 @@
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import fc from "fast-check";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -72,4 +73,53 @@ it("checkpoints parallel subagents and shares the parent query budget across an 
   expect((await runtime.runTask(restored, "")).outcome).toBe("completed");
   expect(mainCalls).toBe(2); expect(subPayments).toBe(4); expect(subPayments - paidBefore).toBeLessThanOrEqual(2);
   expect(restored.spentCents).toBe(155);
+});
+
+// Properties (SRI-175). The examples above are the regression seeds.
+describe("properties: BlockRun quotes", () => {
+  const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const quote = (offer: Record<string, unknown>, x402Version = 2) => async () => new Response("", { status: 402, headers: { "payment-required":
+    Buffer.from(JSON.stringify({ x402Version, accepts: [{ scheme: "exact", network: "eip155:8453", asset: USDC, payTo: "0x1111111111111111111111111111111111111111",
+      maxTimeoutSeconds: 300, extra: { name: "USD Coin", version: "2" }, ...offer }] })).toString("base64") } });
+  const ask = async (offer: Record<string, unknown>, x402Version?: number) => {
+    const fetcher = vi.fn(quote(offer, x402Version));
+    const authorize = vi.fn(async (_cents: number, _identity: string) => { throw new Error("pending human approval"); });
+    const outcome = await new BlockRunProvider({ fetchImpl: fetcher as typeof fetch })
+      .complete({ model: "test", messages: [{ role: "user", content: "hi" }], tools: [], authorizePayment: authorize }).catch((error: Error) => error.message);
+    return { outcome, authorize, fetcher };
+  };
+  const caseOf = (text: string, upper: boolean[]) => [...text].map((c, i) => (upper[i] ? c.toUpperCase() : c.toLowerCase())).join("");
+
+  it("asks the owner for exactly the quoted amount, and signs and submits nothing until they answer", async () => {
+    // T5 found: the approval carries cents as a float (amount / 10000), so above about 2.25e15 atomic
+    // units ($2.25 billion) the owner is asked for one atomic unit more or less than is signed
+    // (counterexample 7671387206000351n, seed -1693856282). Kept to 10^15 atomic ($1 billion).
+    const amount = fc.oneof(fc.constantFrom(1n, 9_999n, 10_000n, 1_500_000n, 10n ** 15n), fc.bigInt({ min: 1n, max: 10_000_000n }),
+      fc.bigInt({ min: 1n, max: 10n ** 15n }));
+    await fc.assert(fc.asyncProperty(amount, fc.array(fc.boolean(), { minLength: 42, maxLength: 42 }), async (atomic, upper) => {
+      const { outcome, authorize, fetcher } = await ask({ amount: String(atomic), asset: `0x${caseOf(USDC.slice(2), upper.slice(2))}` });
+      expect(outcome).toBe("pending human approval");
+      expect(authorize).toHaveBeenCalledTimes(1);
+      const cents = authorize.mock.calls[0][0];
+      expect(BigInt(Math.round(cents * 10_000))).toBe(atomic);
+      expect(JSON.parse(authorize.mock.calls[0][1]).offer.amount).toBe(String(atomic));
+      expect(fetcher).toHaveBeenCalledTimes(1); // the unpaid request only
+    }));
+  });
+
+  it("refuses, before asking anyone, a quote that is not a positive canonical amount of Base USDC under x402 v2", async () => {
+    const bad = fc.oneof(
+      fc.constantFrom("0", "00", "01", "-1", "1.5", "1e6", " 1", "1 ", "+1", "0x10", "", "١٢").map(amount => ({ offer: { amount }, version: 2 })),
+      fc.string().filter(amount => !/^[1-9][0-9]*$/.test(amount)).map(amount => ({ offer: { amount }, version: 2 })),
+      fc.constantFrom({ network: "eip155:1" }, { network: "eip155:84532" }, { network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp" }, { scheme: "upto" },
+        { asset: "0x0000000000000000000000000000000000000000" }, { asset: USDC.slice(0, -1) }).map(change => ({ offer: { amount: "1000", ...change }, version: 2 })),
+      fc.constantFrom(1, 3).map(version => ({ offer: { amount: "1000" }, version }))
+    );
+    await fc.assert(fc.asyncProperty(bad, async ({ offer, version }) => {
+      const { outcome, authorize, fetcher } = await ask(offer, version);
+      expect(outcome).toBe("Unsupported BlockRun payment quote");
+      expect(authorize).not.toHaveBeenCalled();
+      expect(fetcher).toHaveBeenCalledTimes(1);
+    }));
+  });
 });

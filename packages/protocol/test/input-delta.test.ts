@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyInputDelta, diffInput, InputTrail, KEYFRAME_EVERY, type InputDelta } from "../src/input-delta.js";
+import fc from "fast-check";
+import { applyInputDelta, diffInput, InputTrail, KEYFRAME_EVERY, type InputDelta, type RecordedInput } from "../src/input-delta.js";
 
 const msg = (role: string, content: string) => ({ role, content });
 const keys = (messages: unknown[]) => messages.map(m => JSON.stringify(m));
@@ -59,5 +60,71 @@ describe("model input deltas (SRI-127)", () => {
     const next = [...second, msg("user", "and a fourth?")];
     const recorded = trail.record({ sessionId: "s", runId: "run-2", callId: "b" }, next);
     expect(recorded).toMatchObject({ inputDelta: { base: { runId: "run-1", callId: "a" }, parts: [{ from: 0, count: 4 }, { messages: [next[4]] }] } });
+  });
+});
+
+// Properties (SRI-175). The examples above are the regression seeds.
+describe("properties: model input deltas", () => {
+  // A small pool makes messages repeat, move and come back, as they do across
+  // compactions; fresh messages make the rest of each input new.
+  const pool = [msg("system", "You are an agent."), msg("user", "a"), msg("assistant", "b"), msg("tool", "{}"), msg("user", "a"), msg("user", "Summary: a, b")];
+  const message = fc.oneof(
+    { weight: 3, arbitrary: fc.constantFrom(...pool) },
+    { weight: 1, arbitrary: fc.record({ role: fc.constantFrom("user", "assistant", "tool"), content: fc.string({ unit: "binary", maxLength: 8 }) }) },
+    // Messages arrive as JSON, which has no -0 (JSON.stringify would key -0 and 0 alike).
+    { weight: 1, arbitrary: fc.dictionary(fc.string({ maxLength: 4 }), fc.jsonValue({ maxDepth: 2 }), { minKeys: 1, maxKeys: 3 }).map(m => JSON.parse(JSON.stringify(m)) as unknown) }
+  );
+  const input = fc.array(message, { maxLength: 30 });
+
+  it("rebuilds any input exactly from any earlier input and the parts between them", () => {
+    fc.assert(fc.property(input, input, (before, after) => {
+      const parts = diffInput(keys(before), keys(after), after);
+      expect(applyInputDelta(before, { base: { runId: "r", callId: "c" }, total: after.length, parts })).toEqual({ messages: after, missing: 0 });
+      // References point inside the base; nothing is referenced that is not there.
+      for (const part of parts) if ("from" in part) expect(part.from + part.count).toBeLessThanOrEqual(before.length);
+    }), { numRuns: 150 });
+  });
+
+  it("rebuilds every call of a conversation exactly by walking its chain back to a keyframe", () => {
+    // Each call's input grows from the one before: appended turns, a compacted middle, an edited last message.
+    const step = fc.oneof(
+      fc.record({ kind: fc.constant("append" as const), messages: fc.array(message, { minLength: 1, maxLength: 3 }) }),
+      fc.record({ kind: fc.constant("compact" as const), at: fc.nat(), length: fc.nat({ max: 6 }), summary: message }),
+      fc.record({ kind: fc.constant("note" as const), note: fc.string({ maxLength: 6 }) }),
+      fc.record({ kind: fc.constant("unrelated" as const), messages: fc.array(message, { maxLength: 4 }) })
+    );
+    fc.assert(fc.property(input, fc.array(step, { minLength: 1, maxLength: KEYFRAME_EVERY + 6 }), fc.array(fc.boolean(), { maxLength: 40 }), (first, steps, newRun) => {
+      const trail = new InputTrail();
+      const recorded = new Map<string, RecordedInput>();
+      const rebuild = (callId: string): unknown[] => {
+        const entry = recorded.get(callId)!;
+        if ("input" in entry) return entry.input;
+        // The base is named by the run that recorded it, not the run asking.
+        expect(entry.inputDelta.base.runId).toBe(histories[Number(entry.inputDelta.base.callId.slice(1))][1]);
+        const { messages, missing } = applyInputDelta(rebuild(entry.inputDelta.base.callId), entry.inputDelta);
+        expect(missing).toBe(0);
+        expect(messages).toHaveLength(entry.inputDelta.total);
+        return messages;
+      };
+      let history: unknown[] = first, runId = "run-0";
+      const histories: [unknown[], string][] = [[history, runId]];
+      for (const [index, change] of steps.entries()) {
+        if (change.kind === "append") history = [...history, ...change.messages];
+        else if (change.kind === "compact") { const at = history.length ? change.at % history.length : 0; history = [...history.slice(0, at), change.summary, ...history.slice(at + change.length)]; }
+        else if (change.kind === "note") history = history.length ? [...history.slice(0, -1), { note: change.note, of: history.at(-1) }] : history;
+        else history = change.messages;
+        // The same conversation may continue in a later run.
+        if (newRun[index]) runId = `run-${index + 1}`;
+        histories.push([history, runId]);
+      }
+      histories.forEach(([messages, run], index) => recorded.set(`c${index}`, trail.record({ sessionId: "s", runId: run, callId: `c${index}` }, messages)));
+      histories.forEach(([messages], index) => expect(rebuild(`c${index}`)).toEqual(messages));
+      // A long conversation is never more than KEYFRAME_EVERY calls from a keyframe (when keyframes fit, as these do).
+      let sinceKeyframe = 0;
+      for (const index of histories.keys()) {
+        sinceKeyframe = "input" in recorded.get(`c${index}`)! ? 0 : sinceKeyframe + 1;
+        expect(sinceKeyframe).toBeLessThan(KEYFRAME_EVERY);
+      }
+    }), { numRuns: 100 });
   });
 });
