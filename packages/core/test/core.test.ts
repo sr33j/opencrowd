@@ -234,6 +234,9 @@ describe("artifacts", () => {
     await saveArtifact(current, "site/index.html", "<h1>hi</h1>");
     await expect(executeTool("read_file", { path: "site" }, { session: current })).resolves.toMatchObject({ ok: true, data: ["site/index.html"] });
     await expect(executeTool("read_file", { path: "site/index.html" }, { session: current })).resolves.toMatchObject({ ok: true, data: { content: "<h1>hi</h1>" } });
+    // SRI-213: a scope with a file's path reads the file, rather than listing it as a folder (ENOTDIR).
+    await expect(executeTool("read_file", { path: "site/index.html", scope: "chat" }, { session: current })).resolves.toMatchObject({ ok: true, data: { content: "<h1>hi</h1>" } });
+    await expect(executeTool("read_file", { path: "site/index.html", scope: "all" }, { session: current })).resolves.toMatchObject({ ok: true, data: { content: "<h1>hi</h1>" } });
   });
 });
 
