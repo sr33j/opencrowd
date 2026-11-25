@@ -40,8 +40,19 @@ export async function executeTool(name: ToolName, args: Record<string, unknown>,
         // A folder (or "") lists its files: list_files folded in, so a hosted run
         // keeps within its 32 tools with publish_site added (SRI-166).
         const path = optionalString(args.path, "path") ?? "";
-        if (!path || path.endsWith("/") || args.scope !== undefined || await isArtifactDirectory(context.session, path))
+        if (!path || path.endsWith("/") || await isArtifactDirectory(context.session, path))
           return await listing(path, args.scope);
+        // A scope names where to list, so a file this chat holds is read
+        // whatever the scope. Listing a file as a folder failed with ENOTDIR
+        // on every retry until the run was stopped (SRI-213).
+        if (args.scope !== undefined) {
+          try {
+            return ok({ content: await readArtifact(context.session, path) });
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            return await listing(path, args.scope);
+          }
+        }
         return ok({ content: await readArtifact(context.session, path) });
       }
       case "list_files":
