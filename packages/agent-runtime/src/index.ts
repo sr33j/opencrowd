@@ -1067,7 +1067,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   }
   const parallelTools = options.chatOnly ? "off" : options.parallelTools ?? parallelToolsMode();
   if (parallelTools === "hint") systemPromptParts.push(
-    "Calls that only read (find_paid_service, inspect_paid_service, browse_services, read_file, a GET read_service, a shell command that only reads) run at the same time when one reply holds several. When you need several independent reads, put them in one reply. Any other call runs alone, in the order you wrote it."
+    "Calls that only read (find_paid_service, inspect_paid_service, browse_services, read_file, a GET read_service, and a run_shell command that only reads, such as one `curl -s <url>` per free URL) run at the same time when one reply holds several. When you need several independent reads, put them in one reply. Any other call runs alone, in the order you wrote it. vault_request is only for a request that needs a vault secret, never for fetching free URLs."
   );
   systemPromptParts.push("End by calling complete_session with a concise final message.");
   if (options.subagent) {
