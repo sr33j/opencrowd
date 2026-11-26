@@ -7,6 +7,7 @@ export * from "./ledger.js";
 export * from "./session.js";
 export * from "./session-defaults.js";
 export * from "./shell.js";
+export * from "./local-sandbox.js";
 export * from "./tool-definitions.js";
 export * from "./tools.js";
 export * from "./types.js";

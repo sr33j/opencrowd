@@ -72,6 +72,34 @@ The agent has a gated shell tool (enabled by default in the interactive
 CLI). Commands run with your user's privileges in the workspace. Disable it
 with `--disable-shell` or `OPENCROWD_SHELL_ENABLED=0`.
 
+By default nothing confines a command beyond that: it can read
+`~/.agentcash/wallet.json` like any program you run. With
+`OPENCROWD_LOCAL_SANDBOX=1` every `run_shell` command runs in a sandbox
+(bubblewrap on Linux, `sandbox-exec` on macOS) that
+
+- writes only inside the workspace and a private temporary directory, with
+  the session's budget, ledger and conversation read-only, and the
+  workspace's `.git/hooks` and `.git/config` read-only so nothing is planted
+  for a later `git` to run;
+- cannot read the places credentials live (`~/.agentcash`, `~/.ssh`,
+  `~/.aws`, `~/.config/gh`, … the list is `CREDENTIAL_PATHS` in
+  `packages/core/src/local-sandbox.ts`);
+- on Linux, sees only its own processes and none of the sockets under `/run`;
+- has the network `OPENCROWD_SHELL_NETWORK=open` (the default), `off`, or a
+  comma-separated allowlist of hosts (`example.com,*.github.com`). An
+  allowlist is enforced by a proxy inside OpenCrowd: the command has no
+  network or DNS of its own, only `HTTP(S)_PROXY`, and the proxy refuses any
+  host not on the list. CONNECT is passed through untouched, so TLS is
+  end to end.
+
+If the sandbox is asked for and cannot run (bubblewrap is missing, or the
+system does not allow unprivileged namespaces), the command is refused, never
+run unconfined. It costs about 3 ms a command (`open`, `off`) and 50 ms a
+command plus about 90 ms an HTTPS request with an allowlist. The macOS
+profile has not yet been run on a Mac. A hosted CrowdCode agent's commands
+already run as a separate user (`OPENCROWD_SHELL_SANDBOX`), which takes
+precedence.
+
 ### What OpenCrowd does not do
 
 - No telemetry; nothing is phoned home. Sessions, ledgers, receipts, and

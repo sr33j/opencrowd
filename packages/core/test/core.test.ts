@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -264,6 +265,33 @@ describe("shell policy", () => {
       const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms }, { session });
       expect(tiny.ok).toBe(false);
       expect(tiny.data).toMatchObject({ timed_out: true });
+    }
+  });
+
+  it("with OPENCROWD_LOCAL_SANDBOX, confines a command or refuses it, never runs it unconfined", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opencrowd-sandbox-"));
+    const home = await mkdtemp(join(tmpdir(), "opencrowd-home-"));
+    await mkdir(join(home, ".agentcash"));
+    await writeFile(join(home, ".agentcash", "wallet.json"), "SECRET-KEY");
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+    const saved = { ...process.env };
+    Object.assign(process.env, { OPENCROWD_LOCAL_SANDBOX: "1", OPENCROWD_SHELL_NETWORK: "off", HOME: home });
+    try {
+      const outside = join(home, "planted.txt");
+      const result = await runShell(session, `cat '${join(home, ".agentcash", "wallet.json")}'; echo x > '${outside}'; echo kept > artifacts/ok.txt; echo y >> session.json; cat artifacts/ok.txt`)
+        .catch((error: Error) => error);
+      if (result instanceof Error) {
+        // No sandbox on this machine: the command must not have run at all.
+        expect(result.message).toContain("was not run");
+        expect(existsSync(join(session.sessionDir, "artifacts", "ok.txt"))).toBe(false);
+      } else {
+        expect(result.stdout).not.toContain("SECRET-KEY");
+        expect(result.stdout).toContain("kept");
+        expect(await readFile(join(session.sessionDir, "session.json"), "utf8")).not.toMatch(/\ny\n?$/);
+      }
+      expect(existsSync(outside)).toBe(false);
+    } finally {
+      for (const key of ["OPENCROWD_LOCAL_SANDBOX", "OPENCROWD_SHELL_NETWORK", "HOME"]) if (saved[key] === undefined) delete process.env[key]; else process.env[key] = saved[key];
     }
   });
 
