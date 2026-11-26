@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { capStrings, contextLimits, isOutputLimitFinishReason, FinancialStateSchema, MAX_EXTERNAL_STRING_CHARS, stripReasoning, CROWDCODE_STOP, type ActionPolicy, type FinancialState } from "@opencrowd/protocol";
 import { completeWithContext, type ContextState, type ModelPrices } from "./context.js";
-import { inferenceSpent, moneyLine, newMoneyTrack, trackModelCall } from "./money-line.js";
+import { inferenceSpent, moneyLine, newMoneyTrack, recordSpend, trackModelCall } from "./money-line.js";
+import { moneyReader, type MoneyReads } from "./money-reads.js";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
@@ -44,6 +45,7 @@ export * from "./crowdcode-venice.js";
 export * from "./llm-runtime.js";
 export * from "./runtime.js";
 export * from "./worker.js";
+export { moneyReadsFromEnv, MONEY_FREE_TOOLS, MONEY_READ_MAX_AGE_MS, type MoneyReads } from "./money-reads.js";
 export * from "./hosted-provider.js";
 export * from "./hosted-economy.js";
 export * from "./inbox.js";
@@ -730,6 +732,12 @@ export interface AgentRunOptions {
   hosted?: boolean;
   /** Authoritative hosted ledger and wallet snapshot; local budgets are not cloud balances. */
   financialState?: () => Promise<FinancialState>;
+  /**
+   * When `financialState` is read again (money-reads.ts). `every_step`, the
+   * default, reads around every model and tool call; `on_change` keeps the
+   * snapshot until money may have moved or it is 30 s old.
+   */
+  moneyReads?: MoneyReads;
   /** Scripted/mock provider (tests, demo). Exactly one of provider/llm is required. */
   provider?: LlmProvider;
   /** Typed provider runtime; the loop wraps it with local budget accounting. */
@@ -1069,11 +1077,25 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     { role: "user", content: task }
   ];
   let financial: FinancialState = { status: "unavailable", reason: "Hosted financial state has not been read." };
+  const reads = moneyReader(options.moneyReads);
+  // Inference spent at the last read, and model calls answered since: in
+  // `on_change` a read can come after more than one call (money-line.ts).
+  let spentAtRead: number | undefined;
+  let callsSinceRead = 0;
   const refreshFinancialState = async () => {
     if (!options.financialState) return;
+    let ok = true;
     try { financial = FinancialStateSchema.parse(await options.financialState()); }
-    catch { financial = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
+    catch { ok = false; financial = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
+    reads.read(ok);
+    if (reads.mode === "on_change") {
+      const spent = inferenceSpent(financial);
+      if (callsSinceRead) recordSpend(money, spentAtRead, spent, callsSinceRead);
+      if (spent !== undefined) { spentAtRead = spent; callsSinceRead = 0; }
+    }
   };
+  // Something outside the main loop is spending this run's money right now.
+  const backgroundSpending = () => [...backgroundSubagents.values()].some(entry => entry.status === "running");
   const currentBudget = () => options.financialState ? financial : budgetStatus(session);
   const money = newMoneyTrack();
   const financialPrefix = "Current hosted financial snapshot: ";
@@ -1223,7 +1245,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     let response: LlmResponse;
     try {
       if (options.financialState && !restored?.response && !contextState.prepared) {
-        await refreshFinancialState();
+        if (reads.beforeModel(backgroundSpending())) await refreshFinancialState();
         // The snapshot is sent with the history, never written into it.
         // Written into the history it rewrote message 1 on every turn, and a
         // prefix that moves every turn is a prefix no seller can cache: a chat
@@ -1256,9 +1278,15 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       // Said once to the owner at the end of the run (runAgentTaskDetailed).
       if (!restored && response.fallback) options.onModelFallback?.(response.fallback);
       options.signal?.throwIfAborted();
-      const spentBefore = inferenceSpent(financial);
-      await refreshFinancialState(); // includes the model payment, including a replayed receipt
-      if (options.financialState) trackModelCall(money, spentBefore, inferenceSpent(financial));
+      if (reads.afterModel()) {
+        const spentBefore = inferenceSpent(financial);
+        await refreshFinancialState(); // includes the model payment, including a replayed receipt
+        if (options.financialState) trackModelCall(money, spentBefore, inferenceSpent(financial));
+      } else if (options.financialState) {
+        // `on_change`: the next read includes this payment; the call is counted now.
+        money.calls += 1;
+        callsSinceRead += 1;
+      }
     } catch (error) {
       if (holding()) return deliverHeld(turn, `the housekeeping model call failed: ${(error as Error).message}`);
       if (error instanceof BudgetExhaustedError) {
@@ -1477,7 +1505,9 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
         if (strategy) result = { ...result, error: `${result.error ?? "failed"}\n\nWhat to do next: ${strategy}` };
       }
       batchResults.push({ name: call.name, ok: result.ok });
-      await refreshFinancialState(); // includes a settled service payment and changed approvals
+      // Includes a settled service payment and changed approvals; in
+      // `on_change`, only when money may have moved (money-reads.ts).
+      if (reads.afterTool(call.name, backgroundSpending())) await refreshFinancialState();
       const budgetAfterToolCall = currentBudget();
       if (options.financialState && call.name === "get_budget_status") result = { ok: true, data: financial };
       if (options.financialState && call.name === "complete_session" && result.ok && result.data && typeof result.data === "object") {

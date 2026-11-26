@@ -1,3 +1,4 @@
+import type { MoneyReads } from "./money-reads.js";
 import { checkAction, newPolicyState } from "./action-policy.js";
 import { capStrings, captureDetail, DeadlineExceeded, InputTrail, MAX_EXTERNAL_STRING_CHARS, scrubText, stripReasoning, withDeadline } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
@@ -120,6 +121,8 @@ export interface WorkerOptions {
   /** Paid-capability gateway (hosted adapters); absent means paid services are unavailable to the model. */
   economy?: (run: CommandOf<"run.start">, session: SessionState) => EconomyGateway;
   financialState?: (run: CommandOf<"run.start">, session: SessionState) => Promise<import("@opencrowd/protocol").FinancialState>;
+  /** When a run re-reads `financialState` (money-reads.ts); `every_step` when absent. */
+  moneyReads?: MoneyReads;
   now?: () => Date;
   id?: () => string;
   /** Test hook: the backstop deadline for one tool call, in milliseconds. */
@@ -143,6 +146,8 @@ export class MachineWorker {
   /** Each model call's input is recorded as a change from the last (SRI-127). */
   private readonly inputs = new InputTrail();
   private running?: Promise<void>;
+  /** This process's financial reads per run, reported on run.finished (w124). */
+  private readonly moneyReadStats = new Map<string, { reads: number; ms: number; maxMs: number }>();
   private controller?: AbortController;
   private shuttingDown = false;
   private readonly statePath: string;
@@ -335,9 +340,14 @@ export class MachineWorker {
       // executor, so a worker without one advertises none of them.
       const declared = hosted ? declaredToolDefinitions(run.start, dynamicTools?.definitions ?? []) : [];
       let latestFinancialState: import("@opencrowd/protocol").FinancialState = { status: "unavailable", reason: "Hosted financial state has not been read." };
+      const readStats = this.moneyReadStats.get(runId) ?? { reads: 0, ms: 0, maxMs: 0 };
+      this.moneyReadStats.set(runId, readStats);
       const financialState = this.options.financialState && !chatOnly ? async () => {
+        const started = Date.now();
         try { latestFinancialState = await this.options.financialState!(run.start, session); }
         catch { latestFinancialState = { status: "unavailable", reason: "Hosted financial state could not be read; do not use local budget figures." }; }
+        const ms = Date.now() - started;
+        readStats.reads += 1; readStats.ms += ms; readStats.maxMs = Math.max(readStats.maxMs, ms);
         return latestFinancialState;
       } : undefined;
       // Every tool call, built-in or economy, is recorded once per checkpoint turn and replayed from its stored result.
@@ -475,6 +485,7 @@ export class MachineWorker {
         },
         provider,
         financialState,
+        ...(this.options.moneyReads ? { moneyReads: this.options.moneyReads } : {}),
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
@@ -604,8 +615,13 @@ export class MachineWorker {
     await this.emit("checkpoint.completed", { checkpointId: run.checkpointId, sessionId: run.sessionId,
       reason: outcome === "cancelled" ? "cancel" : isWaiting(outcome) ? "waiting" : "terminal",
       pendingOperationIds: run.pendingOperationId ? [run.pendingOperationId] : [] }, runId, run.commandId);
+    // How often this process read the run's money and how long that took, for
+    // the money-reads experiment (w124). Diagnostic only; a resumed run counts from its resume.
+    const reads = this.moneyReadStats.get(runId);
+    this.moneyReadStats.delete(runId);
     await this.emit("run.finished", { sessionId: run.sessionId, outcome, summary,
-      checkpointId: run.checkpointId, pendingOperationId: run.pendingOperationId, ...(run.knowledge ? { knowledge: run.knowledge } : {}) }, runId, run.commandId);
+      checkpointId: run.checkpointId, pendingOperationId: run.pendingOperationId, ...(run.knowledge ? { knowledge: run.knowledge } : {}),
+      ...(reads?.reads ? { moneyReads: { mode: this.options.moneyReads ?? "every_step", reads: reads.reads, ms: reads.ms, maxMs: reads.maxMs } } : {}) }, runId, run.commandId);
   }
 
   async drain(): Promise<void> { await this.running; await this.writes; }

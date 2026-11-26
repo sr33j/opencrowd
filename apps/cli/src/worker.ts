@@ -1,5 +1,5 @@
 import { createInterface } from "node:readline";
-import { MachineWorker, createWorkerDemoProvider, createHostedEconomy, createHostedProvider, createHostedToolExecutor, readHostedFinancialState } from "@opencrowd/agent-runtime";
+import { MachineWorker, createWorkerDemoProvider, createHostedEconomy, createHostedProvider, createHostedToolExecutor, moneyReadsFromEnv, readHostedFinancialState } from "@opencrowd/agent-runtime";
 import { readOption } from "./shared.js";
 
 export async function workerCommand(args: string[]): Promise<void> {
@@ -13,6 +13,8 @@ export async function workerCommand(args: string[]): Promise<void> {
     hostedTools: socketPath ? (run, session) => createHostedToolExecutor({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,
     economy: socketPath ? (run, session) => createHostedEconomy({ socketPath, runId: run.runId, sessionId: session.sessionId, session }) : undefined,
     financialState: socketPath ? (run, session) => readHostedFinancialState({ socketPath, runId: run.runId, sessionId: session.sessionId }) : undefined,
+    // The money-reads flag (money-reads.ts), set by the supervisor from its environment.
+    ...(moneyReadsFromEnv() ? { moneyReads: moneyReadsFromEnv() } : {}),
     output: line => { process.stdout.write(line); }, onFatal: workerFatal });
   try {
     await worker.initialize();
