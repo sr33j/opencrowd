@@ -363,6 +363,16 @@ function setAt(value: Json, path: (string | number)[], next: Json): Json {
   return { ...record, [head]: setAt(record[head as string], rest, next) };
 }
 
+/**
+ * JSON values as a peer can send them. `fc.jsonValue()` and `fc.double()`
+ * yield -0, and `fc.double()` yields Infinity and NaN: none of them survives
+ * JSON text (`JSON.stringify` writes 0 and null), so a message holding one is
+ * not a message any peer could have sent, and its failed round trip was the
+ * generator's, not the protocol's (CI, 2026-11-26 and 27).
+ */
+const asSent = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
+const jsonValue = (): fc.Arbitrary<Json> => (fc.jsonValue() as fc.Arbitrary<Json>).map(asSent);
+
 /** Values a field of the wire format might hold, and many it must not. */
 const wireValue: fc.Arbitrary<Json> = fc.oneof(
   fc.string({ unit: "binary", minLength: 1 }),
@@ -371,9 +381,9 @@ const wireValue: fc.Arbitrary<Json> = fc.oneof(
   fc.bigInt({ min: 0n, max: 2n ** 256n - 1n }).map(String),
   fc.date({ noInvalidDate: true, min: new Date("0001-01-01T00:00:00Z"), max: new Date("9999-12-31T23:59:59Z") }).map(d => d.toISOString()),
   fc.integer({ min: 0, max: Number.MAX_SAFE_INTEGER }),
-  fc.double(),
+  fc.double({ noNaN: true, noDefaultInfinity: true }).map(asSent),
   fc.boolean(),
-  fc.jsonValue() as fc.Arbitrary<Json>
+  jsonValue()
 );
 
 /** A key that is not sensitive and not already special to JS objects. */
@@ -388,7 +398,7 @@ const plainKey = fc.string({ minLength: 1, maxLength: 12 }).filter(key => !isSen
 function validMessages(templates: Json[], isValid: (value: Json) => boolean): fc.Arbitrary<Json> {
   const edit = fc.oneof(
     fc.record({ kind: fc.constant("leaf" as const), at: fc.nat(), value: wireValue }),
-    fc.record({ kind: fc.constant("extra" as const), at: fc.nat(), key: plainKey, value: fc.jsonValue() as fc.Arbitrary<Json> })
+    fc.record({ kind: fc.constant("extra" as const), at: fc.nat(), key: plainKey, value: jsonValue() })
   );
   return fc.tuple(fc.constantFrom(...templates), fc.array(edit, { maxLength: 6 })).map(([template, edits]) =>
     edits.reduce<Json>((message, change) => {
