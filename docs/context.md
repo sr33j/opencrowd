@@ -1,8 +1,9 @@
 # Context compaction
 
 CLI, hosted workers and local subagents use the same `completeWithContext`
-preflight in `packages/agent-runtime/src/context.ts`. There is no summarizer LLM
-and no separate Cloud history trimmer.
+preflight in `packages/agent-runtime/src/context.ts`. The summary of what a
+compaction removes is written by the model itself (below); there is no
+separate Cloud history trimmer.
 
 Before each new model request, the runtime estimates the complete input,
 including system instructions and tool definitions. The model catalog supplies
@@ -69,6 +70,44 @@ had its instructions and tools counted as history. They alone exceeded the
 summary, then the owner's request, and fired again two turns later. The model
 restarted from a file pointer 35 times in 91 calls and spent its $10 budget
 re-reading its own archive.
+
+## The model writes the summary
+
+Every compaction asks the model, once, for the summary that replaces what it
+removes (`compaction-summary.ts`). This is the default everywhere, CLI and
+hosted, since 2026-11-27, after an A/B on long tasks (w125): on GPT-6 Luna a
+log-reading task's recall after compaction went from 58% to 100%, its runs
+stopped running out of turns, and model turns fell by a quarter, for about
+$0.0009 a compaction.
+
+```text
+turn N    request = prefix (cached)                       → answer
+turn N+1  history over the trigger:
+          summary request = prefix (cached) + instruction → "- [goal] … - [fact] … - [open] …"
+          request = system + summary + kept messages      → answer   (cache misses once)
+turn N+2  request = same system + summary + kept + new    → answer   (cached again)
+```
+
+- The summary request is the history as last sent plus one instruction, so it
+  is paid mostly at the cached price, and it sees the system instructions and
+  tools. When the newest results have pushed the history past what the window
+  takes, it is the longest prefix that fits and ends on a whole exchange.
+- It is the turn's own model operation, `<run>:llm:<n>:summary`. A pause
+  (approval, funds, a payment to reconcile) or a budget stop travels like any
+  model call's, and a hosted resume replays what was paid for.
+- The summary is tagged lines (`[goal]`, `[decision]`, `[fact]`, `[file]`,
+  `[money]`, `[done]`, `[open]`), most important first, in the archive
+  pointer. It is cut from its end only as far as the window demands. The next
+  compaction's summary covers it again.
+- The pointer tells the model to rely on the summary and to search the archive
+  for what it does not hold.
+- Any other failure (a refusal, a timeout, a tool call instead of text, a reply
+  that is not a summary) keeps the one-line digest instead (`droppedLine`),
+  which is also what carries an earlier summary's lines forward. It never
+  fails a turn.
+
+`CompactionResult.summary` reports whether the model wrote the summary, the
+tokens and cost of asking, and how long it took.
 
 ## Archives
 

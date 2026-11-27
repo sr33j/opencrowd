@@ -58,6 +58,7 @@ export * from "./chat-only.js";
 import { CHAT_ONLY_SYSTEM_PROMPT } from "./chat-only.js";
 export * from "./knowledge.js";
 export * from "./context.js";
+export * from "./compaction-summary.js";
 export * from "./tool-deadlines.js";
 export * from "./non-answer.js";
 import { isNonAnswer } from "./non-answer.js";
