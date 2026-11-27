@@ -7,7 +7,8 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
 import { checkAction, isStandingRuleRefusal, newPolicyState } from "./action-policy.js";
-import { earlyStopNudge, emptyServiceLog, recordServiceResult, repeatedDiscovery, type ServiceLog } from "./service-strategy.js";
+import { DISCOVERY_REPEATS_MAX, discoveryKey, earlyStopNudge, emptyServiceLog, recordServiceResult, repeatedDiscovery, type ServiceLog } from "./service-strategy.js";
+import { PARALLEL_TOOLS_MAX, parallelSafe, parallelToolsPrompt, type ParallelSlot } from "./parallel-tools.js";
 import {
   atomicWrite,
   conversationPath,
@@ -49,6 +50,7 @@ export { MONEY_FREE_TOOLS, MONEY_READ_MAX_AGE_MS } from "./money-reads.js";
 export * from "./hosted-provider.js";
 export * from "./hosted-economy.js";
 export * from "./inbox.js";
+export * from "./parallel-tools.js";
 export * from "./service-strategy.js";
 import type { SteeringInbox } from "./inbox.js";
 export * from "./x402-proxy.js";
@@ -97,7 +99,13 @@ export interface DynamicToolDefinition {
 
 export interface DynamicToolsOption {
   definitions: DynamicToolDefinition[];
-  execute: (name: string, args: Record<string, unknown>, operationId?: string) => Promise<ToolResult>;
+  execute: (name: string, args: Record<string, unknown>, operationId?: string, call?: ToolCallContext) => Promise<ToolResult>;
+}
+
+/** Which call of the reply this is, so a host can key and trace it; and its parallel group, if it ran in one. */
+export interface ToolCallContext {
+  toolCallId: string;
+  parallel?: ParallelSlot;
 }
 
 export interface LlmResponse {
@@ -123,7 +131,7 @@ export interface LlmProvider {
 export type ToolExecutor = (
   name: ToolName,
   args: Record<string, unknown>,
-  context: ToolContext
+  context: ToolContext & Partial<ToolCallContext>
 ) => Promise<ToolResult>;
 
 export interface MockLlmProviderOptions {
@@ -1052,6 +1060,10 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       "Resource recovery: before installing large ML dependencies, check available memory, disk space and Python version. A killed install or OOM is a failed approach, not the end of the task. Inspect partial installs and preserve user files, then choose a materially lighter backend or an external service within the user's budget. Verify package metadata: optional extras add dependencies and do not remove default ones; never invent an extra such as basic-pitch[tflite]. For audio-to-MIDI, prefer a verified TFLite or ONNX inference setup in an isolated venv over full TensorFlow; test on a short audio segment before processing the whole file. If no viable path remains, report the concrete blocker and useful artifacts. Do not claim success until the output has been checked."
     );
   }
+  // Reads of one reply run together (parallel-tools.ts); the model is told, so it batches them.
+  const parallelLine = options.chatOnly ? undefined
+    : parallelToolsPrompt(new Set<string>([...enabledTools, ...dynamicDefinitions.map((tool) => tool.name)]));
+  if (parallelLine) systemPromptParts.push(parallelLine);
   systemPromptParts.push("End by calling complete_session with a concise final message.");
   if (options.subagent) {
     systemPromptParts.push(
@@ -1210,6 +1222,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
   let subagentCount = 0;
   const backgroundSubagents = new Map<string, BackgroundSubagent>();
   const subagentLimiter = createLimiter(options.subagent?.maxParallel ?? 4);
+  const parallelLimiter = createLimiter(PARALLEL_TOOLS_MAX);
   const drainBackground = async (): Promise<Record<string, unknown>[]> => {
     const outstanding = [...backgroundSubagents.values()];
     await Promise.all(outstanding.map((entry) => entry.promise));
@@ -1401,8 +1414,47 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     }
     // What this batch achieved, for the no-progress count (persistence.ts).
     const batchResults: { name: string; ok: boolean }[] = [];
-    for (const call of response.toolCalls) {
+    /** Runs one call on whichever surface owns it. The refusals before it stay in the loop. */
+    const invoke = (call: LlmToolCall, args: Record<string, unknown>, parallel?: ParallelSlot): Promise<ToolResult> => {
+      const meta: ToolCallContext = { toolCallId: call.id, ...(parallel ? { parallel } : {}) };
+      if (TOOL_NAMES.includes(call.name as ToolName))
+        return toolExecutor(call.name as ToolName, args, { session, onProgress: options.onProgress, signal: options.signal, ...meta });
+      if (declaredToolNames.has(call.name)) return options.declaredTools!.execute(call.name, args, undefined, meta);
+      if (options.dynamicTools) return options.dynamicTools.execute(call.name, args, undefined, meta);
+      return Promise.resolve({ ok: false, error: `unknown tool: ${call.name}` });
+    };
+    // Parallel reads (parallel-tools.ts): consecutive read-only calls start
+    // together, and the loop below still takes each result in the model's
+    // order. Every other call is a barrier, run alone where it stands.
+    const started = new Map<string, Promise<ToolResult>>();
+    let groupEnd = -1;
+    const startGroup = (from: number): number => {
+      let end = from;
+      while (end < response.toolCalls.length && response.toolCalls[end].invalidArguments === undefined
+        && parallelSafe(response.toolCalls[end].name, response.toolCalls[end].arguments)) end += 1;
+      // The refusals the loop would give, judged the same way, so nothing it refuses is run.
+      const asked = new Map<string, number>();
+      const runnable = response.toolCalls.slice(from, end).filter(call => {
+        if (completedTools[call.id] || (persistence.wrapUp && turn >= persistence.wrapUp.turn)) return false;
+        if (options.actionPolicy && checkAction(options.actionPolicy, policyState, call.name, call.arguments)) return false;
+        if (TOOL_NAMES.includes(call.name as ToolName) || declaredToolNames.has(call.name)) return true;
+        const key = discoveryKey(call.name, call.arguments);
+        if (!key) return true;
+        const count = (serviceLog.discovery?.[key] ?? 0) + (asked.get(key) ?? 0);
+        asked.set(key, (asked.get(key) ?? 0) + 1);
+        return count < DISCOVERY_REPEATS_MAX;
+      });
+      // A lone read runs in its place, exactly as before.
+      if (runnable.length > 1) runnable.forEach((call, index) => {
+        const promise = parallelLimiter(() => invoke(call, call.arguments, { group: runnable[0].id, index, size: runnable.length }));
+        void promise.catch(() => undefined);
+        started.set(call.id, promise);
+      });
+      return end - 1;
+    };
+    for (const [callIndex, call] of response.toolCalls.entries()) {
       options.signal?.throwIfAborted();
+      if (callIndex > groupEnd) groupEnd = startGroup(callIndex);
       options.onProgress?.({
         type: "calling_tool",
         message: `Tool call: ${summarizeToolCall(call)}`,
@@ -1463,16 +1515,12 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
               }
             };
           }
-        } else if (TOOL_NAMES.includes(call.name as ToolName)) {
-          result = await toolExecutor(call.name as ToolName, callArguments, { session, onProgress: options.onProgress, signal: options.signal });
-        } else if (declaredToolNames.has(call.name)) {
-          result = await options.declaredTools!.execute(call.name, callArguments);
-        } else if (options.dynamicTools) {
+        } else if (TOOL_NAMES.includes(call.name as ToolName) || declaredToolNames.has(call.name) || !options.dynamicTools) {
+          result = await (started.get(call.id) ?? invoke(call, callArguments));
+        } else {
           // The same search, tree read or inspection a third time is refused unasked (w107 phase 0).
           const repeated = repeatedDiscovery(serviceLog, call.name, callArguments);
-          result = repeated ? { ok: false, error: repeated } : await options.dynamicTools.execute(call.name, callArguments);
-        } else {
-          result = { ok: false, error: `unknown tool: ${call.name}` };
+          result = repeated ? { ok: false, error: repeated } : await (started.get(call.id) ?? invoke(call, callArguments));
         }
       } catch (error) {
         // A paused approval or a lost gateway reply is a reason to stop a run,

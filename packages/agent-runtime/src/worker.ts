@@ -14,7 +14,7 @@ import {
 } from "@opencrowd/protocol";
 import type { EconomyGateway } from "@opencrowd/economy";
 import { repairToolPairs } from "./tool-pairs.js";
-import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolExecutor } from "./index.js";
+import { capToolResult, runAgentTaskDetailed, type DynamicToolDefinition, type LlmProvider, type LoopCheckpoint, type ToolCallContext, type ToolExecutor } from "./index.js";
 import { hostedDynamicTools } from "./hosted-economy.js";
 import { toolDeadlineError, toolDeadlineMs } from "./tool-deadlines.js";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions, type LiveTreeOptions } from "./knowledge.js";
@@ -354,8 +354,12 @@ export class MachineWorker {
       // every hosted tool passes (subagents' included), so a refusal is traced.
       const actionPolicy = run.start.payload.actionPolicy;
       const policyState = newPolicyState();
-      const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>, wireName = name): Promise<ToolResult> => {
-        const call = run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
+      // The runtime names the call (ToolCallContext); a subagent's calls are not in the checkpoint and get an id of their own.
+      // Parallel reads (parallel-tools.ts) need the name: several calls of one tool are unfinished at once.
+      const callOf = (name: string, meta?: ToolCallContext) => meta?.toolCallId ? { id: meta.toolCallId }
+        : run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id]);
+      const record = async (name: string, args: Record<string, unknown>, invoke: () => Promise<ToolResult>, wireName = name, meta?: ToolCallContext): Promise<ToolResult> => {
+        const call = callOf(name, meta);
         // Providers may reuse tool IDs on later turns. Results are scoped to
         // their checkpoint turn so a later call cannot replay an old result.
         const id = `${run.checkpoint?.turn ?? 0}:${call?.id ?? randomUUID()}`;
@@ -375,7 +379,8 @@ export class MachineWorker {
         }
         if (saved && !saved.approvalPending && name === "call_paid_service") throw new Error("paid call result was lost; the payment requires manual reconciliation");
         await this.mutate(() => { run.tools[id] = { digest }; });
-        await this.emit("tool.started", { toolCallId: id, toolName: wireName, input: summarizeToolInput(wireName, args), details: captureDetail({ input: args }), turn: run.checkpoint?.turn ?? 0 }, runId, run.commandId);
+        await this.emit("tool.started", { toolCallId: id, toolName: wireName, input: summarizeToolInput(wireName, args), details: captureDetail({ input: args }), turn: run.checkpoint?.turn ?? 0,
+          ...(meta?.parallel ? { parallel: { group: `${run.checkpoint?.turn ?? 0}:${meta.parallel.group}`, index: meta.parallel.index, size: meta.parallel.size } } : {}) }, runId, run.commandId);
         const started = Date.now();
         let output: ToolResult;
         try {
@@ -472,7 +477,7 @@ export class MachineWorker {
         hosted: true, runId, signal, resume: run.checkpoint, maxTurns: run.start.payload.maxTurns,
         ...(chatOnly ? { chatOnly: true } : {}),
         ...(declared.length ? { declaredTools: { definitions: declared,
-          execute: (name, args) => record(name, args, () => hosted!(`control.${name}`, args, { session, signal }), `control.${name}`) } } : {}),
+          execute: (name, args, _operationId, meta) => record(name, args, () => hosted!(`control.${name}`, args, { session, signal }), `control.${name}`, meta) } } : {}),
         ...(!chatOnly && run.start.payload.instructions?.length ? { instructions: run.start.payload.instructions } : {}),
         contextWindowTokens: run.start.payload.modelPolicy.contextWindowTokens,
         maxOutputTokens: run.start.payload.modelPolicy.maxOutputTokens,
@@ -484,7 +489,7 @@ export class MachineWorker {
         financialState,
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
-          dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
+          dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args, _operationId, meta) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${callOf(name, meta)?.id}`), name, meta) },
           completionGate: (alreadyNudged, signals) => dynamicTools!.completionGate(alreadyNudged, signals),
           ...await this.capabilityIndex(session, run, !!run.checkpoint)
         } : {}),
@@ -508,7 +513,8 @@ export class MachineWorker {
         onTurnTextDelta,
         toolExecutor: (name, args, context) => record(name, args, () =>
           // Harness feedback goes to CrowdCode, which attaches the run, model and image (SRI-113).
-          hosted && (HOSTED_ONLY_TOOL_NAMES.includes(name) || name === "submit_harness_feedback") ? hosted(name, args, context) : local(name, args, context))
+          hosted && (HOSTED_ONLY_TOOL_NAMES.includes(name) || name === "submit_harness_feedback") ? hosted(name, args, context) : local(name, args, context),
+          name, context.toolCallId ? { toolCallId: context.toolCallId, parallel: context.parallel } : undefined)
       });
       // The runtime's "stopped" is CrowdCode ending the run, never the owner (adf318ab read "User stopped").
       await this.finish(runId, run, result.outcome,

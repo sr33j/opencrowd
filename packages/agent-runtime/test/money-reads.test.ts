@@ -63,6 +63,8 @@ async function run(turns: Turn[]) {
   const free = () => wallet - inference - services;
   const moved = () => walletHistory.push({ at: Date.now(), atomic: free() });
   const seen: LlmMessage[][] = [];
+  // When each model call started: a tool line of turn k is written before call k + 1.
+  const modelAt: number[] = [];
   let turn = 0;
   const result = await runAgentTaskDetailed(await session(), "Research three sellers and buy the best report", {
     hosted: true, runId, knowledge: false,
@@ -81,6 +83,7 @@ async function run(turns: Turn[]) {
     },
     provider: { complete: async (messages) => {
       seen.push(structuredClone(messages));
+      modelAt.push(Date.now());
       inference += MODEL_ATOMIC; moved();
       const script = turns[turn];
       const id = (i: number) => `t${turn}-${i}`;
@@ -89,7 +92,7 @@ async function run(turns: Turn[]) {
       return { content: "", toolCalls: script.tools.map((tool, i) => ({ id: id(i), name: tool.name, arguments: { ...tool, id: id(i) } })) };
     } },
   });
-  return { reads, seen, result, walletHistory, toolEnded };
+  return { reads, seen, result, walletHistory, toolEnded, modelAt };
 }
 
 const tool = (external: boolean) => fc.record({
@@ -131,7 +134,7 @@ it("counts every payment of the run on every line, and shows outside money at mo
   await fc.assert(fc.asyncProperty(turns(true), async (script) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-26T12:00:00Z"));
-    const { seen, walletHistory, toolEnded } = await run(script);
+    const { seen, walletHistory, toolEnded, modelAt } = await run(script);
     vi.useRealTimers();
     const last = seen.at(-1)!;
     for (const message of last.filter(m => m.role === "tool")) {
@@ -140,11 +143,15 @@ it("counts every payment of the run on every line, and shows outside money at mo
       if (!ended) continue; // complete_session and built-ins
       // Own spending: exact.
       expect(money).toContain(`this run spent ${usd(Number(atomicUsdc(ended.spent)))}`);
-      // Outside money: a figure the wallet had within the allowed staleness.
+      // Outside money: a figure the wallet had within the allowed staleness of
+      // when the line was written. That is after its tool ended and before
+      // the next model call; with parallel reads (w123), the reads after it in
+      // the reply may have run, and moved money, before its line was written.
       const figure = /wallet (\$[0-9.]+) free/.exec(money)![1];
+      const written = modelAt[Number(/^t(\d+)-/.exec(message.toolCallId!)![1]) + 1] ?? Number.POSITIVE_INFINITY;
       const had = walletHistory.filter((h, i) => {
         const until = walletHistory[i + 1]?.at ?? Number.POSITIVE_INFINITY;
-        return until >= ended.at - MONEY_READ_MAX_AGE_MS && h.at <= ended.at;
+        return until >= ended.at - MONEY_READ_MAX_AGE_MS && h.at <= written;
       }).map(h => usd(Number(atomicUsdc(h.atomic))));
       expect(had, money).toContain(figure);
     }
