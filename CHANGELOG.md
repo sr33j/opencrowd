@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.16.50 — 2026-11-27
+
+- **A failed paid call changes the run's strategy; it never ends the run (SRI-203).** Run adf318ab asked
+  for an erotic story and pictures; two image services refused the pictures with HTTP 400 and the
+  three-failures breaker ended the run before the story, which needed no service, was written. The
+  owner read "User stopped".
+  - No stop on failure counts. The 3-service-failures breaker and the "failed repeatedly" stop are gone
+    (`persistence.ts`).
+  - An exact repeat of a failed paid call is refused unsent. A failed, uninspected endpoint must be
+    inspected before it is called again. An endpoint that failed three times is marked bad for the
+    rest of the run.
+  - Every failed paid call carries a strategy: read the seller's answer, fix the request or switch
+    provider, and deliver what does not need it.
+  - Four turns in a row with nothing working bring a change-of-strategy message. After twelve,
+    CrowdCode asks for the deliverable and ends the run. The last of a run's turns, at its turn limit,
+    also delivers. The answer comes first, then `Stopped by CrowdCode: <reason>`.
+  - An empty reply is asked about once, instead of failing the run. An answer cut off by the output
+    limit is continued three times, not once.
+- **The seller's reason is in the error line.** "the service answered HTTP 400: The model's content
+  check refused this prompt… Flagged: sexual" (`sellerSays`), truncated and scrubbed.
+- **New run outcome `stopped`**: CrowdCode ended the run, never the owner. The worker used to report
+  every runtime stop as `user_stopped`. `CROWDCODE_STOP` and `splitCrowdcodeStop` are in
+  `@opencrowd/protocol`.
+- **`read_file` with a `scope` reads a file instead of listing it as a folder.**
+  Hosted runs that passed `scope` alongside a file's path got `ENOTDIR:
+  not a directory, scandir …` on every retry until the run was stopped
+  (SRI-213). A scope still lists a folder, or every chat's files when the path
+  is not a file in this chat.
+- **`publish_site` says a new site starts internal.** CrowdCode now lets an
+  owner choose who can open a site: internal (the owner and their agents),
+  CrowdCode users only, or public. A new site starts internal. The tool tells
+  the agent so, to tell the owner that only they can make it public, and to
+  open the site itself with the `view_url` the result carries.
+- **A hosted run reads its money only when it may have moved.** It used to
+  read the hosted financial state before and after every model call and
+  after every tool call (2 + k reads a turn, about 185 ms and 18 control
+  queries each). It now keeps the snapshot and reads again after a model
+  call (at the first tool result that follows it), after any tool not known
+  to be free (a paid call, a transfer, a subagent, an unknown tool,
+  `get_budget_status`, `complete_session`), when the snapshot is more than
+  30 s old, after a failed read, and at every point while a background
+  subagent runs. A turn of free tools reads once. The "Money:" line still
+  counts every payment of the run; outside money (a top-up, a shared wallet)
+  is at most 30 s old in it. The gateway's holds, budgets and approvals are
+  unchanged and were never read from here (`money-reads.ts`, w124).
+  - On production (132 paired runs): money reads per task −54%, harness
+    overhead −20% (about 0.9 s a task), no change in tokens, turns, cost or
+    caching.
+  - `run.finished` carries `moneyReads`: how many reads the run made and how
+    long they took.
+
 ## 0.16.49 — 2026-11-23
 
 - **A run the host stops at its budget ends there, gracefully.** The "taskmarket" mission's hourly sweep had a $0.05 run budget and spent $0.36 and $0.29. CrowdCode's gateway now refuses a scheduled run's next payment at its budget, with code `run_budget_reached`.
