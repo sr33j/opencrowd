@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { isAbsolute, join, resolve } from "node:path";
 import { appendLedgerEntry } from "./ledger.js";
+import { localSandboxSettings, sandboxCommand, sandboxUnavailable, type SandboxedCommand } from "./local-sandbox.js";
 import type { SessionState } from "./types.js";
 
 export interface ShellResult {
@@ -60,16 +61,46 @@ export async function runShell(
   if (resolvedCwd !== root && !resolvedCwd.startsWith(`${root}/`)) {
     throw new Error("shell cwd must stay inside the workspace");
   }
-  const result = await execute(command, resolvedCwd, timeoutMs, options.outputCapBytes ?? 64_000, options.env, options.signal);
+  // The local CLI's sandbox (local-sandbox.ts). A hosted executor's own
+  // sandbox program takes precedence: it already confines.
+  let confined: SandboxedCommand | undefined, sandboxNote: string;
+  if (shellSandbox()) sandboxNote = "host";
+  else {
+    const settings = localSandboxSettings();
+    const unavailable = await sandboxUnavailable(settings);
+    if (unavailable && settings.network.mode !== "open")
+      throw new Error(`The shell network is restricted (OPENCROWD_SHELL_NETWORK) but the sandbox that enforces it cannot run: ${unavailable}. The command was not run.`);
+    if (unavailable) sandboxNote = `unavailable: ${unavailable}`;
+    else {
+      confined = await sandboxCommand({ command, cwd: resolvedCwd, workspaceRoot: root, env: options.env ?? minimalEnv(), settings,
+        readOnly: [...SESSION_BOOKS.map((name) => join(state.sessionDir, name)), ...GIT_EXECUTABLES.map((name) => join(root, ".git", name))] });
+      sandboxNote = `${confined.program === "bwrap" ? "bubblewrap" : "sandbox-exec"}, network ${settings.network.mode}`;
+    }
+  }
+  let result: ShellResult;
+  try {
+    result = await execute(command, resolvedCwd, timeoutMs, options.outputCapBytes ?? 64_000, options.env, options.signal, confined);
+  } finally {
+    await confined?.close();
+  }
   await appendLedgerEntry(state.ledgerPath, {
     session_id: state.sessionId,
     type: "shell",
     status: result.exit_code === 0 ? "ok" : "failed",
     approval_mode: state.approvalMode,
-    notes: JSON.stringify({ command, cwd: resolvedCwd, exit_code: result.exit_code, timed_out: result.timed_out })
+    notes: JSON.stringify({ command, cwd: resolvedCwd, exit_code: result.exit_code, timed_out: result.timed_out, sandbox: sandboxNote })
   });
   return result;
 }
+
+/** What a sandboxed command may read but not change: its session's budget, ledger and conversation. */
+const SESSION_BOOKS = ["session.json", "ledger.csv", "messages.jsonl", "query-checkpoint.json"];
+/**
+ * What git runs later, outside any sandbox: hooks, and a config that can name
+ * a program (`core.fsmonitor`, `core.hooksPath`, an alias). A command may
+ * commit and branch; it may not plant something the owner's next `git status` runs.
+ */
+const GIT_EXECUTABLES = ["hooks", "config"];
 
 function execute(
   command: string,
@@ -77,7 +108,8 @@ function execute(
   timeoutMs: number,
   outputCapBytes: number,
   env: NodeJS.ProcessEnv = minimalEnv(),
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  confined?: SandboxedCommand
 ): Promise<ShellResult> {
   return new Promise((resolvePromise) => {
     let stdout = "";
@@ -113,7 +145,9 @@ function execute(
     // never a shell string, and the environment travels as `env -i` arguments
     // because a setuid program's loader drops some variables (TMPDIR among
     // them) on the way in.
-    const child = sandbox
+    const child = confined
+      ? spawn(confined.program, confined.args, { cwd, env: confined.env, detached, stdio: ["ignore", "pipe", "pipe"] })
+      : sandbox
       ? spawn(sandbox, ["/usr/bin/env", "-i", ...environmentArguments(env), "/bin/sh", "-c", command], {
         cwd,
         env: {},

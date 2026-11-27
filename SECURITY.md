@@ -72,6 +72,36 @@ The agent has a gated shell tool (enabled by default in the interactive
 CLI). Commands run with your user's privileges in the workspace. Disable it
 with `--disable-shell` or `OPENCROWD_SHELL_ENABLED=0`.
 
+Every `run_shell` command runs in a sandbox (bubblewrap on Linux,
+`sandbox-exec` on macOS) that
+
+- writes only inside the workspace and a private temporary directory, with
+  the session's budget, ledger and conversation read-only, and the
+  workspace's `.git/hooks` and `.git/config` read-only so nothing is planted
+  for a later `git` to run;
+- cannot read the places credentials live (`~/.agentcash`, `~/.ssh`,
+  `~/.aws`, `~/.config/gh`, … the list is `CREDENTIAL_PATHS` in
+  `packages/core/src/local-sandbox.ts`);
+- on Linux, sees only its own processes and none of the sockets under `/run`;
+- has the network `OPENCROWD_SHELL_NETWORK=open` (the default), `off`, or a
+  comma-separated allowlist of hosts (`example.com,*.github.com`). An
+  allowlist is enforced by a proxy inside OpenCrowd: the command has no
+  network or DNS of its own, only `HTTP(S)_PROXY`, and the proxy refuses any
+  host not on the list. CONNECT is passed through untouched, so TLS is
+  end to end.
+
+Where the sandbox cannot run (bubblewrap is not installed, or the system
+does not allow unprivileged namespaces), a command runs unconfined as before,
+the session ledger records why, and `opencrowd doctor` reports it: install
+bubblewrap to get it. A restricted network is never opened that way: with
+`off` or an allowlist, the command is refused instead. It costs about 3 ms a
+command, and with an allowlist about 50 ms a command plus 90 ms an HTTPS
+request. On macOS the real profile is tried once before it is used, so a
+profile the system rejects means unconfined, not a broken shell.
+A hosted CrowdCode agent's commands
+already run as a separate user (`OPENCROWD_SHELL_SANDBOX`), which takes
+precedence.
+
 ### What OpenCrowd does not do
 
 - No telemetry; nothing is phoned home. Sessions, ledgers, receipts, and

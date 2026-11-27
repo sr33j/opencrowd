@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -264,6 +265,49 @@ describe("shell policy", () => {
       const tiny = await executeTool("run_shell", { command: "sleep 2", timeout_ms }, { session });
       expect(tiny.ok).toBe(false);
       expect(tiny.data).toMatchObject({ timed_out: true });
+    }
+  });
+
+  it("confines every local command where the sandbox can run, and says so in the ledger where it cannot", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opencrowd-sandbox-"));
+    const home = await mkdtemp(join(tmpdir(), "opencrowd-home-"));
+    await mkdir(join(home, ".agentcash"));
+    await writeFile(join(home, ".agentcash", "wallet.json"), "SECRET-KEY");
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+    const saved = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const outside = join(home, "planted.txt");
+      const result = await runShell(session, `cat '${join(home, ".agentcash", "wallet.json")}'; echo x > '${outside}'; echo kept > artifacts/ok.txt; cat artifacts/ok.txt`);
+      expect(result.stdout).toContain("kept");
+      const ledger = await readFile(session.ledgerPath, "utf8");
+      if (ledger.includes("unavailable: ")) {
+        // No sandbox on this machine: the command ran as it always has, and the ledger says why.
+        expect(result.stdout).toContain("SECRET-KEY");
+      } else {
+        expect(ledger).toMatch(/bubblewrap|sandbox-exec/);
+        expect(result.stdout).not.toContain("SECRET-KEY");
+        expect(existsSync(outside)).toBe(false);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.HOME; else process.env.HOME = saved;
+    }
+  });
+
+  it("never opens a restricted network: with OPENCROWD_SHELL_NETWORK=off a command is confined or refused", async () => {
+    const root = await mkdtemp(join(tmpdir(), "opencrowd-sandbox-"));
+    const session = await createSession({ workspaceRoot: root, shellEnabled: true });
+    process.env.OPENCROWD_SHELL_NETWORK = "off";
+    try {
+      const result = await runShell(session, "echo ran > artifacts/ran.txt; echo y >> session.json").catch((error: Error) => error);
+      if (result instanceof Error) {
+        expect(result.message).toContain("was not run");
+        expect(existsSync(join(session.sessionDir, "artifacts", "ran.txt"))).toBe(false);
+      } else {
+        expect(await readFile(join(session.sessionDir, "session.json"), "utf8")).not.toMatch(/\ny\n?$/);
+      }
+    } finally {
+      delete process.env.OPENCROWD_SHELL_NETWORK;
     }
   });
 

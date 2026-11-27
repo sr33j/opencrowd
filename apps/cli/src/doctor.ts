@@ -1,4 +1,4 @@
-import { loadConfig, configPath, readAgentCashSolanaAddress, readAgentCashWallet, resolvePaymentNetwork } from "@opencrowd/core";
+import { loadConfig, configPath, localSandboxSettings, sandboxUnavailable, readAgentCashSolanaAddress, readAgentCashWallet, resolvePaymentNetwork } from "@opencrowd/core";
 import { MONAD_NETWORK, monadRpcUrl, monadUsdcBalance, sharedEconomyRuntime } from "@opencrowd/economy";
 import { sharedTypedProvider } from "@opencrowd/agent-runtime";
 
@@ -87,6 +87,15 @@ export async function runDoctor(log: (line: string) => void): Promise<boolean> {
           throw new Error(evidence.error ?? "get_service_score failed");
         }
         return "connected; reputation checks reachable";
+      }
+    },
+    {
+      name: "shell sandbox",
+      run: async () => {
+        const settings = localSandboxSettings();
+        const unavailable = await sandboxUnavailable(settings);
+        if (unavailable) throw new Error(`${unavailable}. run_shell commands run unconfined${settings.network.mode === "open" ? "" : " (and are refused while OPENCROWD_SHELL_NETWORK restricts the network)"}`);
+        return `${process.platform === "darwin" ? "sandbox-exec" : "bubblewrap"}: writes confined to the workspace, credentials hidden, network ${settings.network.mode}`;
       }
     },
     {
