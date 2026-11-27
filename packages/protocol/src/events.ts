@@ -282,6 +282,8 @@ export const RunFinishedEventSchema = z.looseObject({
     pendingOperationId: IdSchema.optional(),
     turns: z.int().nonnegative().optional(),
     error: z.looseObject({ code: z.string().min(1), message: z.string() }).optional(),
+    /** How often this run read its hosted financial state, and how long that took (w124). Diagnostic. */
+    moneyReads: z.looseObject({ reads: z.int().nonnegative(), ms: z.number().nonnegative(), maxMs: z.number().nonnegative() }).optional(),
     /** The knowledge tree this run's prompt was built from; absent when it read none (chat-only, no paid tools). */
     knowledge: RunKnowledgeSchema.optional()
   })

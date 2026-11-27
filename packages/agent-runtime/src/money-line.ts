@@ -36,6 +36,17 @@ export function trackModelCall(track: MoneyTrack, before: number | undefined, af
   if (track.recent.length > 5) track.recent.shift();
 }
 
+/**
+ * Record what `calls` model calls cost together, read after the last of them
+ * (money-reads.ts): each gets the average. Counts no calls.
+ */
+export function recordSpend(track: MoneyTrack, before: number | undefined, after: number | undefined, calls: number) {
+  if (before === undefined || after === undefined || after < before || calls < 1) return;
+  const each = (after - before) / calls;
+  for (let i = 0; i < Math.min(calls, 5); i += 1) track.recent.push(each);
+  while (track.recent.length > 5) track.recent.shift();
+}
+
 export function inferenceSpent(financial: FinancialState): number | undefined {
   return financial.status === "available" ? Number(financial.current_run.inference_spent_usdc) : undefined;
 }
