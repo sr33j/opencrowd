@@ -38,7 +38,7 @@ export function trackModelCall(track: MoneyTrack, before: number | undefined, af
 
 /**
  * Record what `calls` model calls cost together, read after the last of them
- * (`on_change` reads, money-reads.ts): each gets the average. Counts no calls.
+ * (money-reads.ts): each gets the average. Counts no calls.
  */
 export function recordSpend(track: MoneyTrack, before: number | undefined, after: number | undefined, calls: number) {
   if (before === undefined || after === undefined || after < before || calls < 1) return;

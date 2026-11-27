@@ -1,4 +1,3 @@
-import type { MoneyReads } from "./money-reads.js";
 import { checkAction, newPolicyState } from "./action-policy.js";
 import { capStrings, captureDetail, DeadlineExceeded, InputTrail, MAX_EXTERNAL_STRING_CHARS, scrubText, stripReasoning, withDeadline } from "@opencrowd/protocol";
 import { beginQuery, SpendingDeclined } from "@opencrowd/core";
@@ -121,8 +120,6 @@ export interface WorkerOptions {
   /** Paid-capability gateway (hosted adapters); absent means paid services are unavailable to the model. */
   economy?: (run: CommandOf<"run.start">, session: SessionState) => EconomyGateway;
   financialState?: (run: CommandOf<"run.start">, session: SessionState) => Promise<import("@opencrowd/protocol").FinancialState>;
-  /** When a run re-reads `financialState` (money-reads.ts); `every_step` when absent. */
-  moneyReads?: MoneyReads;
   now?: () => Date;
   id?: () => string;
   /** Test hook: the backstop deadline for one tool call, in milliseconds. */
@@ -485,7 +482,6 @@ export class MachineWorker {
         },
         provider,
         financialState,
-        ...(this.options.moneyReads ? { moneyReads: this.options.moneyReads } : {}),
         history: run.checkpoint ? undefined : await this.history(session),
         ...(dynamicTools ? {
           dynamicTools: { definitions: dynamicTools.definitions, execute: (name, args) => record(name, args, () => dynamicTools.execute(name, args, `${run.checkpoint?.turn ?? 0}:${run.checkpoint?.response?.toolCalls.find(c => c.name === name && !run.checkpoint?.completedTools[c.id])?.id}`)) },
@@ -615,13 +611,13 @@ export class MachineWorker {
     await this.emit("checkpoint.completed", { checkpointId: run.checkpointId, sessionId: run.sessionId,
       reason: outcome === "cancelled" ? "cancel" : isWaiting(outcome) ? "waiting" : "terminal",
       pendingOperationIds: run.pendingOperationId ? [run.pendingOperationId] : [] }, runId, run.commandId);
-    // How often this process read the run's money and how long that took, for
-    // the money-reads experiment (w124). Diagnostic only; a resumed run counts from its resume.
+    // How often this process read the run's money and how long that took
+    // (money-reads.ts). Diagnostic only; a resumed run counts from its resume.
     const reads = this.moneyReadStats.get(runId);
     this.moneyReadStats.delete(runId);
     await this.emit("run.finished", { sessionId: run.sessionId, outcome, summary,
       checkpointId: run.checkpointId, pendingOperationId: run.pendingOperationId, ...(run.knowledge ? { knowledge: run.knowledge } : {}),
-      ...(reads?.reads ? { moneyReads: { mode: this.options.moneyReads ?? "every_step", reads: reads.reads, ms: reads.ms, maxMs: reads.maxMs } } : {}) }, runId, run.commandId);
+      ...(reads?.reads ? { moneyReads: { reads: reads.reads, ms: reads.ms, maxMs: reads.maxMs } } : {}) }, runId, run.commandId);
   }
 
   async drain(): Promise<void> { await this.running; await this.writes; }

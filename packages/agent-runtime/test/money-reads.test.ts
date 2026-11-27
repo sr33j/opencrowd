@@ -8,14 +8,16 @@ import { createSession } from "@opencrowd/core";
 import { atomicUsdc, type FinancialState } from "@opencrowd/protocol";
 import { runAgentTaskDetailed, type LlmMessage } from "../src/index.js";
 import { tierOf, usd } from "../src/money-line.js";
-import { MONEY_READ_MAX_AGE_MS, moneyReader, type MoneyReads } from "../src/money-reads.js";
+import { MONEY_READ_MAX_AGE_MS, moneyReader } from "../src/money-reads.js";
 
 /**
- * w124: `on_change` reads the hosted money less often. These are the
- * properties that make that safe to show a model:
+ * w124: a hosted run reads its money only when it may have moved
+ * (money-reads.ts). These are the properties that make that safe to show a
+ * model:
  *
- * 1. With nothing moving money outside the run, the model is shown exactly
- *    what `every_step` shows it, byte for byte, with no more reads.
+ * 1. With nothing moving money outside the run, every line shows what a fresh
+ *    read would: the run's spending, the wallet and the calls left, exactly.
+ *    A turn of free tools reads once (it used to read 2 + k times).
  * 2. With money moving outside the run (a top-up, a sibling spending from a
  *    shared wallet), every line still counts every payment this run made,
  *    and the wallet figure it shows is one the wallet had at most
@@ -40,12 +42,12 @@ type Tool = { name: "browse_services" | "read_service" | "call_paid_service" | "
 type Turn = { tools: Tool[] };
 
 /** One run of `turns` under `mode`, against a fake control whose figures move as this run and the outside world spend. */
-async function run(mode: MoneyReads, turns: Turn[]) {
+async function run(turns: Turn[]) {
   const runId = randomUUID();
   let inference = 0n, services = 0n, wallet = 5_000_000n, reads = 0;
   // Every figure the wallet has had, and when: what a line may show.
   const walletHistory: { at: number; atomic: bigint }[] = [{ at: Date.now(), atomic: wallet }];
-  const toolEnded = new Map<string, { at: number; spent: bigint }>();
+  const toolEnded = new Map<string, { at: number; spent: bigint; fresh: FinancialState }>();
   const state = (): FinancialState => {
     const free = wallet - inference - services;
     const callsLeft = Math.min(999, Number(free / MODEL_ATOMIC));
@@ -63,7 +65,7 @@ async function run(mode: MoneyReads, turns: Turn[]) {
   const seen: LlmMessage[][] = [];
   let turn = 0;
   const result = await runAgentTaskDetailed(await session(), "Research three sellers and buy the best report", {
-    hosted: true, runId, knowledge: false, moneyReads: mode,
+    hosted: true, runId, knowledge: false,
     financialState: async () => { reads += 1; return state(); },
     dynamicTools: {
       definitions: ["browse_services", "read_service", "call_paid_service", "mystery_tool"].map(name => ({ name, description: name, parameters: {} })),
@@ -73,7 +75,7 @@ async function run(mode: MoneyReads, turns: Turn[]) {
         if (tool.external) { wallet += BigInt(tool.external); moved(); }
         if (tool.ms) vi.setSystemTime(Date.now() + tool.ms);
         if (name === "call_paid_service") { services += PAID_ATOMIC; moved(); }
-        toolEnded.set(tool.id, { at: Date.now(), spent: inference + services });
+        toolEnded.set(tool.id, { at: Date.now(), spent: inference + services, fresh: state() });
         return { ok: true, data: { name } };
       },
     },
@@ -100,25 +102,28 @@ const turns = (external: boolean) => fc.array(fc.record({ tools: fc.array(tool(e
   // A turn without tools is a final answer; the script's tool turns come first.
   .map(list => list.filter(t => t.tools.length));
 
-it("shows the model exactly what every_step shows it, with fewer reads, when nothing outside the run moves money", async () => {
+it("shows on every line what a fresh read would, reading once per turn of free tools, when nothing outside the run moves money", async () => {
   await fc.assert(fc.asyncProperty(turns(false), async (script) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-26T12:00:00Z"));
-    const every = await run("every_step", script);
-    vi.setSystemTime(new Date("2026-11-26T12:00:00Z"));
-    const change = await run("on_change", script);
+    const { reads, seen, result, toolEnded } = await run(script);
     vi.useRealTimers();
-    // observed_at and the run id differ; nothing the model is shown does.
-    const shown = (s: LlmMessage[][]) => JSON.stringify(s).replace(/"observed_at":"[^"]*"/g, "");
-    expect(shown(change.seen)).toBe(shown(every.seen));
-    expect(change.result.summary.budget).toMatchObject({ current_run: (every.result.summary.budget as any).current_run });
-    expect(change.reads).toBeLessThanOrEqual(every.reads);
-    // A turn of free tools reads once, where every_step reads 2 + k times.
-    const tools = script.reduce((n, t) => n + t.tools.length, 0);
-    const notFree = script.reduce((n, t) => n + t.tools.filter(x => x.name === "call_paid_service" || x.name === "mystery_tool").length, 0);
-    // Both modes: complete_session reads, and so does the held-money check at completion.
-    expect(change.reads).toBe(1 + script.length + notFree - script.filter(t => t.tools[0].name === "call_paid_service" || t.tools[0].name === "mystery_tool").length + 2);
-    expect(every.reads).toBe(2 * (script.length + 1) + tools + 2);
+    for (const message of seen.at(-1)!.filter(m => m.role === "tool")) {
+      const ended = toolEnded.get(message.toolCallId!);
+      if (!ended || ended.fresh.status !== "available") continue; // complete_session and built-ins
+      const { money } = JSON.parse(message.content) as { money: string };
+      const fresh = ended.fresh;
+      expect(money).toContain(`≈${fresh.runway!.calls_left}${fresh.runway!.calls_left >= 999 ? "+" : ""} calls left (${fresh.runway!.tier}`);
+      expect(money).toContain(`wallet ${usd(fresh.wallet.available_usdc!)} free`);
+      expect(money).toContain(`this run spent ${usd(fresh.current_run.total_spent_usdc)}`);
+    }
+    const calls = 1 + script.length;
+    expect(result.summary.budget).toMatchObject({ current_run: { inference_spent_usdc: atomicUsdc(MODEL_ATOMIC * BigInt(calls)) } });
+    // One read before the first call, one per tool turn (its first tool), one per other paid or unknown tool,
+    // then complete_session's and the held-money check's at completion. Before w124: 2T + tools + 4.
+    const notFree = (x: Tool) => x.name === "call_paid_service" || x.name === "mystery_tool";
+    const others = script.reduce((n, t) => n + t.tools.slice(1).filter(notFree).length, 0);
+    expect(reads).toBe(1 + script.length + others + 2);
   }), { numRuns: 40 });
 });
 
@@ -126,7 +131,7 @@ it("counts every payment of the run on every line, and shows outside money at mo
   await fc.assert(fc.asyncProperty(turns(true), async (script) => {
     vi.useFakeTimers({ toFake: ["Date"] });
     vi.setSystemTime(new Date("2026-11-26T12:00:00Z"));
-    const { seen, walletHistory, toolEnded } = await run("on_change", script);
+    const { seen, walletHistory, toolEnded } = await run(script);
     vi.useRealTimers();
     const last = seen.at(-1)!;
     for (const message of last.filter(m => m.role === "tool")) {
@@ -148,7 +153,7 @@ it("counts every payment of the run on every line, and shows outside money at mo
 
 it("reads again after a failed read, and while a background subagent spends", () => {
   let now = 0;
-  const reader = moneyReader("on_change", () => now);
+  const reader = moneyReader(() => now);
   expect(reader.beforeModel(false)).toBe(true);
   reader.read(false);
   expect(reader.afterTool("read_file", false)).toBe(true); // the failed read left it due
@@ -161,10 +166,6 @@ it("reads again after a failed read, and while a background subagent spends", ()
   now += MONEY_READ_MAX_AGE_MS + 1;
   expect(reader.beforeModel(false)).toBe(true);
   reader.read(true);
-  expect(reader.afterModel()).toBe(false);
+  reader.afterModel();
   expect(reader.afterTool("read_file", false)).toBe(true); // the model call's payment
-  // every_step reads at every point, as before.
-  const every = moneyReader("every_step", () => now);
-  every.read(true);
-  expect([every.beforeModel(false), every.afterModel(), every.afterTool("read_file", false)]).toEqual([true, true, true]);
 });
