@@ -150,6 +150,9 @@ it("lets the switched model find all four facts in the saved logs through the re
   let calls = 0;
   const result = await runAgentTaskDetailed(s, task, { ...switched, tools: ["run_shell"], history: chat.slice(1), provider: {
     complete: async (messages) => {
+      // The compaction's own summary call: a summary that, like a lossy one, holds none of the facts.
+      if (messages.at(-1)?.content.startsWith("[Context compaction."))
+        return { content: "- [goal] answer questions about four pasted port logs\n- [open] list the important fact of each part", toolCalls: [] };
       calls++;
       if (calls === 1) {
         // The request is the compacted one: every log is still there, as a

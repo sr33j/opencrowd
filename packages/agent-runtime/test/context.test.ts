@@ -2,7 +2,7 @@ import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, expect, it, vi } from "vitest";
-import { createSession } from "@opencrowd/core";
+import { BudgetExhaustedError, createSession } from "@opencrowd/core";
 import { ContextWindowExceeded, contextLimits, estimateContextTokens, isContextWindowError, isRequestTooLargeError, upstreamRefusalSummary, MODEL_REQUEST_MAX_BYTES, MODEL_SELLER_REQUEST_MAX_BYTES } from "@opencrowd/protocol";
 import { compactContext, completeWithContext, type ContextState } from "../src/context.js";
 import { runAgentTaskDetailed, type LlmMessage } from "../src/index.js";
@@ -94,8 +94,9 @@ it("bounds context-error retries, changes operation IDs only for new requests, a
     throw new ContextWindowExceeded("maximum context length exceeded");
   }) };
   await expect(completeWithContext(s, messages, { ...options(), state, provider, operationId: "run:llm:0", hosted: true, checkpoint })).rejects.toThrow("maximum context");
-  expect(calls.map(c => c.id)).toEqual(["run:llm:0", "run:llm:0:context:1", "run:llm:0:context:2"]);
-  expect(calls[1].messages).not.toEqual(calls[0].messages);
+  // The first attempt compacts, and asks for its summary as the turn's own operation; a retry does not.
+  expect(calls.map(c => c.id)).toEqual(["run:llm:0:summary", "run:llm:0", "run:llm:0:context:1", "run:llm:0:context:2"]);
+  expect(calls[2].messages).not.toEqual(calls[1].messages);
   expect(checkpoint).toHaveBeenCalledTimes(5);
 });
 
@@ -195,4 +196,115 @@ it("runs the real agent loop and bash tool to retrieve a detail from an oversize
   expect(result.outcome).toBe("completed");
   expect(result.summary.final_message).toContain("orchid-731");
   expect(calls).toBe(2);
+});
+
+// Compaction summaries the model writes (compaction-summary.ts).
+/** Short results, so trimming has to remove whole exchanges rather than save results to files. */
+function chatty(turns = 60): LlmMessage[] {
+  const messages: LlmMessage[] = [{ role: "system", content: "System rules must survive." }, { role: "user", content: "Original task and constraints." }];
+  for (let i = 0; i < turns; i++)
+    messages.push({ role: "assistant", content: `step ${i}`, toolCalls: [{ id: `c${i}`, name: "run_shell", arguments: { command: "echo ok" } }] },
+      { role: "tool", content: JSON.stringify({ ok: true, data: `Result ${i} ` + "word ".repeat(90) }), toolCallId: `c${i}` });
+  messages.push({ role: "user", content: "Current task: find the result." });
+  return messages;
+}
+const SUMMARY = "- [goal] find the result the user asked for\n- [fact] Result 3 was orchid-731\n- [open] report the result";
+function summarizer(reply: string | Error = SUMMARY) {
+  const calls: LlmMessage[][] = [];
+  const provider = { complete: vi.fn(async (m: LlmMessage[]) => {
+    calls.push(structuredClone(m));
+    if (m.at(-1)?.content.startsWith("[Context compaction.")) {
+      if (reply instanceof Error) throw reply;
+      return { content: reply, toolCalls: [], usage: { inputTokens: 9000, cachedInputTokens: 8000, outputTokens: 40, costCents: 0.01 } };
+    }
+    return { content: "done", toolCalls: [] };
+  }) };
+  return { provider, calls };
+}
+
+it("with summary=llm, asks the model once for a summary of the history as last sent, and sends it in place of the digest", async () => {
+  const s = await session(), messages = chatty(85), before = structuredClone(messages);
+  const { provider, calls } = summarizer();
+  await completeWithContext(s, messages, { ...options(24000), state: {}, provider, operationId: "run:llm:4" });
+  expect(calls).toHaveLength(2);
+  // The summary request is the conversation unchanged plus one instruction, so the seller's cached prefix holds.
+  expect(calls[0].slice(0, -1)).toEqual(before);
+  expect(provider.complete.mock.calls[0][1]).toMatchObject({ operationId: "run:llm:4:summary" });
+  const reference = calls[1].find(m => m.contextArchive)!.content;
+  expect(reference).toContain("Result 3 was orchid-731");
+  expect(reference).not.toContain("run_shell ok");
+  // A second compaction carries the summary, even where it falls back to the digest.
+  const carried = await compactContext(s, [...calls[1], ...chatty(85).slice(2)], options(24000));
+  expect(carried.summary).toBeUndefined();
+});
+
+it("falls back to the digest when the summary call fails or does not return a summary, and never fails the turn", async () => {
+  for (const reply of [new Error("seller refused"), "Sure! Here is the result: done."]) {
+    const s = await session(), messages = chatty(85);
+    const { provider, calls } = summarizer(reply);
+    const events: unknown[] = [];
+    await completeWithContext(s, messages, { ...options(24000), state: {}, provider,
+      onCompaction: async (r) => { events.push(r.summary); } });
+    expect(calls.at(-1)!.find(m => m.contextArchive)!.content).toContain("run_shell ok");
+    expect(events).toEqual([expect.objectContaining({ mode: "fallback" })]);
+  }
+});
+
+it("asks for no summary when nothing is compacted", async () => {
+  const s = await session(), { calls, provider } = summarizer();
+  const short: LlmMessage[] = [{ role: "user", content: "hi" }];
+  await completeWithContext(s, short, { ...options(), state: {}, provider });
+  expect(calls).toHaveLength(1);
+});
+
+it("on a hosted run, asks for the summary as the turn's own operation, and lets a pause or a budget stop travel", async () => {
+  const s = await session(), { calls, provider } = summarizer();
+  await completeWithContext(s, chatty(85), { ...options(24000), state: {}, provider, hosted: true, operationId: "run:llm:3" });
+  expect(provider.complete.mock.calls.map(c => (c[1] as { operationId?: string })?.operationId)).toEqual(["run:llm:3:summary", "run:llm:3"]);
+  expect(calls[1].find(m => m.contextArchive)!.content).toContain("orchid-731");
+  for (const stop of [Object.assign(new Error("waiting for funds"), { name: "RuntimePause" }), new BudgetExhaustedError("budget")]) {
+    const paused = { complete: vi.fn(async () => { throw stop; }) };
+    await expect(completeWithContext(await session(), chatty(85), { ...options(24000), state: {}, provider: paused, hosted: true, operationId: "run:llm:3" }))
+      .rejects.toBe(stop);
+    expect(paused.complete).toHaveBeenCalledTimes(1);
+  }
+});
+
+it("runs the real agent loop: a fact the summary kept is still in the request after the history that held it is gone", async () => {
+  const s = await session();
+  let turn = 0, summaries = 0;
+  const result = await runAgentTaskDetailed(s, "Read the logs one at a time, then tell me the code in log 1.", {
+    contextWindowTokens: 20000, maxTurns: 200, tools: ["run_shell"], provider: {
+      complete: async (messages) => {
+        if (messages.at(-1)?.content.startsWith("[Context compaction.")) {
+          summaries++;
+          return { content: "- [goal] read the logs, report log 1's code\n- [fact] log 1 code: heron-42\n- [open] read the rest", toolCalls: [] };
+        }
+        turn++;
+        if (!messages.some(m => m.contextArchive))
+          return { content: "", toolCalls: [{ id: `c${turn}`, name: "run_shell", arguments: { command: `echo 'log ${turn}${turn === 1 ? " code heron-42" : ""} ${"entry ".repeat(60)}'` } }] };
+        expect(messages.some(m => m.role === "tool" && m.content.includes("code heron-42"))).toBe(false);
+        expect(messages.find(m => m.contextArchive)?.content).toContain("log 1 code: heron-42");
+        return { content: "Log 1's code is heron-42.", toolCalls: [] };
+      }
+    } });
+  expect(summaries).toBe(1);
+  expect(result.outcome).toBe("completed");
+  expect(result.summary.final_message).toContain("heron-42");
+});
+
+it("when the newest result pushes the history past the window, summarises the longest cached prefix that ends on a whole exchange", async () => {
+  const s = await session(), messages = chatty(80);
+  messages.splice(-1, 0, { role: "assistant", content: "", toolCalls: [{ id: "big", name: "run_shell", arguments: {} }] },
+    { role: "tool", toolCallId: "big", content: "log line\n".repeat(2500) });
+  const before = structuredClone(messages);
+  const { provider, calls } = summarizer();
+  const events: unknown[] = [];
+  await completeWithContext(s, messages, { ...options(24000), state: {}, provider, onCompaction: async (r) => { events.push(r.summary); } });
+  const sent = calls[0].slice(0, -1);
+  expect(sent.length).toBeLessThan(before.length);
+  expect(sent).toEqual(before.slice(0, sent.length));
+  expect(before[sent.length].role).not.toBe("tool");
+  expect(events).toEqual([expect.objectContaining({ mode: "llm", prefixOf: { sent: sent.length, of: before.length } })]);
+  expect(calls[1].find(m => m.contextArchive)!.content).toContain("orchid-731");
 });
