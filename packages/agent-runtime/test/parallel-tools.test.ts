@@ -10,12 +10,11 @@ import { MachineWorker } from "../src/worker.js";
 import { parallelSafe, readOnlyShell } from "../src/parallel-tools.js";
 
 /**
- * Harness experiment w123: read-only calls of one reply run together, and
- * every other call is a barrier. The model reads every result in the order it
- * wrote the calls, with the flag on or off.
+ * w123: read-only calls of one reply run together, and every other call is a
+ * barrier. The model reads every result in the order it wrote the calls.
  */
 const roots: string[] = [];
-afterEach(async () => { vi.unstubAllEnvs(); for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }); });
+afterEach(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }); });
 async function session() {
   const dir = await mkdtemp(join(tmpdir(), "parallel-")); roots.push(dir);
   return createSession({ workspaceRoot: dir, budgetCents: 500, approvalMode: "auto" });
@@ -51,22 +50,13 @@ describe("parallel reads (w123)", () => {
         call("b", "inspect_paid_service", { url: "https://b.example/api" }),
         call("c", "inspect_paid_service", { url: "https://c.example/api" })))
       .mockResolvedValueOnce(done) };
-    const result = await runAgentTaskDetailed(await session(), "compare three image APIs", { provider, dynamicTools: paid.dynamicTools, knowledge: false, parallelTools: "on" });
+    const result = await runAgentTaskDetailed(await session(), "compare three image APIs", { provider, dynamicTools: paid.dynamicTools, knowledge: false });
 
     expect(result.outcome).toBe("completed");
     expect(paid.most()).toBe(3);
     expect(paid.log.map((entry) => entry.id).sort()).toEqual(["a", "b", "c"]);
     expect(readBack(provider.complete.mock.calls[1][0])).toEqual([
       "inspect_paid_service https://a.example/api", "inspect_paid_service https://b.example/api", "inspect_paid_service https://c.example/api"]);
-  });
-
-  it("runs the same reply one call at a time with the flag off", async () => {
-    const paid = gateway(5);
-    const provider = { complete: vi.fn()
-      .mockResolvedValueOnce(reply(call("a", "inspect_paid_service", { url: "https://a.example/api" }), call("b", "inspect_paid_service", { url: "https://b.example/api" })))
-      .mockResolvedValueOnce(done) };
-    await runAgentTaskDetailed(await session(), "compare two image APIs", { provider, dynamicTools: paid.dynamicTools, knowledge: false, parallelTools: "off" });
-    expect(paid.most()).toBe(1);
   });
 
   it("never runs a paid call beside anything: reads before it finish first, reads after it start after", async () => {
@@ -79,7 +69,7 @@ describe("parallel reads (w123)", () => {
         call("c", "inspect_paid_service", { url: "https://c.example/api" }),
         call("d", "inspect_paid_service", { url: "https://d.example/api" })))
       .mockResolvedValueOnce(done) };
-    await runAgentTaskDetailed(await session(), "buy one answer", { provider, dynamicTools: paid.dynamicTools, knowledge: false, parallelTools: "on" });
+    await runAgentTaskDetailed(await session(), "buy one answer", { provider, dynamicTools: paid.dynamicTools, knowledge: false });
 
     const at = (id: string) => paid.log.find((entry) => entry.id === id)!;
     expect(at("pay").start).toBeGreaterThanOrEqual(Math.max(at("a").end, at("b").end));
@@ -91,7 +81,7 @@ describe("parallel reads (w123)", () => {
     const paid = gateway(5);
     const find = (id: string) => call(id, "find_paid_service", { task: "image generation" });
     const provider = { complete: vi.fn().mockResolvedValueOnce(reply(find("a"), find("b"), find("c"))).mockResolvedValueOnce(done) };
-    await runAgentTaskDetailed(await session(), "find an image API", { provider, dynamicTools: paid.dynamicTools, knowledge: false, parallelTools: "on" });
+    await runAgentTaskDetailed(await session(), "find an image API", { provider, dynamicTools: paid.dynamicTools, knowledge: false });
 
     expect(paid.execute).toHaveBeenCalledTimes(2);
     const third = JSON.parse(provider.complete.mock.calls[1][0].filter((m: { role: string }) => m.role === "tool")[2].content);
@@ -114,7 +104,7 @@ describe("parallel reads (w123)", () => {
         call("r2", "read_file", { path: "artifacts/notes.md" }),
         call("s", "run_shell", { command: "wc -c artifacts/notes.md" })))
       .mockResolvedValueOnce(done) };
-    await runAgentTaskDetailed(await session(), "update the notes", { provider, toolExecutor, knowledge: false, parallelTools: "on" });
+    await runAgentTaskDetailed(await session(), "update the notes", { provider, toolExecutor, knowledge: false });
 
     expect(order.indexOf("start save_file artifacts/notes.md")).toBeGreaterThan(order.indexOf("end read_file artifacts/notes.md"));
     expect(order.indexOf("start read_file artifacts/notes.md", order.indexOf("end save_file artifacts/notes.md"))).toBeGreaterThan(0);
@@ -122,13 +112,15 @@ describe("parallel reads (w123)", () => {
     expect(order.indexOf("start run_shell wc -c artifacts/notes.md")).toBeLessThan(order.lastIndexOf("end read_file artifacts/notes.md"));
   });
 
-  it("tells the model only in hint mode", async () => {
+  it("tells the model which of its tools run together, and a chat-only model nothing", async () => {
     const provider = { complete: vi.fn().mockResolvedValue(done) };
-    await runAgentTaskDetailed(await session(), "hello", { provider, knowledge: false, parallelTools: "hint" });
-    await runAgentTaskDetailed(await session(), "hello", { provider, knowledge: false, parallelTools: "on" });
-    const [hinted, plain] = provider.complete.mock.calls.map(([messages]) => messages[0].content as string);
-    expect(hinted).toContain("run at the same time");
-    expect(plain).not.toContain("run at the same time");
+    const paid = gateway();
+    await runAgentTaskDetailed(await session(), "hello", { provider, dynamicTools: paid.dynamicTools, knowledge: false });
+    await runAgentTaskDetailed(await session(), "hello", { provider, knowledge: false, chatOnly: true });
+    const [tooled, chat] = provider.complete.mock.calls.map(([messages]) => messages[0].content as string);
+    expect(tooled).toContain("run at the same time");
+    expect(tooled).toContain("find_paid_service");
+    expect(chat).not.toContain("run at the same time");
   });
 });
 
@@ -137,7 +129,6 @@ const startCommand = (): Command => ({ protocolVersion: 1, id: "command-1", runI
     prompt: "Compare the two files", modelPolicy: {}, budget: { limit: "1000000" }, approvalMode: "auto" } });
 
 it("keys two parallel calls of one tool apart in the hosted worker, and traces their group", async () => {
-  vi.stubEnv("OPENCROWD_PARALLEL_TOOLS", "1");
   const home = await mkdtemp(join(tmpdir(), "parallel-worker-")); roots.push(home);
   const events: Event[] = [];
   let turn = 0, waiting = 0, release!: () => void;

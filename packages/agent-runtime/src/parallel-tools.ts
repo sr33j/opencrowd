@@ -1,10 +1,10 @@
 /**
- * Parallel tool calls (harness experiment w123, behind a flag).
+ * Parallel tool calls (w123).
  *
  * A model reply often holds several tool calls. The loop runs them in the
  * order the model wrote them, and keeps doing so: results, checkpoints,
  * strategy hints and the tool messages the model reads stay in that order.
- * With the flag on, a run of consecutive calls that only read is started
+ * A run of consecutive calls that only read is started
  * together, and the loop then awaits each one in turn. Any call that is not
  * on this list is a barrier: it starts only after every call before it
  * finished, and no call after it starts before it finishes. That keeps
@@ -29,13 +29,18 @@ const READ_ONLY_TOOLS = new Set([
 export const PARALLEL_TOOLS_MAX = 4;
 
 /**
- * The flag: OPENCROWD_PARALLEL_TOOLS=1 runs reads together; =hint also tells
- * the model, so it batches independent reads. Anything else leaves the loop
- * exactly as it was.
+ * The system prompt's line about it, naming only the tools this run has: the
+ * model batches independent reads only when it knows they run together. The
+ * vault sentence is there because, told so, GPT-6 Luna fetched free URLs
+ * through vault_request, which refuses them (w123 A/B).
  */
-export function parallelToolsMode(env: NodeJS.ProcessEnv = process.env): "off" | "on" | "hint" {
-  const value = env.OPENCROWD_PARALLEL_TOOLS?.trim();
-  return value === "1" || value === "on" ? "on" : value === "hint" ? "hint" : "off";
+export function parallelToolsPrompt(available: ReadonlySet<string>): string | undefined {
+  const reads = ["find_paid_service", "inspect_paid_service", "browse_services", "read_file"].filter((name) => available.has(name));
+  if (available.has("read_service")) reads.push("a GET read_service");
+  if (available.has("run_shell")) reads.push("a run_shell command that only reads, such as one `curl -s <url>` per free URL");
+  if (reads.length < 2) return undefined;
+  return `Calls that only read (${reads.join(", ")}) run at the same time when one reply holds several. When you need several independent reads, put them in one reply. Any other call runs alone, in the order you wrote it.`
+    + (available.has("vault_request") ? " vault_request is only for a request that needs a vault secret, never for fetching free URLs." : "");
 }
 
 /** Whether this call may run beside its neighbours in the reply. */

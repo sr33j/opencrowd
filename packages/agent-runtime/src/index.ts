@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { loadKnowledgeTree, renderCapabilityIndex, type KnowledgeOptions } from "./knowledge.js";
 import { checkAction, isStandingRuleRefusal, newPolicyState } from "./action-policy.js";
 import { DISCOVERY_REPEATS_MAX, discoveryKey, earlyStopNudge, emptyServiceLog, recordServiceResult, repeatedDiscovery, type ServiceLog } from "./service-strategy.js";
-import { PARALLEL_TOOLS_MAX, parallelSafe, parallelToolsMode, type ParallelSlot } from "./parallel-tools.js";
+import { PARALLEL_TOOLS_MAX, parallelSafe, parallelToolsPrompt, type ParallelSlot } from "./parallel-tools.js";
 import {
   atomicWrite,
   conversationPath,
@@ -765,11 +765,6 @@ export interface AgentRunOptions {
    * dynamic tool surface). Absent means paid services are unavailable.
    */
   dynamicTools?: DynamicToolsOption;
-  /**
-   * Run consecutive read-only calls of one reply together (parallel-tools.ts).
-   * "hint" also tells the model so. Defaults to OPENCROWD_PARALLEL_TOOLS; off when unset.
-   */
-  parallelTools?: "off" | "on" | "hint";
   /** Live-fact prompt sections (balances, vendor instructions, house rules). */
   promptSections?: string[];
   /**
@@ -1065,10 +1060,10 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
       "Resource recovery: before installing large ML dependencies, check available memory, disk space and Python version. A killed install or OOM is a failed approach, not the end of the task. Inspect partial installs and preserve user files, then choose a materially lighter backend or an external service within the user's budget. Verify package metadata: optional extras add dependencies and do not remove default ones; never invent an extra such as basic-pitch[tflite]. For audio-to-MIDI, prefer a verified TFLite or ONNX inference setup in an isolated venv over full TensorFlow; test on a short audio segment before processing the whole file. If no viable path remains, report the concrete blocker and useful artifacts. Do not claim success until the output has been checked."
     );
   }
-  const parallelTools = options.chatOnly ? "off" : options.parallelTools ?? parallelToolsMode();
-  if (parallelTools === "hint") systemPromptParts.push(
-    "Calls that only read (find_paid_service, inspect_paid_service, browse_services, read_file, a GET read_service, and a run_shell command that only reads, such as one `curl -s <url>` per free URL) run at the same time when one reply holds several. When you need several independent reads, put them in one reply. Any other call runs alone, in the order you wrote it. vault_request is only for a request that needs a vault secret, never for fetching free URLs."
-  );
+  // Reads of one reply run together (parallel-tools.ts); the model is told, so it batches them.
+  const parallelLine = options.chatOnly ? undefined
+    : parallelToolsPrompt(new Set<string>([...enabledTools, ...dynamicDefinitions.map((tool) => tool.name)]));
+  if (parallelLine) systemPromptParts.push(parallelLine);
   systemPromptParts.push("End by calling complete_session with a concise final message.");
   if (options.subagent) {
     systemPromptParts.push(
@@ -1459,7 +1454,7 @@ async function runAgentTaskLoop(session: SessionState, task: string, options: Ag
     };
     for (const [callIndex, call] of response.toolCalls.entries()) {
       options.signal?.throwIfAborted();
-      if (parallelTools !== "off" && callIndex > groupEnd) groupEnd = startGroup(callIndex);
+      if (callIndex > groupEnd) groupEnd = startGroup(callIndex);
       options.onProgress?.({
         type: "calling_tool",
         message: `Tool call: ${summarizeToolCall(call)}`,
