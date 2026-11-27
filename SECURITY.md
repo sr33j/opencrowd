@@ -72,10 +72,8 @@ The agent has a gated shell tool (enabled by default in the interactive
 CLI). Commands run with your user's privileges in the workspace. Disable it
 with `--disable-shell` or `OPENCROWD_SHELL_ENABLED=0`.
 
-By default nothing confines a command beyond that: it can read
-`~/.agentcash/wallet.json` like any program you run. With
-`OPENCROWD_LOCAL_SANDBOX=1` every `run_shell` command runs in a sandbox
-(bubblewrap on Linux, `sandbox-exec` on macOS) that
+Every `run_shell` command runs in a sandbox (bubblewrap on Linux,
+`sandbox-exec` on macOS) that
 
 - writes only inside the workspace and a private temporary directory, with
   the session's budget, ledger and conversation read-only, and the
@@ -92,11 +90,15 @@ By default nothing confines a command beyond that: it can read
   host not on the list. CONNECT is passed through untouched, so TLS is
   end to end.
 
-If the sandbox is asked for and cannot run (bubblewrap is missing, or the
-system does not allow unprivileged namespaces), the command is refused, never
-run unconfined. It costs about 3 ms a command (`open`, `off`) and 50 ms a
-command plus about 90 ms an HTTPS request with an allowlist. The macOS
-profile has not yet been run on a Mac. A hosted CrowdCode agent's commands
+Where the sandbox cannot run (bubblewrap is not installed, or the system
+does not allow unprivileged namespaces), a command runs unconfined as before,
+the session ledger records why, and `opencrowd doctor` reports it: install
+bubblewrap to get it. A restricted network is never opened that way: with
+`off` or an allowlist, the command is refused instead. It costs about 3 ms a
+command, and with an allowlist about 50 ms a command plus 90 ms an HTTPS
+request. On macOS the real profile is tried once before it is used, so a
+profile the system rejects means unconfined, not a broken shell.
+A hosted CrowdCode agent's commands
 already run as a separate user (`OPENCROWD_SHELL_SANDBOX`), which takes
 precedence.
 

@@ -61,15 +61,21 @@ export async function runShell(
   if (resolvedCwd !== root && !resolvedCwd.startsWith(`${root}/`)) {
     throw new Error("shell cwd must stay inside the workspace");
   }
-  // The local CLI's sandbox, when asked for (local-sandbox.ts). A hosted
-  // executor's own sandbox program takes precedence: it already confines.
-  const settings = shellSandbox() ? undefined : localSandboxSettings();
-  let confined: SandboxedCommand | undefined;
-  if (settings) {
-    const unavailable = await sandboxUnavailable();
-    if (unavailable) throw new Error(`OPENCROWD_LOCAL_SANDBOX is on but ${unavailable}. The command was not run.`);
-    confined = await sandboxCommand({ command, cwd: resolvedCwd, workspaceRoot: root, env: options.env ?? minimalEnv(), settings,
-      readOnly: [...SESSION_BOOKS.map((name) => join(state.sessionDir, name)), ...GIT_EXECUTABLES.map((name) => join(root, ".git", name))] });
+  // The local CLI's sandbox (local-sandbox.ts). A hosted executor's own
+  // sandbox program takes precedence: it already confines.
+  let confined: SandboxedCommand | undefined, sandboxNote: string;
+  if (shellSandbox()) sandboxNote = "host";
+  else {
+    const settings = localSandboxSettings();
+    const unavailable = await sandboxUnavailable(settings);
+    if (unavailable && settings.network.mode !== "open")
+      throw new Error(`The shell network is restricted (OPENCROWD_SHELL_NETWORK) but the sandbox that enforces it cannot run: ${unavailable}. The command was not run.`);
+    if (unavailable) sandboxNote = `unavailable: ${unavailable}`;
+    else {
+      confined = await sandboxCommand({ command, cwd: resolvedCwd, workspaceRoot: root, env: options.env ?? minimalEnv(), settings,
+        readOnly: [...SESSION_BOOKS.map((name) => join(state.sessionDir, name)), ...GIT_EXECUTABLES.map((name) => join(root, ".git", name))] });
+      sandboxNote = `${confined.program === "bwrap" ? "bubblewrap" : "sandbox-exec"}, network ${settings.network.mode}`;
+    }
   }
   let result: ShellResult;
   try {
@@ -82,7 +88,7 @@ export async function runShell(
     type: "shell",
     status: result.exit_code === 0 ? "ok" : "failed",
     approval_mode: state.approvalMode,
-    notes: JSON.stringify({ command, cwd: resolvedCwd, exit_code: result.exit_code, timed_out: result.timed_out })
+    notes: JSON.stringify({ command, cwd: resolvedCwd, exit_code: result.exit_code, timed_out: result.timed_out, sandbox: sandboxNote })
   });
   return result;
 }

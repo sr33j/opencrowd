@@ -13,8 +13,7 @@ import { join, resolve } from "node:path";
  * namespace (`OPENCROWD_SHELL_SANDBOX`). A local one runs as the owner, with
  * everything the owner can reach: the AgentCash wallet key in
  * `~/.agentcash/wallet.json` is one `cat` away from a model that read the
- * wrong web page. Opted into with `OPENCROWD_LOCAL_SANDBOX=1`, each command
- * runs instead:
+ * wrong web page. So each command runs instead:
  *
  * - **writing** only inside the workspace and a private temporary directory,
  *   with the session's own books (its budget, ledger and conversation) read-only;
@@ -28,8 +27,11 @@ import { join, resolve } from "node:path";
  *   host not on the list. A program that ignores the proxy variables gets no
  *   network at all, and DNS goes nowhere but through the proxy.
  *
- * Linux uses bubblewrap (`bwrap`), macOS `sandbox-exec`. When the sandbox is
- * asked for and cannot run, the command is refused, never run unconfined.
+ * Linux uses bubblewrap (`bwrap`), macOS `sandbox-exec`. Where neither can
+ * run (bubblewrap is not installed, or the system forbids unprivileged
+ * namespaces) a command runs as it always did, and the ledger and
+ * `opencrowd doctor` say why. A network the owner restricted is never
+ * opened that way: with `off` or an allowlist, the command is refused.
  */
 export type ShellNetwork = { mode: "open" } | { mode: "off" } | { mode: "allow"; hosts: string[] };
 export interface LocalSandboxSettings { network: ShellNetwork }
@@ -40,9 +42,7 @@ export const CREDENTIAL_PATHS = [
   ".config/opencrowd", ".config/gh", ".config/gcloud", ".config/op", ".password-store", "Library/Keychains"
 ] as const;
 
-export function localSandboxSettings(env: NodeJS.ProcessEnv = process.env): LocalSandboxSettings | undefined {
-  const flag = env.OPENCROWD_LOCAL_SANDBOX?.trim().toLowerCase();
-  if (!flag || ["0", "off", "false", "no"].includes(flag)) return undefined;
+export function localSandboxSettings(env: NodeJS.ProcessEnv = process.env): LocalSandboxSettings {
   return { network: parseShellNetwork(env.OPENCROWD_SHELL_NETWORK) };
 }
 
@@ -92,7 +92,7 @@ export async function sandboxCommand(input: {
       return { program: "/usr/bin/sandbox-exec", args: ["-p", profile, "/bin/sh", "-c", input.command], env: { ...input.env, ...proxyEnv },
         close: async () => { await proxy?.close(); } };
     }
-    throw new Error(`OPENCROWD_LOCAL_SANDBOX is not supported on ${platform}`);
+    throw new Error(`the shell sandbox is not supported on ${platform}`);
   } catch (error) {
     await proxy?.close();
     throw error;
@@ -194,22 +194,31 @@ async function startProxy(hosts: string[], unixSocket: boolean): Promise<Proxy> 
 }
 
 /**
- * Whether the sandbox can run here, checked once per process: bubblewrap must
- * be installed and allowed to create namespaces (and mount its own /proc).
- * The reason it cannot is what the refusal says.
+ * Whether the sandbox can run here, checked once per process and network
+ * mode with the same kind of invocation a command gets: bubblewrap with its
+ * own /proc (and network namespace), or the real macOS profile. The reason it
+ * cannot is what the ledger and `opencrowd doctor` report.
  */
-let probed: Promise<string | undefined> | undefined;
-export function sandboxUnavailable(platform: NodeJS.Platform = process.platform): Promise<string | undefined> {
-  probed ??= new Promise((done) => {
-    const [program, args] = platform === "linux"
-      ? ["bwrap", ["--die-with-parent", "--unshare-pid", "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "/bin/true"]]
-      : platform === "darwin" ? ["/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]] : ["", []];
-    if (!program) { done(`not supported on ${platform}`); return; }
-    let stderr = "";
-    const child = spawn(program, args as string[], { stdio: ["ignore", "ignore", "pipe"] });
-    child.stderr.on("data", (chunk) => { stderr += String(chunk); });
-    child.on("error", (error) => done(`${program} is not available (${error.message})${platform === "linux" ? "; install bubblewrap" : ""}`));
-    child.on("exit", (code) => done(code === 0 ? undefined : `${program} cannot create a sandbox here: ${stderr.trim().slice(0, 300) || `exit ${code}`}`));
-  });
-  return probed;
+const probes = new Map<string, Promise<string | undefined>>();
+export function sandboxUnavailable(settings: LocalSandboxSettings = { network: { mode: "open" } }, platform: NodeJS.Platform = process.platform): Promise<string | undefined> {
+  const key = `${platform}:${settings.network.mode}`;
+  let probe = probes.get(key);
+  if (!probe) {
+    probe = new Promise((done) => {
+      const isolated = settings.network.mode !== "open";
+      const [program, args] = platform === "linux"
+        ? ["bwrap", ["--die-with-parent", "--unshare-pid", ...(isolated ? ["--unshare-net"] : []), "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/run", "/bin/true"]]
+        : platform === "darwin"
+          ? ["/usr/bin/sandbox-exec", ["-p", darwinProfile({ workspace: tmpdir(), home: homedir(), network: settings.network, proxyPort: 3128, readOnly: [] }), "/usr/bin/true"]]
+          : ["", []];
+      if (!program) { done(`not supported on ${platform}`); return; }
+      let stderr = "";
+      const child = spawn(program, args as string[], { stdio: ["ignore", "ignore", "pipe"] });
+      child.stderr.on("data", (chunk) => { stderr += String(chunk); });
+      child.on("error", (error) => done(`${program} is not available (${error.message})${platform === "linux" ? "; install bubblewrap" : ""}`));
+      child.on("exit", (code) => done(code === 0 ? undefined : `${program} cannot create a sandbox here: ${stderr.trim().slice(0, 300) || `exit ${code}`}`));
+    });
+    probes.set(key, probe);
+  }
+  return probe;
 }
